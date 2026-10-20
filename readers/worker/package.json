@@ -1,0 +1,12 @@
+{
+  "name": "folder-sync-read",
+  "private": true,
+  "type": "module",
+  "description": "Reference reader for docs/CONTRACT.md from a Cloudflare Worker's R2 binding.",
+  "scripts": {
+    "test": "node --test test/reader.test.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}
