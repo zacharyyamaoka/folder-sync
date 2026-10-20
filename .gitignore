@@ -1,0 +1,10 @@
+# Dev tools (pinned rclone etc.), fetched by scripts/dev-tools
+/.tools/
+# Build outputs
+/dist/
+/bin/
+# Report media (videos, captures); the builder lives in docs/report/
+/reports/media/
+# Python / Node leftovers
+__pycache__/
+node_modules/

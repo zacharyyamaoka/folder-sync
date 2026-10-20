@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folder-sync.invalid/schema/folder-sync-manifest-1.json",
+  "title": "folder-sync manifest, version 1",
+  "description": "<project>/hosts/<host-id>/manifest.json: every file one machine publishes. See docs/CONTRACT.md.",
+  "type": "object",
+  "required": ["schema", "project", "host_id", "host_name", "seq", "generated_at", "files"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "folder-sync-manifest/1" },
+    "project": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$" },
+    "host_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "host_name": { "type": "string" },
+    "seq": { "type": "integer", "minimum": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "files": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": ["path", "size", "mtime", "sha256", "written_at"],
+      "additionalProperties": true,
+      "properties": {
+        "path": {
+          "description": "Slash-separated, relative to hosts/<host-id>/. Never absolute, never a '.' or '..' segment, never a backslash.",
+          "type": "string",
+          "minLength": 1,
+          "not": {
+            "anyOf": [
+              { "pattern": "^/" },
+              { "pattern": "\\\\" },
+              { "pattern": "(^|/)\\.{1,2}(/|$)" },
+              { "pattern": "//" },
+              { "pattern": "/$" },
+              { "pattern": "^manifest\\.json$" }
+            ]
+          }
+        },
+        "size": { "type": "integer", "minimum": 0 },
+        "mtime": { "type": "string", "format": "date-time" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "written_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

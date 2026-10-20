@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Fetch the pinned rclone into <repo>/.tools/ for development and the end-to-end test.
+# The pin and checksum match internal/rclonebin (a Go test keeps them equal).
+set -euo pipefail
+RCLONE_VERSION="v1.75.2"
+RCLONE_SHA256="349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702"  # rclone-v1.75.2-linux-amd64.zip
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tools="$repo/.tools"
+if [[ "$(uname -s)-$(uname -m)" != "Linux-x86_64" ]]; then
+  echo "dev-tools: only linux-amd64 is pinned here; use 'folder-sync init' for other platforms" >&2
+  exit 1
+fi
+if [[ -x "$tools/rclone" ]] && "$tools/rclone" version | head -1 | grep -q "rclone $RCLONE_VERSION"; then
+  echo "dev-tools: $tools/rclone is already $RCLONE_VERSION"
+  exit 0
+fi
+mkdir -p "$tools"
+zip="$tools/rclone-$RCLONE_VERSION-linux-amd64.zip"
+curl -fsSL "https://downloads.rclone.org/$RCLONE_VERSION/rclone-$RCLONE_VERSION-linux-amd64.zip" -o "$zip"
+echo "$RCLONE_SHA256  $zip" | sha256sum -c -
+python3 - "$zip" "$tools/rclone" <<'PY'
+import sys, zipfile, os
+zip_path, out = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(zip_path) as archive:
+    member = next(name for name in archive.namelist() if name.endswith("/rclone"))
+    with archive.open(member) as src, open(out + ".tmp", "wb") as dst:
+        dst.write(src.read())
+os.chmod(out + ".tmp", 0o755)
+os.replace(out + ".tmp", out)
+PY
+rm -f "$zip"
+"$tools/rclone" version | head -1
