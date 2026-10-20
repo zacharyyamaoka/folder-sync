@@ -1,7 +1,8 @@
 # 0001 · Wrap, don't adopt or build: rclone moves files, one R2 bucket is the always-on copy, a stock viewer shows it
 
 - **Date:** 2026-10-20
-- **Status:** proposed
+- **Status:** accepted 2026-10-20. Zach: "BearDrive is awesome — that is exactly what we want. It's basically like a Google Drive, but we want to expose it so it's easy to integrate into your apps, for file-first software: the folder is the database... the stock web viewer is great, just so you have the backdoor, but eventually you'll use it in your own app... please proceed and build this out."
+- **Reference product:** BearDrive ("Google Drive for AI agents"). It has no Windows build, and its maintainers declined a port. Our difference is that apps are first-class readers: the bucket layout and the manifests are a public contract, so any app can read a project's files. The stock viewer is only the backdoor.
 - **Source:** Zach, Oct 20: "Let's start this as a separate project, in the spirit of Unix … We shouldn't reinvent the wheel if we don't need to." The README's promises are: local files are the truth; sync across Linux, Windows and macOS with an install an agent can finish; readable online; a drop-in per project.
 
 ## Decision
