@@ -134,7 +134,9 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 	okPaths, skipped := names.Lint(paths, reservedPaths())
 	result.Skipped = append(result.Skipped, skipped...)
 	for _, s := range skipped {
-		p.say("skipped %s: %s", s.Path, s.Reason)
+		if !p.reportedSkips[s.Path] { // `status` always lists them; the round says each once
+			p.say("skipped %s: %s", s.Path, s.Reason)
+		}
 	}
 
 	prev, err := p.ownManifest()

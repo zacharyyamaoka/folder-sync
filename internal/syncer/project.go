@@ -60,6 +60,9 @@ type Project struct {
 	Log      io.Writer // round log (~/.folder-sync/logs/<key>.log)
 	Out      io.Writer // what the user sees
 	Now      func() time.Time
+
+	// reportedSkips are the names last round already reported, so --watch says each once.
+	reportedSkips map[string]bool
 }
 
 // Open loads everything a round needs for the folder.

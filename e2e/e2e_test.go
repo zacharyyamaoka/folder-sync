@@ -449,6 +449,9 @@ func TestTwoMachines(t *testing.T) {
 		os.Remove(filepath.Join(a.folder, "data.json"))
 		out := w.must(a, "sync", "--once")
 		w.record("A: overwrite + delete", "A", "folder-sync sync --once", out, w.ops.take())
+		if strings.Contains(out, "skipped") {
+			t.Errorf("a round repeats skipped names the last round already reported:\n%s", out)
+		}
 		trash := w.objects("_trash/" + project + "/" + idA)
 		var old, deleted string
 		for _, key := range trash {

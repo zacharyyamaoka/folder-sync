@@ -92,6 +92,10 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 	last.Project, last.Bucket, last.Folder = p.Config.Project, p.Config.Bucket, p.Folder
 	last.HostID, last.HostName = p.Host.ID, p.Host.Name
 	last.RoundStarted = started.UTC().Format(time.RFC3339Nano)
+	p.reportedSkips = map[string]bool{}
+	for _, s := range last.Skipped {
+		p.reportedSkips[s.Path] = true
+	}
 
 	var result Result
 	runErr := func() error {

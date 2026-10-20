@@ -408,7 +408,7 @@ func printResult(out io.Writer, p *syncer.Project, r syncer.Result) {
 		fmt.Fprintf(out, "%s pull: %s %s (%s): %s → %s/%s/\n", stamp, short(peer.ID), peer.Name, plural(peer.Files, "file"), state, p.Config.PeersDir, short(peer.ID))
 	}
 	if len(r.Peers) == 0 {
-		fmt.Fprintf(out, "%s pull: no peers yet\n", stamp)
+		fmt.Fprintf(out, "%s pull: no peers known yet (new machines are looked for every 5 min)\n", stamp)
 	}
 }
 

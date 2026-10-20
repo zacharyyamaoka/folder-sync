@@ -125,6 +125,7 @@ func Lint(paths []string, reserved map[string]string) (ok []string, skipped []Sk
 	}
 	for _, p := range paths {
 		if why, isBad := bad[p]; isBad {
+			why = strings.TrimPrefix(why, fmt.Sprintf("%q: ", p)) // the path is already in Path
 			skipped = append(skipped, Skipped{Path: p, Reason: why})
 		} else {
 			ok = append(ok, p)
