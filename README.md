@@ -22,6 +22,6 @@ folder-sync publish   # make it readable online
 
 Started 2026-10-20 as a separate project, split out of Vibe Tracks (Zach: "clearly a separate functionality that I can get right once and then reuse").
 
-Still pending is the adopt / wrap / build decision. It waits on the research note "Local-Online File Sync — What Exists and What to Build (2026-10-20)" in the vault. The first decision record (`docs/peps/0001`) will follow from it.
+The research note "Local-Online File Sync — What Exists and What to Build (2026-10-20)" is in the vault. Its proposal is [`docs/peps/0001`](docs/peps/0001-wrap-rclone-and-r2.md), still *proposed*: wrap rclone (it moves the files) with one Cloudflare R2 bucket as the always-on online copy and a stock viewer, all inside a thin Go command line. Nothing is built yet. Three hands-on checks come first: do mtimes survive R2, do conditional writes work through rclone, and does a Task Scheduler run work on the Windows box.
 
 The name is literal on purpose, like `stable_preview_switcher`: a plain repo name, not a brand. An unrelated Android app is also called FolderSync (foldersync.io).
