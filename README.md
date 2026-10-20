@@ -13,6 +13,77 @@ folder-sync sync      # once, or as a background service
 folder-sync publish   # make it readable online
 ```
 
+The design is [`docs/peps/0001`](docs/peps/0001-wrap-rclone-and-r2.md) (accepted): rclone moves the files, one Cloudflare R2 bucket is the always-on copy, R2-Explorer is the web backdoor, and a thin Go binary owns the rest. Apps read projects through [the bucket contract](docs/CONTRACT.md): "the folder is the database".
+
+## Install (v0: from source)
+
+```bash
+~/.local/go/bin/go build -o ~/.folder-sync/bin/folder-sync ./cmd/folder-sync
+```
+
+On first `init`, folder-sync downloads the pinned rclone v1.75.2 from downloads.rclone.org into `~/.folder-sync/bin/`, checks its SHA-256 against the pin compiled into the binary, and refuses on a mismatch. Everything it keeps lives in `~/.folder-sync/`, never in AppData. Cross-compile for Windows with `GOOS=windows GOARCH=amd64 go build -o dist/folder-sync.exe ./cmd/folder-sync`.
+
+## Quick start
+
+Give it a bucket-scoped R2 key, through the environment (cloud agents) or once with `folder-sync login` (stored in `~/.folder-sync/credentials.json`, mode 0600):
+
+```bash
+export FOLDER_SYNC_ACCOUNT_ID=… FOLDER_SYNC_ACCESS_KEY_ID=… FOLDER_SYNC_SECRET_ACCESS_KEY=…
+```
+
+Then, in the folder:
+
+```bash
+folder-sync init --project notes --bucket folder-sync
+folder-sync sync --watch
+```
+
+Each machine publishes its own files to `<project>/hosts/<host-id>/` and receives its peers' files, read-only, in `<folder>/hosts/<host-id>/`. `folder-sync status` shows the last push, pull and clean run, peers, skipped names and conflicts. `folder-sync sync --install-service` writes a systemd user unit, a Task Scheduler task or a launchd agent and prints the one command that enables it. `folder-sync publish --viewer` writes the R2-Explorer Worker config (read-only, behind Cloudflare Access, `workers_dev` and previews off) and prints its deploy command.
+
+### Try it with no cloud account
+
+```bash
+/home/bam/folder-sync/scripts/dev-tools
+PATH=$HOME/.local/go/bin:$PATH go test ./...
+```
+
+The end-to-end test (`e2e/`) runs two simulated machines (two HOME dirs, two folders) against `rclone serve s3` on 127.0.0.1:4801 with throwaway keys, through a counting proxy on :4802.
+
+## What is real and what is pending
+
+| | State |
+|---|---|
+| `init`, `login`, `sync --once`, `sync --watch`, `status`, `publish` | Built, tested end to end against a local S3 stand-in |
+| Push from the manifest diff, pull by conditional GET, `_trash/` on overwrite and delete, `max_delete`, empty-folder guard | Built and tested |
+| Ignore rules (gitignore syntax → rclone filters) | Built; tested against `git` itself as the oracle |
+| Windows paths, reserved names, case twins, nothing in AppData | Unit-tested on Linux; the Windows binary cross-compiles. **Not yet run on Windows** |
+| `sync --install-service` | Writes the unit / task XML / plist and prints the command; never registers anything |
+| `publish --viewer` | Writes the R2-Explorer config and prints the deploy command; never deploys |
+| Two-way `shared/` folders (bisync under a lease), short-lived agent credentials | v1. v0 refuses a `shared` mode with a clear error |
+| **Real R2** | **Pending Zach**: `scripts/check-r2` (mtime round trip, conditional writes through rclone). Against the stand-in, mtimes pass and conditional writes fail, because the stand-in ignores those headers |
+| **Task Scheduler run on the Windows box** | **Pending Zach**: `scripts\check-windows-task.cmd` |
+| Lifecycle rule on `_trash/` (30 days), bucket lock, budget alert | Pending Zach, in the R2 dashboard |
+
+### The real-R2 check (Zach)
+
+1. In the Cloudflare dashboard → R2 → Create bucket `folder-sync` (location: automatic). Leave public access off: no r2.dev URL, no custom domain.
+2. R2 → Manage API tokens → Create API token: permission "Object Read & Write", applied to the `folder-sync` bucket only. Copy the access key id and secret (shown once) and the account id.
+3. Run:
+
+   ```bash
+   export FOLDER_SYNC_ACCOUNT_ID=<account id> FOLDER_SYNC_ACCESS_KEY_ID=<key id> FOLDER_SYNC_SECRET_ACCESS_KEY=<secret> FOLDER_SYNC_CHECK_BUCKET=folder-sync
+   /home/bam/folder-sync/scripts/check-r2
+   ```
+
+   It writes and then deletes two objects under `_checks/<stamp>/`. All five lines should say PASS.
+4. While there: R2 → the bucket → Settings → Object lifecycle rules → delete objects with prefix `_trash/` after 30 days; Bucket locks → prefix `_trash/`, 30 days; and a budget alert at a few dollars a month.
+
+### The Windows check (Zach, on the Windows box)
+
+1. Build on Linux: `GOOS=windows GOARCH=amd64 ~/.local/go/bin/go build -o dist/folder-sync.exe ./cmd/folder-sync`, and copy it to `C:\Users\BAM\.folder-sync\bin\folder-sync.exe`.
+2. In `cmd.exe` (not PowerShell: AllSigned), with the key set via `set FOLDER_SYNC_…=…`: `folder-sync.exe login`, then `folder-sync.exe init --project wincheck --bucket folder-sync --dir C:\Users\BAM\wincheck`. If Defender or Smart App Control blocks rclone, init says so and stops; adding an exclusion is your call.
+3. Run `scripts\check-windows-task.cmd C:\Users\BAM\wincheck`. It registers a one-off task, runs one round from Task Scheduler, checks the log in `%USERPROFILE%\.folder-sync\logs` and that nothing appeared under AppData, and deletes the task.
+
 ## What it does not do (in the spirit of Unix)
 
 - It does not understand what's in the files. Apps like Vibe Tracks do that.
@@ -20,8 +91,6 @@ folder-sync publish   # make it readable online
 
 ## Status
 
-Started 2026-10-20 as a separate project, split out of Vibe Tracks (Zach: "clearly a separate functionality that I can get right once and then reuse").
-
-The research note "Local-Online File Sync — What Exists and What to Build (2026-10-20)" is in the vault. Its proposal is [`docs/peps/0001`](docs/peps/0001-wrap-rclone-and-r2.md), still *proposed*: wrap rclone (it moves the files) with one Cloudflare R2 bucket as the always-on online copy and a stock viewer, all inside a thin Go command line. Nothing is built yet. Three hands-on checks come first: do mtimes survive R2, do conditional writes work through rclone, and does a Task Scheduler run work on the Windows box.
+Started 2026-10-20 as a separate project, split out of Vibe Tracks (Zach: "clearly a separate functionality that I can get right once and then reuse"). PEP 0001 was accepted the same day, with BearDrive as the reference product; v0 is built on branch `claude/folder-sync-v0`.
 
 The name is literal on purpose, like `stable_preview_switcher`: a plain repo name, not a brand. An unrelated Android app is also called FolderSync (foldersync.io).

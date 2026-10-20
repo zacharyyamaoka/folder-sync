@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>folder-sync demo player</title>
+<link rel="stylesheet" href="xterm.css">
+<style>
+  /* Replays docs/report/record_demo.py's cast: two machines side by side. */
+  html, body { margin: 0; height: 100%; background: #0d1117; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .stage { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 14px; height: calc(100% - 28px); box-sizing: border-box; }
+  .pane { display: flex; flex-direction: column; border: 1px solid #30363d; border-radius: 10px; overflow: hidden; background: #010409; }
+  .bar { display: flex; align-items: center; gap: 8px; padding: 7px 12px; background: #161b22; color: #c9d1d9; font-size: 13px; border-bottom: 1px solid #30363d; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .bar .name { font-weight: 600; }
+  .bar .a { color: #39c5cf; } .bar .b { color: #d2a8ff; }
+  .term { flex: 1; padding: 6px 8px; }
+  .caption { position: fixed; left: 0; right: 0; bottom: 0; height: 28px; line-height: 28px; text-align: center; color: #8b949e; font-size: 12px; background: #0d1117; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="pane"><div class="bar"><span class="dot" style="background:#39c5cf"></span><span class="name a" id="title-A"></span></div><div class="term" id="term-A"></div></div>
+  <div class="pane"><div class="bar"><span class="dot" style="background:#d2a8ff"></span><span class="name b" id="title-B"></span></div><div class="term" id="term-B"></div></div>
+</div>
+<div class="caption">real commands, real output · bucket: local rclone serve s3 stand-in on 127.0.0.1:4801 (not R2)</div>
+<script src="xterm.js"></script>
+<script src="cast.js"></script>
+<script>
+  const terms = {};
+  for (const pane of ["A", "B"]) {
+    document.getElementById("title-" + pane).textContent = CAST.titles[pane];
+    const term = new Terminal({
+      fontFamily: "DejaVu Sans Mono, Menlo, monospace", fontSize: 13, lineHeight: 1.15,
+      cols: 76, rows: 30, convertEol: false, cursorBlink: false, scrollback: 500,
+      theme: { background: "#010409", foreground: "#c9d1d9", cursor: "#c9d1d9" },
+    });
+    term.open(document.getElementById("term-" + pane));
+    terms[pane] = term;
+  }
+  window.PLAYER_READY = true;
+  window.play = () => {
+    const start = performance.now();
+    let next = 0;
+    const events = CAST.events;
+    function tick() {
+      const now = (performance.now() - start) / 1000;
+      while (next < events.length && events[next][0] <= now) {
+        const [, pane, text] = events[next++];
+        terms[pane].write(text);
+      }
+      if (now >= CAST.duration) { window.PLAYER_DONE = true; return; }
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  };
+</script>
+</body>
+</html>
