@@ -1,0 +1,768 @@
+// Package e2e runs two simulated machines (two HOME dirs, two folders) against a
+// local S3-compatible stand-in: `rclone serve s3` on 127.0.0.1:4801 over a temp
+// dir, with throwaway keys generated here. A counting proxy on 127.0.0.1:4802
+// sits between folder-sync and the stand-in, so every bucket operation is
+// counted by something folder-sync does not control.
+//
+// Needs the pinned rclone in .tools/ (scripts/dev-tools), python3 and node ≥ 22.18.
+// Set FOLDER_SYNC_E2E_ARTIFACTS=<dir> to keep a JSON transcript for the report.
+package e2e
+
+import (
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+)
+
+const (
+	standInAddr = "127.0.0.1:4801"
+	proxyAddr   = "127.0.0.1:4802"
+	bucket      = "fs-test"
+	project     = "demo"
+)
+
+var repo = func() string {
+	_, here, _, _ := runtime.Caller(0)
+	return filepath.Dir(filepath.Dir(here))
+}()
+
+// --- the counting proxy -------------------------------------------------------------
+
+type op struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	Query  string `json:"query,omitempty"`
+	INM    string `json:"if_none_match,omitempty"`
+	Copy   string `json:"copy_source,omitempty"`
+	Status int    `json:"status"`
+}
+
+func (o op) kind() string {
+	key := strings.TrimPrefix(strings.TrimPrefix(o.Path, "/"+bucket), "/")
+	switch {
+	case o.Method == http.MethodGet && key == "":
+		return "LIST"
+	case o.Method == http.MethodPut && o.Copy != "":
+		return "COPY"
+	default:
+		return o.Method
+	}
+}
+
+type opLog struct {
+	mu  sync.Mutex
+	ops []op
+}
+
+func (l *opLog) take() []op {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := l.ops
+	l.ops = nil
+	return out
+}
+
+func counts(ops []op) map[string]int {
+	c := map[string]int{}
+	for _, o := range ops {
+		c[o.kind()]++
+	}
+	return c
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func startProxy(t *testing.T, log *opLog) {
+	target, _ := url.Parse("http://" + standInAddr)
+	proxy := httputil.NewSingleHostReverseProxy(target) // keeps the client's Host header: SigV4 still verifies
+	listener, err := net.Listen("tcp", proxyAddr)
+	if err != nil {
+		t.Fatalf("port 4802 is busy (%v): stop whatever holds it", err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: 200}
+		proxy.ServeHTTP(rec, r)
+		log.mu.Lock()
+		log.ops = append(log.ops, op{Method: r.Method, Path: r.URL.EscapedPath(), Query: r.URL.RawQuery,
+			INM: r.Header.Get("If-None-Match"), Copy: r.Header.Get("X-Amz-Copy-Source"), Status: rec.status})
+		log.mu.Unlock()
+	})}
+	go server.Serve(listener)
+	t.Cleanup(func() { server.Close() })
+}
+
+// --- the stand-in -------------------------------------------------------------------
+
+func randomHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func startStandIn(t *testing.T, rcloneBin, dataDir, keyID, secret string) {
+	if conn, err := net.DialTimeout("tcp", standInAddr, 200*time.Millisecond); err == nil {
+		conn.Close()
+		t.Fatalf("port 4801 is busy: stop whatever holds it")
+	}
+	logFile := filepath.Join(filepath.Dir(dataDir), "stand-in.log")
+	cmd := exec.Command(rcloneBin, "serve", "s3", "--addr", standInAddr, "--auth-key", keyID+","+secret,
+		"--config", os.DevNull, "--cache-dir", filepath.Join(filepath.Dir(dataDir), "stand-in-cache"),
+		"-vv", "--log-file", logFile, dataDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	t.Logf("stand-in: rclone serve s3 on %s, pid %d", standInAddr, pid)
+	t.Cleanup(func() {
+		cmd.Process.Signal(syscall.SIGTERM)
+		done := make(chan struct{})
+		go func() { cmd.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			cmd.Process.Kill()
+		}
+	})
+	for i := 0; i < 50; i++ {
+		if conn, err := net.DialTimeout("tcp", standInAddr, 100*time.Millisecond); err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("the stand-in did not start")
+}
+
+// --- machines -----------------------------------------------------------------------
+
+type machine struct {
+	name   string
+	home   string
+	folder string
+	env    []string
+}
+
+type world struct {
+	t         *testing.T
+	bin       string
+	rclone    string
+	data      string // the stand-in's directory; the bucket is data/fs-test
+	keyID     string
+	secret    string
+	ops       *opLog
+	outputs   []string
+	artifacts []map[string]any
+}
+
+func (w *world) keyEnv() []string {
+	return []string{
+		"FOLDER_SYNC_ACCESS_KEY_ID=" + w.keyID,
+		"FOLDER_SYNC_SECRET_ACCESS_KEY=" + w.secret,
+		"FOLDER_SYNC_ENDPOINT=http://" + proxyAddr,
+	}
+}
+
+func baseEnv() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		upper := strings.ToUpper(kv)
+		if strings.HasPrefix(upper, "HOME=") || strings.HasPrefix(upper, "FOLDER_SYNC_") || strings.HasPrefix(upper, "RCLONE_") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return env
+}
+
+func (w *world) newMachine(name string, withKeyEnv bool) *machine {
+	root := w.t.TempDir()
+	m := &machine{name: name, home: filepath.Join(root, "home-"+name), folder: filepath.Join(root, name)}
+	os.MkdirAll(m.home, 0o700)
+	os.MkdirAll(m.folder, 0o755)
+	m.env = append(baseEnv(), "HOME="+m.home, "FOLDER_SYNC_RCLONE="+w.rclone)
+	if withKeyEnv {
+		m.env = append(m.env, w.keyEnv()...)
+	}
+	return m
+}
+
+// run runs folder-sync on m and returns its combined output and exit code.
+func (w *world) run(m *machine, args ...string) (string, int) {
+	cmd := exec.Command(w.bin, args...)
+	cmd.Env = m.env
+	cmd.Dir = m.folder
+	out, err := cmd.CombinedOutput()
+	code := 0
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		code = exitErr.ExitCode()
+	} else if err != nil {
+		w.t.Fatal(err)
+	}
+	text := string(out)
+	w.outputs = append(w.outputs, text)
+	return text, code
+}
+
+// must runs folder-sync and fails the test on a non-zero exit.
+func (w *world) must(m *machine, args ...string) string {
+	out, code := w.run(m, args...)
+	if code != 0 {
+		w.t.Fatalf("%s: folder-sync %s exited %d:\n%s", m.name, strings.Join(args, " "), code, out)
+	}
+	return out
+}
+
+// record keeps a step for the report: what ran, its output and the bucket operations it caused.
+func (w *world) record(step, machineName, command, output string, ops []op) {
+	w.artifacts = append(w.artifacts, map[string]any{
+		"step": step, "machine": machineName, "command": command, "output": output, "ops": ops, "op_counts": counts(ops),
+	})
+}
+
+func (w *world) object(key string) (string, bool) {
+	data, err := os.ReadFile(filepath.Join(w.data, bucket, filepath.FromSlash(key)))
+	return string(data), err == nil
+}
+
+func (w *world) objects(prefix string) []string {
+	var keys []string
+	root := filepath.Join(w.data, bucket)
+	filepath.WalkDir(filepath.Join(root, filepath.FromSlash(prefix)), func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			rel, _ := filepath.Rel(root, path)
+			keys = append(keys, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	sort.Strings(keys)
+	return keys
+}
+
+func writeFile(t *testing.T, path, content string, mtime time.Time) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !mtime.IsZero() {
+		os.Chtimes(path, mtime, mtime)
+	}
+}
+
+func hostID(t *testing.T, m *machine) string {
+	data, err := os.ReadFile(filepath.Join(m.home, ".folder-sync", "host.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var h struct{ ID string }
+	json.Unmarshal(data, &h)
+	return h.ID
+}
+
+func editConfig(t *testing.T, m *machine, from, to string) {
+	path := filepath.Join(m.folder, ".folder-sync.toml")
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), from) {
+		t.Fatalf("%s config lacks %q", m.name, from)
+	}
+	os.WriteFile(path, []byte(strings.Replace(string(data), from, to, 1)), 0o644)
+}
+
+func nodeBinary(t *testing.T) string {
+	for _, candidate := range []string{"/usr/bin/node", "node"} {
+		path, err := exec.LookPath(candidate)
+		if err != nil {
+			continue
+		}
+		out, err := exec.Command(path, "--version").Output()
+		var major, minor int
+		fmt.Sscanf(strings.TrimSpace(string(out)), "v%d.%d", &major, &minor)
+		if err == nil && (major > 22 || (major == 22 && minor >= 18)) {
+			return path
+		}
+	}
+	t.Skip("node ≥ 22.18 not found")
+	return ""
+}
+
+// --- the test -----------------------------------------------------------------------
+
+func TestTwoMachines(t *testing.T) {
+	rcloneBin := filepath.Join(repo, ".tools", "rclone")
+	if _, err := os.Stat(rcloneBin); err != nil {
+		t.Skip("no .tools/rclone: run scripts/dev-tools first")
+	}
+	work := t.TempDir()
+	bin := filepath.Join(work, "folder-sync")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/folder-sync")
+	build.Dir = repo
+	if goroot := runtime.GOROOT(); goroot != "" {
+		build.Path = filepath.Join(goroot, "bin", "go")
+	}
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+
+	w := &world{t: t, bin: bin, rclone: rcloneBin, data: filepath.Join(work, "s3"), keyID: "e2e" + randomHex(8), secret: randomHex(20), ops: &opLog{}}
+	os.MkdirAll(filepath.Join(w.data, bucket), 0o755)
+	startStandIn(t, rcloneBin, w.data, w.keyID, w.secret)
+	startProxy(t, w.ops)
+	defer func() {
+		if dir := os.Getenv("FOLDER_SYNC_E2E_ARTIFACTS"); dir != "" {
+			os.MkdirAll(dir, 0o755)
+			data, _ := json.MarshalIndent(w.artifacts, "", "  ")
+			os.WriteFile(filepath.Join(dir, "e2e-steps.json"), data, 0o644)
+		}
+	}()
+
+	// Machine A logs in (key stored in ~/.folder-sync/credentials.json, env then removed);
+	// machine B, like a cloud agent, keeps the key in its environment.
+	a := w.newMachine("A", true)
+	b := w.newMachine("B", true)
+	out := w.must(a, "login")
+	if !strings.Contains(out, "Stored key …") || strings.Contains(out, w.secret) {
+		t.Fatalf("login output: %s", out)
+	}
+	a.env = append(baseEnv(), "HOME="+a.home, "FOLDER_SYNC_RCLONE="+w.rclone)
+
+	// A's folder: files to sync, files the default ignores must keep out, names Windows can't hold.
+	mtime := time.Date(2026, 10, 1, 10, 20, 30, 123456789, time.UTC)
+	files := map[string]string{
+		"notes/a.md":        "hello from A\n",
+		"data.json":         `{"x":1}` + "\n",
+		"deep/er/plan.md":   "# plan\n",
+		"space name.txt":    "spaces are fine\n",
+		".env":              "SECRET=never-upload\n",
+		"node_modules/x.js": "module\n",
+		".git/config":       "[core]\n",
+		"server.key":        "key\n",
+		"cert.pem":          "pem\n",
+		"id_ed25519":        "ssh\n",
+		"build.tmp":         "custom ignore\n",
+		"CON.txt":           "reserved on Windows\n",
+		"README.md":         "twin 1\n",
+		"readme.md":         "twin 2\n",
+	}
+	for path, content := range files {
+		writeFile(t, filepath.Join(a.folder, filepath.FromSlash(path)), content, mtime)
+	}
+
+	t.Run("init", func(t *testing.T) {
+		out := w.must(a, "init", "--project", project, "--bucket", bucket)
+		if !strings.Contains(out, "minted") || !strings.Contains(out, "one HEAD") {
+			t.Fatalf("init output: %s", out)
+		}
+		w.record("A: init", "A", "folder-sync init --project demo --bucket fs-test", out, w.ops.take())
+		editConfig(t, a, `ignore = []`, `ignore = ["*.tmp"]`)
+		out = w.must(b, "init", "--project", project, "--bucket", bucket)
+		w.record("B: init", "B", "folder-sync init --project demo --bucket fs-test", out, w.ops.take())
+
+		bad := w.newMachine("bad-key", false)
+		bad.env = append(bad.env, "FOLDER_SYNC_ACCESS_KEY_ID="+w.keyID, "FOLDER_SYNC_SECRET_ACCESS_KEY=wrong-secret", "FOLDER_SYNC_ENDPOINT=http://"+proxyAddr)
+		if out, code := w.run(bad, "init", "--project", "bad", "--bucket", bucket); code == 0 || !strings.Contains(out, "key check") {
+			t.Fatalf("a wrong key must fail init's HEAD check: %d %s", code, out)
+		}
+		w.ops.take()
+	})
+
+	idA, idB := hostID(t, a), hostID(t, b)
+	if idA == idB {
+		t.Fatal("two machines share a host id")
+	}
+	prefixA := project + "/hosts/" + idA + "/"
+
+	t.Run("A pushes; ignored and unportable files never upload", func(t *testing.T) {
+		out := w.must(a, "sync", "--once")
+		ops := w.ops.take()
+		w.record("A: first sync", "A", "folder-sync sync --once", out, ops)
+		want := []string{prefixA + "data.json", prefixA + "deep/er/plan.md", prefixA + "manifest.json", prefixA + "notes/a.md", prefixA + "space name.txt"}
+		if got := w.objects(prefixA); strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("bucket holds\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+		}
+		for _, o := range ops {
+			for _, secret := range []string{".env", "node_modules", ".git", "server.key", "cert.pem", "id_ed25519", "build.tmp", "CON.txt", "README.md", "readme.md"} {
+				if (o.Method == http.MethodPut || o.Method == http.MethodPost) && strings.Contains(o.Path, url.PathEscape(secret)) {
+					t.Errorf("%s was uploaded: %s %s", secret, o.Method, o.Path)
+				}
+			}
+		}
+		status := w.must(a, "status")
+		for _, want := range []string{"skipped:         3", "CON.txt", "README.md", "readme.md", "case-only twins"} {
+			if !strings.Contains(status, want) {
+				t.Errorf("status lacks %q:\n%s", want, status)
+			}
+		}
+		w.record("A: status", "A", "folder-sync status", status, w.ops.take())
+	})
+
+	writeFile(t, filepath.Join(b.folder, "b-notes.md"), "written on B\n", time.Time{})
+
+	t.Run("a file pushed by A appears on B, with its mtime", func(t *testing.T) {
+		out := w.must(b, "sync", "--once")
+		w.record("B: first sync", "B", "folder-sync sync --once", out, w.ops.take())
+		copyPath := filepath.Join(b.folder, "hosts", idA, "notes", "a.md")
+		data, err := os.ReadFile(copyPath)
+		if err != nil || string(data) != "hello from A\n" {
+			t.Fatalf("B's copy: %q %v\n%s", data, err, out)
+		}
+		info, _ := os.Stat(copyPath)
+		if !info.ModTime().Equal(mtime) {
+			t.Errorf("mtime %s, want %s", info.ModTime().UTC().Format(time.RFC3339Nano), mtime.Format(time.RFC3339Nano))
+		}
+		if _, err := os.Stat(filepath.Join(b.folder, "hosts", idA, ".env")); err == nil {
+			t.Error("an ignored file reached B")
+		}
+		if _, ok := w.object(project + "/hosts/" + idB + "/b-notes.md"); !ok {
+			t.Error("B's own file was not published")
+		}
+	})
+
+	t.Run("an overwrite and a delete land in _trash", func(t *testing.T) {
+		writeFile(t, filepath.Join(a.folder, "notes", "a.md"), "changed by A\n", time.Time{})
+		os.Remove(filepath.Join(a.folder, "data.json"))
+		out := w.must(a, "sync", "--once")
+		w.record("A: overwrite + delete", "A", "folder-sync sync --once", out, w.ops.take())
+		trash := w.objects("_trash/" + project + "/" + idA)
+		var old, deleted string
+		for _, key := range trash {
+			content, _ := w.object(key)
+			switch {
+			case strings.HasSuffix(key, "/notes/a.md"):
+				old = content
+			case strings.HasSuffix(key, "/data.json"):
+				deleted = content
+			}
+		}
+		if old != "hello from A\n" || deleted != `{"x":1}`+"\n" {
+			t.Fatalf("trash holds %q: a.md=%q data.json=%q", trash, old, deleted)
+		}
+		if _, ok := w.object(prefixA + "data.json"); ok {
+			t.Error("the deleted object is still live")
+		}
+		if live, _ := w.object(prefixA + "notes/a.md"); live != "changed by A\n" {
+			t.Errorf("live a.md = %q", live)
+		}
+
+		out = w.must(b, "sync", "--once")
+		w.record("B: pulls the change", "B", "folder-sync sync --once", out, w.ops.take())
+		if data, _ := os.ReadFile(filepath.Join(b.folder, "hosts", idA, "notes", "a.md")); string(data) != "changed by A\n" {
+			t.Errorf("B has %q", data)
+		}
+		if _, err := os.Stat(filepath.Join(b.folder, "hosts", idA, "data.json")); err == nil {
+			t.Error("B still has the deleted file")
+		}
+	})
+
+	t.Run("sync --watch picks up a change, and stops cleanly", func(t *testing.T) {
+		editConfig(t, a, `interval = "10s"`, `interval = "1s"`)
+		cmd := exec.Command(w.bin, "sync", "--watch")
+		cmd.Env, cmd.Dir = a.env, a.folder
+		var buf bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &buf, &buf
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(1500 * time.Millisecond)
+		writeFile(t, filepath.Join(a.folder, "watched.md"), "seen by --watch\n", time.Time{})
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			if _, ok := w.object(prefixA + "watched.md"); ok {
+				break
+			}
+			if time.Now().After(deadline) {
+				cmd.Process.Kill()
+				t.Fatalf("--watch did not upload within 15 s:\n%s", buf.String())
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		cmd.Process.Signal(syscall.SIGTERM)
+		err := cmd.Wait()
+		if err != nil || !strings.Contains(buf.String(), "Stopped.") {
+			t.Fatalf("--watch exit: %v\n%s", err, buf.String())
+		}
+		w.record("A: sync --watch", "A", "folder-sync sync --watch   (Ctrl-C after one change)", buf.String(), w.ops.take())
+		editConfig(t, a, `interval = "1s"`, `interval = "10s"`)
+		w.must(b, "sync", "--once")
+		w.ops.take()
+	})
+
+	t.Run("a second round with no changes does zero uploads and no listing", func(t *testing.T) {
+		for _, m := range []*machine{a, b} {
+			w.ops.take()
+			out := w.must(m, "sync", "--once")
+			ops := w.ops.take()
+			w.record(m.name+": no-change round", m.name, "folder-sync sync --once", out, ops)
+			c := counts(ops)
+			for _, kind := range []string{"PUT", "POST", "DELETE", "COPY", "LIST", "HEAD"} {
+				if c[kind] != 0 {
+					t.Errorf("%s: %d %s in a no-change round: %+v", m.name, c[kind], kind, ops)
+				}
+			}
+			if len(ops) != 1 {
+				t.Errorf("%s: want exactly one request (its peer's manifest), got %+v", m.name, ops)
+			}
+			for _, o := range ops {
+				if o.Method != http.MethodGet || !strings.HasSuffix(o.Path, "/manifest.json") || o.INM == "" || o.Status != http.StatusNotModified {
+					t.Errorf("%s: %+v is not a conditional manifest GET answered 304", m.name, o)
+				}
+			}
+		}
+	})
+
+	t.Run("an edit to a peer's copy is kept, not lost", func(t *testing.T) {
+		writeFile(t, filepath.Join(b.folder, "hosts", idA, "notes", "a.md"), "B edited A's copy\n", time.Time{})
+		writeFile(t, filepath.Join(a.folder, "notes", "a.md"), "A's third version\n", time.Time{})
+		w.must(a, "sync", "--once")
+		out := w.must(b, "sync", "--once")
+		w.record("B: local edit to a peer copy", "B", "folder-sync sync --once", out, w.ops.take())
+		if data, _ := os.ReadFile(filepath.Join(b.folder, "hosts", idA, "notes", "a.md")); string(data) != "A's third version\n" {
+			t.Errorf("B's copy = %q", data)
+		}
+		kept, _ := filepath.Glob(filepath.Join(b.home, ".folder-sync", "conflicts", project, idA, "*", "notes", "a.md"))
+		if len(kept) != 1 {
+			t.Fatalf("B's edit was not kept: %v\n%s", kept, out)
+		}
+		if data, _ := os.ReadFile(kept[0]); string(data) != "B edited A's copy\n" {
+			t.Errorf("kept %q", data)
+		}
+		if status := w.must(b, "status"); !strings.Contains(status, "conflicts:       1") {
+			t.Errorf("status:\n%s", status)
+		}
+	})
+
+	t.Run("max_delete holds a mass delete", func(t *testing.T) {
+		editConfig(t, a, "max_delete = 50", "max_delete = 2")
+		for i := 0; i < 3; i++ {
+			writeFile(t, filepath.Join(a.folder, "bulk", fmt.Sprintf("%d.md", i)), "bulk\n", time.Time{})
+		}
+		w.must(a, "sync", "--once")
+		os.RemoveAll(filepath.Join(a.folder, "bulk"))
+		out := w.must(a, "sync", "--once")
+		w.record("A: mass delete held", "A", "folder-sync sync --once", out, w.ops.take())
+		if !strings.Contains(out, "3 deletes held") {
+			t.Fatalf("output: %s", out)
+		}
+		if _, ok := w.object(prefixA + "bulk/0.md"); !ok {
+			t.Fatal("a held delete removed the object")
+		}
+		editConfig(t, a, "max_delete = 2", "max_delete = 50")
+		out = w.must(a, "sync", "--once")
+		if !strings.Contains(out, "3 deleted to _trash/") {
+			t.Fatalf("after raising max_delete: %s", out)
+		}
+		w.ops.take()
+	})
+
+	t.Run("an empty folder never wipes the bucket", func(t *testing.T) {
+		guard := &machine{name: "A-guard", home: a.home, folder: filepath.Join(t.TempDir(), "guard"), env: a.env}
+		os.MkdirAll(guard.folder, 0o755)
+		writeFile(t, filepath.Join(guard.folder, "only.md"), "only\n", time.Time{})
+		w.must(guard, "init", "--project", "guard", "--bucket", bucket)
+		w.must(guard, "sync", "--once")
+		os.Remove(filepath.Join(guard.folder, "only.md"))
+		out, code := w.run(guard, "sync", "--once")
+		if code == 0 || !strings.Contains(out, "looks empty or unmounted") {
+			t.Fatalf("exit %d: %s", code, out)
+		}
+		if _, ok := w.object("guard/hosts/" + idA + "/only.md"); !ok {
+			t.Fatal("the object was deleted")
+		}
+		w.ops.take()
+	})
+
+	t.Run("v1's shared folders are refused, clearly", func(t *testing.T) {
+		editConfig(t, b, "[modes]\n", "[modes]\n\"shared\" = \"shared\"\n")
+		out, code := w.run(b, "sync", "--once")
+		w.record("B: shared mode refused", "B", "folder-sync sync --once   (with [modes] \"shared\" = \"shared\")", out, w.ops.take())
+		if code != 3 || !strings.Contains(out, "not available in v0") {
+			t.Fatalf("exit %d: %s", code, out)
+		}
+		editConfig(t, b, "[modes]\n\"shared\" = \"shared\"\n", "[modes]\n")
+	})
+
+	t.Run("install-service writes the unit and only prints the enable command", func(t *testing.T) {
+		out := w.must(a, "sync", "--install-service")
+		w.record("A: install-service", "A", "folder-sync sync --install-service", out, w.ops.take())
+		units, _ := filepath.Glob(filepath.Join(a.home, ".folder-sync", "service", "folder-sync-demo-*.service"))
+		if len(units) != 1 || !strings.Contains(out, "systemctl --user enable --now "+units[0]) {
+			t.Fatalf("%v\n%s", units, out)
+		}
+		unit, _ := os.ReadFile(units[0])
+		if !strings.Contains(string(unit), "sync --watch --dir") {
+			t.Fatalf("unit:\n%s", unit)
+		}
+	})
+
+	t.Run("publish brings the manifest up to date; --viewer writes config, never deploys", func(t *testing.T) {
+		out := w.must(a, "publish")
+		w.record("A: publish", "A", "folder-sync publish", out, w.ops.take())
+		out, code := w.run(a, "publish", "--viewer")
+		if code == 0 || !strings.Contains(out, "access_team") {
+			t.Fatalf("publish --viewer without Access settings must refuse: %d %s", code, out)
+		}
+		editConfig(t, a, `access_team = ""`, `access_team = "bam"`)
+		editConfig(t, a, `domain = ""`, `domain = "files.example.com"`)
+		out = w.must(a, "publish", "--viewer")
+		w.record("A: publish --viewer", "A", "folder-sync publish --viewer", out, w.ops.take())
+		wrangler, err := os.ReadFile(filepath.Join(a.home, ".folder-sync", "viewer", bucket, "wrangler.toml"))
+		if err != nil || !strings.Contains(string(wrangler), "workers_dev = false") || !strings.Contains(out, "npm --prefix") {
+			t.Fatalf("%v\n%s\n%s", err, wrangler, out)
+		}
+	})
+
+	// B's view: B's own files plus its read-only copies of A's.
+	w.must(b, "sync", "--once")
+	w.ops.take()
+	bView := map[string]string{}
+	filepath.WalkDir(b.folder, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(b.folder, path)
+		rel = filepath.ToSlash(rel)
+		data, _ := os.ReadFile(path)
+		switch {
+		case rel == ".folder-sync.toml":
+		case strings.HasPrefix(rel, "hosts/"):
+			bView[strings.TrimPrefix(rel, "hosts/")] = string(data)
+		default:
+			bView[idB+"/"+rel] = string(data)
+		}
+		return nil
+	})
+
+	t.Run("manifests validate against schema/manifest.schema.json", func(t *testing.T) {
+		manifests, _ := filepath.Glob(filepath.Join(w.data, bucket, "*", "hosts", "*", "manifest.json"))
+		if len(manifests) != 3 {
+			t.Fatalf("want 3 manifests (A, B, guard), got %v", manifests)
+		}
+		script := `import json, sys, jsonschema
+schema = json.load(open(sys.argv[1]))
+for path in sys.argv[2:]:
+    jsonschema.validate(json.load(open(path)), schema, format_checker=jsonschema.FormatChecker())
+print("valid:", len(sys.argv) - 2)`
+		args := append([]string{"-c", script, filepath.Join(repo, "schema", "manifest.schema.json")}, manifests...)
+		out, err := exec.Command("python3", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		w.record("schema check", "-", "python3 jsonschema.validate(manifest, schema/manifest.schema.json)", string(out), nil)
+	})
+
+	readerEnv := append(baseEnv(), w.keyEnv()...)
+
+	t.Run("the Python reader lists and reads B's view", func(t *testing.T) {
+		cmd := exec.Command("python3", filepath.Join(repo, "readers", "python", "folder_sync_read.py"), "--bucket", bucket, "--project", project, "list")
+		cmd.Env = readerEnv
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]string{}
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			var ref struct{ HostID, Path string }
+			var raw map[string]any
+			json.Unmarshal([]byte(line), &raw)
+			ref.HostID, ref.Path = raw["host_id"].(string), raw["path"].(string)
+			cat := exec.Command("python3", filepath.Join(repo, "readers", "python", "folder_sync_read.py"), "--bucket", bucket, "--project", project, "cat", ref.HostID, ref.Path)
+			cat.Env = readerEnv
+			data, err := cat.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			got[ref.HostID+"/"+ref.Path] = string(data)
+		}
+		assertSameView(t, got, bView)
+		w.record("Python reader", "-", "python3 readers/python/folder_sync_read.py --bucket fs-test --project demo list", string(out), w.ops.take())
+	})
+
+	t.Run("the Worker reader lists and reads B's view", func(t *testing.T) {
+		node := nodeBinary(t)
+		cmd := exec.Command(node, filepath.Join(repo, "readers", "worker", "test", "e2e.ts"), bucket, project)
+		cmd.Env = readerEnv
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+		var result struct {
+			Contents           map[string]string `json:"contents"`
+			SecondListingCalls []string          `json:"secondListingCalls"`
+		}
+		if err := json.Unmarshal(out, &result); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		assertSameView(t, result.Contents, bView)
+		for _, call := range result.SecondListingCalls {
+			if !strings.HasSuffix(call, "(conditional)") {
+				t.Errorf("second listing made a non-conditional call: %s", call)
+			}
+		}
+		w.record("Worker reader", "-", "node readers/worker/test/e2e.ts fs-test demo", string(out), w.ops.take())
+	})
+
+	t.Run("no secret is ever written outside credentials.json or printed", func(t *testing.T) {
+		for _, m := range []*machine{a, b} {
+			filepath.WalkDir(m.home, func(path string, d fs.DirEntry, err error) error {
+				if err != nil || d.IsDir() || filepath.Base(path) == "credentials.json" {
+					return nil
+				}
+				if data, _ := os.ReadFile(path); bytes.Contains(data, []byte(w.secret)) {
+					t.Errorf("the secret is in %s", path)
+				}
+				return nil
+			})
+		}
+		for _, out := range w.outputs {
+			if strings.Contains(out, w.secret) {
+				t.Errorf("the secret was printed: %s", out)
+			}
+		}
+		if info, err := os.Stat(filepath.Join(a.home, ".folder-sync", "credentials.json")); err != nil || info.Mode().Perm() != 0o600 {
+			t.Errorf("credentials.json: %v %v", info, err)
+		}
+	})
+}
+
+func assertSameView(t *testing.T, got, want map[string]string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("reader sees %d files, B has %d", len(got), len(want))
+	}
+	for key, content := range want {
+		if got[key] != content {
+			t.Errorf("%s: reader %q, B %q", key, got[key], content)
+		}
+	}
+	for key := range got {
+		if _, ok := want[key]; !ok {
+			t.Errorf("reader sees %s, which B does not have", key)
+		}
+	}
+}

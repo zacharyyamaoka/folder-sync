@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# check-r2: the two hands-on R2 checks docs/peps/0001 requires before real use.
+#
+#   1. mtime round trip: a file's modification time survives upload and download.
+#   2. conditional writes through rclone: If-None-Match: * creates only once, and
+#      If-Match on the ETag overwrites only the version you read (the v1 lease relies on both).
+#
+# It writes only under _checks/<UTC-stamp>/ in the bucket and deletes exactly the
+# objects it wrote. It never creates a bucket and never prints the secret.
+#
+# Environment (the same names folder-sync uses):
+#   FOLDER_SYNC_ACCOUNT_ID         R2 account id (or FOLDER_SYNC_ENDPOINT for an S3 stand-in)
+#   FOLDER_SYNC_ACCESS_KEY_ID      a bucket-scoped R2 API token's access key id
+#   FOLDER_SYNC_SECRET_ACCESS_KEY  its secret
+#   FOLDER_SYNC_CHECK_BUCKET       the bucket to test
+#   FOLDER_SYNC_PROVIDER           rclone s3 provider (default Cloudflare)
+#   FOLDER_SYNC_RCLONE             rclone binary (default: <repo>/.tools/rclone, then ~/.folder-sync/bin/rclone)
+set -uo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+rclone_bin="${FOLDER_SYNC_RCLONE:-}"
+if [[ -z "$rclone_bin" ]]; then
+  for candidate in "$repo/.tools/rclone" "$HOME/.folder-sync/bin/rclone"; do
+    [[ -x "$candidate" ]] && rclone_bin="$candidate" && break
+  done
+fi
+[[ -x "$rclone_bin" ]] || { echo "check-r2: no rclone; run scripts/dev-tools or folder-sync init" >&2; exit 2; }
+
+: "${FOLDER_SYNC_ACCESS_KEY_ID:?set FOLDER_SYNC_ACCESS_KEY_ID}"
+: "${FOLDER_SYNC_SECRET_ACCESS_KEY:?set FOLDER_SYNC_SECRET_ACCESS_KEY}"
+: "${FOLDER_SYNC_CHECK_BUCKET:?set FOLDER_SYNC_CHECK_BUCKET to the bucket to test}"
+endpoint="${FOLDER_SYNC_ENDPOINT:-}"
+if [[ -z "$endpoint" ]]; then
+  : "${FOLDER_SYNC_ACCOUNT_ID:?set FOLDER_SYNC_ACCOUNT_ID (or FOLDER_SYNC_ENDPOINT)}"
+  endpoint="https://${FOLDER_SYNC_ACCOUNT_ID}.r2.cloudflarestorage.com"
+fi
+bucket="$FOLDER_SYNC_CHECK_BUCKET"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+# The remote reaches rclone through the environment, as in folder-sync: never argv, never a config file.
+export RCLONE_CONFIG_CHECK_TYPE=s3
+export RCLONE_CONFIG_CHECK_PROVIDER="${FOLDER_SYNC_PROVIDER:-Cloudflare}"
+export RCLONE_CONFIG_CHECK_ACCESS_KEY_ID="$FOLDER_SYNC_ACCESS_KEY_ID"
+export RCLONE_CONFIG_CHECK_SECRET_ACCESS_KEY="$FOLDER_SYNC_SECRET_ACCESS_KEY"
+export RCLONE_CONFIG_CHECK_ENDPOINT="$endpoint"
+export RCLONE_CONFIG_CHECK_REGION="${FOLDER_SYNC_REGION:-auto}"
+export RCLONE_CONFIG_CHECK_NO_CHECK_BUCKET=true
+export RCLONE_CONFIG_CHECK_ACL=private
+rc() { "$rclone_bin" --config "$work/rclone.conf" --cache-dir "$work/cache" --temp-dir "$work" "$@"; }
+touch "$work/rclone.conf"
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+prefix="check:$bucket/_checks/$stamp"
+failures=0
+pass() { echo "PASS  $*"; }
+fail() { echo "FAIL  $*"; failures=$((failures + 1)); }
+
+echo "check-r2: $("$rclone_bin" version | head -1), endpoint $endpoint, bucket $bucket, prefix _checks/$stamp/"
+
+# 1. mtime round trip -------------------------------------------------------------------
+want="2001-02-03T04:05:06.123456789Z"
+printf 'mtime probe\n' > "$work/mtime.txt"
+touch -d "$want" "$work/mtime.txt"
+if rc copyto "$work/mtime.txt" "$prefix/mtime.txt" 2> "$work/err"; then
+  remote_mtime="$(rc lsjson "$prefix/mtime.txt" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["ModTime"])')"
+  rc copyto "$prefix/mtime.txt" "$work/back.txt"
+  local_back="$(python3 -c 'import os,sys,datetime; s=os.stat(sys.argv[1]); print(datetime.datetime.fromtimestamp(s.st_mtime_ns//10**9, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + ".%09dZ" % (s.st_mtime_ns % 10**9))' "$work/back.txt")"
+  echo "      sent $want, bucket reports $remote_mtime, downloaded file has $local_back"
+  if [[ "$local_back" == "$want" ]]; then
+    pass "mtime round trip, to the nanosecond"
+  elif [[ "${local_back:0:23}" == "${want:0:23}" ]]; then
+    pass "mtime round trip, to the millisecond (sub-ms lost)"
+  else
+    fail "mtime round trip: sent $want, got back $local_back"
+  fi
+else
+  fail "upload for the mtime check: $(cat "$work/err")"
+fi
+
+# 2. conditional writes through rclone ------------------------------------------------------
+printf 'lease v1\n' > "$work/lease1.json"
+printf 'lease v2\n' > "$work/lease2.json"
+printf 'lease v3\n' > "$work/lease3.json"
+lease="$prefix/lease.json"
+if rc copyto "$work/lease1.json" "$lease" --no-check-dest --header-upload "If-None-Match: *" 2> "$work/err"; then
+  pass "If-None-Match: * creates a new object"
+else
+  fail "If-None-Match: * on a new key failed: $(tail -1 "$work/err")"
+fi
+if rc copyto "$work/lease2.json" "$lease" --no-check-dest --retries 1 --low-level-retries 1 --header-upload "If-None-Match: *" 2> "$work/err"; then
+  fail "If-None-Match: * overwrote an existing object (content now: $(rc cat "$lease"))"
+else
+  if grep -q -E "412|PreconditionFailed|precondition" "$work/err"; then
+    pass "If-None-Match: * refuses to overwrite (412)"
+  else
+    fail "the second If-None-Match: * write failed, but not with 412: $(tail -1 "$work/err")"
+  fi
+fi
+etag="$(rc lsjson --hash --hash-type md5 "$lease" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0].get("Hashes",{}).get("md5",""))')"
+if rc copyto "$work/lease3.json" "$lease" --no-check-dest --retries 1 --low-level-retries 1 --header-upload "If-Match: \"0123456789abcdef0123456789abcdef\"" 2> "$work/err"; then
+  fail "If-Match with a wrong ETag overwrote the object"
+else
+  pass "If-Match with a stale ETag is refused"
+fi
+if [[ -n "$etag" ]] && rc copyto "$work/lease3.json" "$lease" --no-check-dest --header-upload "If-Match: \"$etag\"" 2> "$work/err"; then
+  if [[ "$(rc cat "$lease")" == "lease v3" ]]; then
+    pass "If-Match with the current ETag overwrites"
+  else
+    fail "If-Match with the current ETag did not write"
+  fi
+else
+  fail "If-Match with the current ETag ($etag) failed: $(tail -1 "$work/err")"
+fi
+
+# Clean up exactly what this run wrote.
+rc deletefile "$prefix/mtime.txt" 2>/dev/null
+rc deletefile "$lease" 2>/dev/null
+
+echo
+if [[ $failures -eq 0 ]]; then
+  echo "check-r2: all checks passed against $endpoint"
+else
+  echo "check-r2: $failures check(s) failed against $endpoint"
+fi
+exit $((failures > 0))

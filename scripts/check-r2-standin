@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Run scripts/check-r2 against a local stand-in (rclone serve s3 on 127.0.0.1:4801,
+# throwaway keys, a temp dir), to prove the script itself works. This is NOT R2:
+# the stand-in (rclone's gofakes3) keeps mtimes but ignores conditional-write headers,
+# so the conditional checks are expected to FAIL here and must be run against real R2.
+set -uo pipefail
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+rclone_bin="$repo/.tools/rclone"
+[[ -x "$rclone_bin" ]] || { echo "run scripts/dev-tools first" >&2; exit 2; }
+data="$(mktemp -d)"
+mkdir -p "$data/s3/check-bucket"
+key="standin$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+secret="$(head -c 20 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+"$rclone_bin" serve s3 --addr 127.0.0.1:4801 --auth-key "$key,$secret" --config /dev/null \
+  --cache-dir "$data/cache" --log-file "$data/serve.log" "$data/s3" &
+pid=$!
+trap 'kill $pid 2>/dev/null; wait $pid 2>/dev/null; rm -rf "$data"' EXIT
+sleep 1
+echo "stand-in: rclone serve s3 on 127.0.0.1:4801 (pid $pid) — NOT R2"
+FOLDER_SYNC_ENDPOINT=http://127.0.0.1:4801 FOLDER_SYNC_ACCESS_KEY_ID="$key" FOLDER_SYNC_SECRET_ACCESS_KEY="$secret" \
+  FOLDER_SYNC_CHECK_BUCKET=check-bucket FOLDER_SYNC_RCLONE="$rclone_bin" "$repo/scripts/check-r2"
