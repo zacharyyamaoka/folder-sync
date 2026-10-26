@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -79,15 +80,53 @@ func TestPinsCoverEveryTarget(t *testing.T) {
 	}
 }
 
-// TestDevToolsScriptUsesTheSamePin keeps scripts/dev-tools and this package in step.
-func TestDevToolsScriptUsesTheSamePin(t *testing.T) {
+// devToolsPlan runs `scripts/dev-tools --print-plan` as if on the given uname -s / -m.
+func devToolsPlan(t *testing.T, osName, machine string) (fields []string, stderr string, err error) {
+	t.Helper()
 	_, here, _, _ := runtime.Caller(0)
-	script, err := os.ReadFile(filepath.Join(filepath.Dir(here), "..", "..", "scripts", "dev-tools"))
-	if err != nil {
-		t.Fatal(err)
+	script := filepath.Join(filepath.Dir(here), "..", "..", "scripts", "dev-tools")
+	cmd := exec.Command("bash", script, "--print-plan")
+	cmd.Env = append(os.Environ(), "FOLDER_SYNC_UNAME_S="+osName, "FOLDER_SYNC_UNAME_M="+machine)
+	var errOut bytes.Buffer
+	cmd.Stderr = &errOut
+	out, err := cmd.Output()
+	return strings.Fields(string(out)), errOut.String(), err
+}
+
+// TestDevToolsScriptUsesTheSamePin keeps scripts/dev-tools and this package in step: the
+// script reads its pins from install.go, so there is one table, and it covers every machine
+// a developer has (Zach's Mac is darwin-arm64).
+func TestDevToolsScriptUsesTheSamePin(t *testing.T) {
+	targets := []struct{ uname, machine, platform string }{
+		{"Linux", "x86_64", "linux-amd64"},
+		{"Linux", "aarch64", "linux-arm64"},
+		{"Darwin", "arm64", "osx-arm64"},
+		{"Darwin", "x86_64", "osx-amd64"},
 	}
-	if !strings.Contains(string(script), `RCLONE_VERSION="`+Version+`"`) || !strings.Contains(string(script), SHA256["linux-amd64"]) {
-		t.Fatal("scripts/dev-tools pins a different rclone than internal/rclonebin")
+	for _, target := range targets {
+		fields, stderr, err := devToolsPlan(t, target.uname, target.machine)
+		if err != nil {
+			t.Errorf("%s/%s: %v\n%s", target.uname, target.machine, err, stderr)
+			continue
+		}
+		want := []string{target.platform, BaseURL + "/" + Version + "/" + ZipName(target.platform), SHA256[target.platform]}
+		if strings.Join(fields, " ") != strings.Join(want, " ") {
+			t.Errorf("%s/%s: plan %q, want %q", target.uname, target.machine, fields, want)
+		}
+	}
+	_, here, _, _ := runtime.Caller(0)
+	script, _ := os.ReadFile(filepath.Join(filepath.Dir(here), "..", "..", "scripts", "dev-tools"))
+	if regexp.MustCompile(`[0-9a-f]{64}`).Match(script) || strings.Contains(string(script), `"`+Version+`"`) {
+		t.Error("scripts/dev-tools carries its own pin; it must read internal/rclonebin/install.go")
+	}
+}
+
+func TestDevToolsScriptRefusesWhatIsNotPinned(t *testing.T) {
+	for _, target := range [][2]string{{"Linux", "riscv64"}, {"Darwin", "ppc"}, {"MINGW64_NT-10.0", "x86_64"}} {
+		_, stderr, err := devToolsPlan(t, target[0], target[1])
+		if err == nil || !strings.Contains(stderr, "no pinned rclone") {
+			t.Errorf("%v: want a refusal naming the missing pin, got %v %q", target, err, stderr)
+		}
 	}
 }
 

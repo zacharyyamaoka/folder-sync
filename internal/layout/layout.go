@@ -28,7 +28,7 @@ type Layout struct {
 	Work        string // ~/.folder-sync/work (--workdir, bisync only, v1)
 	Logs        string // ~/.folder-sync/logs
 	Projects    string // ~/.folder-sync/projects/<key>/ (state per project folder)
-	Service     string // ~/.folder-sync/service (unit / task XML / plist)
+	Service     string // ~/.folder-sync/service (systemd unit / task XML; the macOS plist goes to ~/Library/LaunchAgents)
 	Viewer      string // ~/.folder-sync/viewer/<project>/ (R2-Explorer config)
 	Conflicts   string // ~/.folder-sync/conflicts (local edits to peer copies, kept)
 	HostFile    string // ~/.folder-sync/host.json

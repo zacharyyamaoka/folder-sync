@@ -4,7 +4,7 @@
 // distro package (the workstation's apt build is 1.60.1, which predates the
 // bisync redesign and conditional uploads). The checksums below were copied
 // from https://downloads.rclone.org/v1.75.2/SHA256SUMS on 2026-10-20 and match
-// the GitHub release's SHA256SUMS; scripts/dev-tools pins the same linux-amd64 one.
+// the GitHub release's SHA256SUMS; scripts/dev-tools reads this same table.
 package rclonebin
 
 import (

@@ -312,6 +312,57 @@ func nodeBinary(t *testing.T) string {
 	return ""
 }
 
+// folderIsCaseSensitive probes dir the way a filesystem answers: write "Probe", ask for
+// "probe". macOS (APFS) and Windows (NTFS) default to case-insensitive.
+func folderIsCaseSensitive(dir string) (bool, error) {
+	name := ".case-probe-" + randomHex(4) + "A" // the hex is lower case, so "A" is the only upper-case letter
+	upper := filepath.Join(dir, name)
+	if err := os.WriteFile(upper, nil, 0o644); err != nil {
+		return false, err
+	}
+	defer os.Remove(upper)
+	_, err := os.Stat(filepath.Join(dir, strings.ToLower(name))) // only the name changes case, never the directory
+	return err != nil, nil
+}
+
+// twinPlan is what the case-twin fixture (README.md and readme.md) should do on a
+// folder that does, or does not, tell the two names apart. On a case-insensitive
+// folder the second write overwrites the first: there is one file, not a twin.
+type twinPlan struct {
+	writeTwin   bool
+	uploaded    []string // keys relative to the host prefix that join the bucket listing
+	forbidden   []string // names that must never be uploaded
+	statusWants []string // what `status` must say about them
+	skipped     string   // the status line counting skipped names
+}
+
+func planTwins(caseSensitive bool) twinPlan {
+	if caseSensitive {
+		return twinPlan{writeTwin: true, forbidden: []string{"README.md", "readme.md"},
+			statusWants: []string{"README.md", "readme.md", "case-only twins"}, skipped: "skipped:         3"}
+	}
+	return twinPlan{uploaded: []string{"README.md"}, skipped: "skipped:         1"}
+}
+
+// missingPythonModule is "" when python can import module, else a skip message that names it.
+func missingPythonModule(python, module string) string {
+	if err := exec.Command(python, "-c", "import "+module).Run(); err != nil {
+		return fmt.Sprintf("python3 module %q is not installed for %s (%v); run `%s -m pip install %s`, see README \"Try it with no cloud account\"",
+			module, python, err, python, module)
+	}
+	return ""
+}
+
+// serviceExpectation is where `sync --install-service` writes on goos and what it prints.
+func serviceExpectation(goos, home string) (glob, command string) {
+	switch goos {
+	case "darwin":
+		return filepath.Join(home, "Library", "LaunchAgents", "dev.folder-sync.demo-*.plist"), "launchctl bootstrap gui/$(id -u) "
+	default:
+		return filepath.Join(home, ".folder-sync", "service", "folder-sync-demo-*.service"), "systemctl --user enable --now "
+	}
+}
+
 // --- the test -----------------------------------------------------------------------
 
 func TestTwoMachines(t *testing.T) {
@@ -368,7 +419,16 @@ func TestTwoMachines(t *testing.T) {
 		"build.tmp":         "custom ignore\n",
 		"CON.txt":           "reserved on Windows\n",
 		"README.md":         "twin 1\n",
-		"readme.md":         "twin 2\n",
+	}
+	caseSensitive, err := folderIsCaseSensitive(a.folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	twins := planTwins(caseSensitive)
+	if twins.writeTwin {
+		files["readme.md"] = "twin 2\n"
+	} else {
+		t.Log("the folder is case-insensitive: README.md has no twin here, so the twin assertions are skipped")
 	}
 	for path, content := range files {
 		writeFile(t, filepath.Join(a.folder, filepath.FromSlash(path)), content, mtime)
@@ -403,18 +463,23 @@ func TestTwoMachines(t *testing.T) {
 		ops := w.ops.take()
 		w.record("A: first sync", "A", "folder-sync sync --once", out, ops)
 		want := []string{prefixA + "data.json", prefixA + "deep/er/plan.md", prefixA + "manifest.json", prefixA + "notes/a.md", prefixA + "space name.txt"}
+		for _, key := range twins.uploaded {
+			want = append(want, prefixA+key)
+		}
+		sort.Strings(want)
 		if got := w.objects(prefixA); strings.Join(got, "\n") != strings.Join(want, "\n") {
 			t.Fatalf("bucket holds\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
 		}
+		forbidden := append([]string{".env", "node_modules", ".git", "server.key", "cert.pem", "id_ed25519", "build.tmp", "CON.txt"}, twins.forbidden...)
 		for _, o := range ops {
-			for _, secret := range []string{".env", "node_modules", ".git", "server.key", "cert.pem", "id_ed25519", "build.tmp", "CON.txt", "README.md", "readme.md"} {
+			for _, secret := range forbidden {
 				if (o.Method == http.MethodPut || o.Method == http.MethodPost) && strings.Contains(o.Path, url.PathEscape(secret)) {
 					t.Errorf("%s was uploaded: %s %s", secret, o.Method, o.Path)
 				}
 			}
 		}
 		status := w.must(a, "status")
-		for _, want := range []string{"skipped:         3", "CON.txt", "README.md", "readme.md", "case-only twins"} {
+		for _, want := range append([]string{twins.skipped, "CON.txt"}, twins.statusWants...) {
 			if !strings.Contains(status, want) {
 				t.Errorf("status lacks %q:\n%s", want, status)
 			}
@@ -496,7 +561,9 @@ func TestTwoMachines(t *testing.T) {
 		writeFile(t, filepath.Join(a.folder, "watched.md"), "seen by --watch\n", time.Time{})
 		deadline := time.Now().Add(15 * time.Second)
 		for {
-			if _, ok := w.object(prefixA + "watched.md"); ok {
+			// WHY: the manifest is written after the upload. Stopping between the two leaves A one
+			// manifest PUT behind, which the next test then counts as a change.
+			if manifest, _ := w.object(prefixA + "manifest.json"); strings.Contains(manifest, "watched.md") {
 				break
 			}
 			if time.Now().After(deadline) {
@@ -613,12 +680,13 @@ func TestTwoMachines(t *testing.T) {
 	t.Run("install-service writes the unit and only prints the enable command", func(t *testing.T) {
 		out := w.must(a, "sync", "--install-service")
 		w.record("A: install-service", "A", "folder-sync sync --install-service", out, w.ops.take())
-		units, _ := filepath.Glob(filepath.Join(a.home, ".folder-sync", "service", "folder-sync-demo-*.service"))
-		if len(units) != 1 || !strings.Contains(out, "systemctl --user enable --now "+units[0]) {
-			t.Fatalf("%v\n%s", units, out)
+		glob, command := serviceExpectation(runtime.GOOS, a.home)
+		units, _ := filepath.Glob(glob)
+		if len(units) != 1 || !strings.Contains(out, command+units[0]) {
+			t.Fatalf("%s -> %v\n%s", glob, units, out)
 		}
 		unit, _ := os.ReadFile(units[0])
-		if !strings.Contains(string(unit), "sync --watch --dir") {
+		if !strings.Contains(string(unit), "sync --watch --dir") && !strings.Contains(string(unit), "<string>--watch</string>") {
 			t.Fatalf("unit:\n%s", unit)
 		}
 	})
@@ -665,6 +733,9 @@ func TestTwoMachines(t *testing.T) {
 		manifests, _ := filepath.Glob(filepath.Join(w.data, bucket, "*", "hosts", "*", "manifest.json"))
 		if len(manifests) != 3 {
 			t.Fatalf("want 3 manifests (A, B, guard), got %v", manifests)
+		}
+		if reason := missingPythonModule("python3", "jsonschema"); reason != "" {
+			t.Skip(reason)
 		}
 		script := `import json, sys, jsonschema
 schema = json.load(open(sys.argv[1]))
@@ -728,6 +799,27 @@ print("valid:", len(sys.argv) - 2)`
 			}
 		}
 		w.record("Worker reader", "-", "node readers/worker/test/e2e.ts fs-test demo", string(out), w.ops.take())
+	})
+
+	t.Run("nothing is written in the home directory outside ~/.folder-sync", func(t *testing.T) {
+		// WHY: the README promises everything lives in ~/.folder-sync/; rclone alone would
+		// have made ~/.config/rclone. install-service on a Mac adds ~/Library/LaunchAgents.
+		allowed := map[string]bool{".folder-sync": true}
+		if runtime.GOOS == "darwin" {
+			allowed["Library"] = true
+		}
+		for _, m := range []*machine{a, b} {
+			w.must(m, "version")
+			entries, err := os.ReadDir(m.home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if !allowed[entry.Name()] {
+					t.Errorf("%s: %s appeared in the home directory", m.name, filepath.Join(m.home, entry.Name()))
+				}
+			}
+		}
 	})
 
 	t.Run("no secret is ever written outside credentials.json or printed", func(t *testing.T) {

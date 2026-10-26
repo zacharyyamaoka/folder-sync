@@ -320,7 +320,7 @@ Real R2 and the Windows box are not touched yet: both checks are written and wai
 <ol>
 <li>Cloudflare dashboard → R2 → <b>Create bucket</b> <code>folder-sync</code>. Leave public access off: no r2.dev URL, no custom domain on the bucket.</li>
 <li>R2 → <b>Manage API tokens</b> → Create API token: "Object Read &amp; Write", applied to <code>folder-sync</code> only. Copy the access key id, the secret (shown once) and the account id.</li>
-<li><code>export FOLDER_SYNC_ACCOUNT_ID=… FOLDER_SYNC_ACCESS_KEY_ID=… FOLDER_SYNC_SECRET_ACCESS_KEY=… FOLDER_SYNC_CHECK_BUCKET=folder-sync</code>, then <code>/home/bam/folder-sync/scripts/check-r2</code>. Five PASS lines expected; it deletes the two objects it writes under <code>_checks/</code>.</li>
+<li><code>export FOLDER_SYNC_ACCOUNT_ID=… FOLDER_SYNC_ACCESS_KEY_ID=… FOLDER_SYNC_SECRET_ACCESS_KEY=… FOLDER_SYNC_CHECK_BUCKET=folder-sync</code>, then <code>"$HOME/folder-sync/scripts/check-r2"</code>. Five PASS lines expected; it deletes the two objects it writes under <code>_checks/</code>.</li>
 <li>In the bucket's settings: a lifecycle rule deleting <code>_trash/</code> after 30 days, a bucket lock on <code>_trash/</code> for 30 days, and a budget alert at a few dollars a month.</li>
 </ol>
 <h3>The Windows box (about 10 minutes)</h3>
@@ -342,8 +342,8 @@ Real R2 and the Windows box are not touched yet: both checks are written and wai
 </ul>
 
 <h2>Try it</h2>
-<pre>/home/bam/folder-sync/scripts/dev-tools
-env -C /home/bam/folder-sync PATH=$HOME/.local/go/bin:$PATH go test ./...</pre>
+<pre>"$HOME/folder-sync/scripts/dev-tools"
+PATH="$HOME/.local/go/bin:$PATH" go -C "$HOME/folder-sync" test ./...</pre>
 <p class="muted">Toolchain: {esc(evidence["go_version"])} (official tarball, SHA-256 verified against go.dev), {esc(evidence["rclone_version"])} (SHA-256 verified against SHA256SUMS on downloads.rclone.org and GitHub), node {esc(evidence["node_version"])}, Python {esc(evidence["python_version"])}. Report built by <code>docs/report/build.py</code> from <code>collect.py</code> and <code>record_demo.py</code> output.</p>
 </main></body></html>
 """
