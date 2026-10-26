@@ -578,6 +578,18 @@ func TestTwoMachines(t *testing.T) {
 			t.Fatalf("--watch exit: %v\n%s", err, buf.String())
 		}
 		w.record("A: sync --watch", "A", "folder-sync sync --watch   (Ctrl-C after one change)", buf.String(), w.ops.take())
+		// A stop that lands while the manifest is being published must still commit it locally,
+		// or the next round publishes it again (seq + 1) and peers' conditional GETs miss.
+		states, _ := filepath.Glob(filepath.Join(a.home, ".folder-sync", "projects", project+"-*"))
+		if len(states) != 1 {
+			t.Fatalf("A's state dirs: %v", states)
+		}
+		if committed, _ := os.ReadFile(filepath.Join(states[0], "manifest.json")); !strings.Contains(string(committed), "watched.md") {
+			t.Errorf("--watch stopped with the published manifest uncommitted:\n%s", committed)
+		}
+		if _, err := os.Stat(filepath.Join(states[0], "manifest.pending.json")); err == nil {
+			t.Error("--watch stopped with manifest.pending.json left behind")
+		}
 		editConfig(t, a, `interval = "1s"`, `interval = "10s"`)
 		w.must(b, "sync", "--once")
 		w.ops.take()
