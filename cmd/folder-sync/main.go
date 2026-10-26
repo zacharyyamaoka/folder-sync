@@ -75,7 +75,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "status":
 		err = cmdStatus(args[1:], stdout)
 	case "version":
-		v, _ := rclone.Version(rcloneBinary(mustLayout()))
+		l := mustLayout()
+		v, _ := rclone.Version(rcloneBinary(l), l)
 		fmt.Fprintf(stdout, "folder-sync %s (%s/%s), rclone pinned %s, found: %s\n", version, runtime.GOOS, runtime.GOARCH, rclonebin.Version, orNone(v))
 	default:
 		fmt.Fprintf(stderr, "folder-sync: unknown command %q\n\n", args[0])
@@ -151,7 +152,7 @@ func ensureRclone(l layout.Layout, out io.Writer) (string, error) {
 			return "", err
 		}
 	}
-	v, err := rclone.Version(bin)
+	v, err := rclone.Version(bin, l)
 	if err != nil {
 		return "", err
 	}
@@ -192,7 +193,7 @@ func cmdInit(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	v, _ := rclone.Version(bin)
+	v, _ := rclone.Version(bin, l)
 	fmt.Fprintf(out, "rclone: %s (%s)\n", v, bin)
 
 	h, minted, err := host.Ensure(l.HostFile)
@@ -460,7 +461,7 @@ func installService(dir string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(file.Path, file.Content, 0o644); err != nil {
+	if err := file.Write(); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "Wrote %s\nfolder-sync does not register services itself. To start `sync --watch` at login, run:\n", file.Path)

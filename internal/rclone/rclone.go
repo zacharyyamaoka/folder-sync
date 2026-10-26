@@ -106,8 +106,10 @@ func (r Runner) Run(ctx context.Context, args ...string) ([]byte, error) {
 
 // Version returns the first line of `rclone version`, or an error that says
 // what to check when the binary cannot run at all (antivirus on Windows).
-func Version(bin string) (string, error) {
-	out, err := exec.Command(bin, "version").Output()
+// WHY: it passes the same global flags as every other call, because even
+// `rclone version` creates ~/.config/rclone when it is not told where its config is.
+func Version(bin string, l layout.Layout) (string, error) {
+	out, err := exec.Command(bin, append([]string{"version"}, Runner{Layout: l}.GlobalFlags()...)...).Output()
 	if err != nil {
 		return "", fmt.Errorf("cannot run %s (%v). On Windows, Defender or Smart App Control may be blocking it: "+
 			"adding an exclusion is your call, not folder-sync's; init stops here", bin, err)

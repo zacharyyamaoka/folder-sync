@@ -11,6 +11,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"unicode/utf16"
 
@@ -33,6 +35,14 @@ type File struct {
 	Path     string
 	Content  []byte
 	Commands []string
+}
+
+// Write creates the directory the file lives in, then the file.
+func (f File) Write() error {
+	if err := os.MkdirAll(filepath.Dir(f.Path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(f.Path, f.Content, 0o644)
 }
 
 // Generate renders the service file for spec.GOOS.
@@ -187,7 +197,9 @@ func utf16LE(text string) []byte {
 
 func launchd(spec Spec) File {
 	label := "dev.folder-sync." + spec.StateKey
-	path := layout.Join(spec.GOOS, spec.Layout.Service, label+".plist")
+	// WHY: launchd loads ~/Library/LaunchAgents at login and nowhere else. A plist kept under
+	// ~/.folder-sync/service would be bootstrapped now and silently gone after a reboot.
+	path := layout.Join(spec.GOOS, spec.Layout.Home, "Library", "LaunchAgents", label+".plist")
 	logPath := layout.Join(spec.GOOS, spec.Layout.Logs, spec.StateKey+".launchd.log")
 	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

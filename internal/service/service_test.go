@@ -3,6 +3,8 @@ package service
 import (
 	"encoding/binary"
 	"encoding/xml"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -115,11 +117,42 @@ func TestLaunchdPlist(t *testing.T) {
 	if err := xml.Unmarshal(f.Content, &plist); err != nil {
 		t.Fatalf("not well-formed: %v", err)
 	}
-	if !strings.Contains(string(f.Content), "<string>--watch</string>") || f.Path != "/Users/zach/.folder-sync/service/dev.folder-sync.demo-1a2b3c4d.plist" {
-		t.Fatal(string(f.Content))
+	// WHY: launchd reloads ~/Library/LaunchAgents at login and nothing else, so a plist kept
+	// under ~/.folder-sync/service would be lost at the next reboot.
+	if !strings.Contains(string(f.Content), "<string>--watch</string>") || f.Path != "/Users/zach/Library/LaunchAgents/dev.folder-sync.demo-1a2b3c4d.plist" {
+		t.Fatal(f.Path, string(f.Content))
 	}
-	if !strings.HasPrefix(f.Commands[0], "launchctl bootstrap gui/$(id -u) ") {
+	if len(f.Commands) != 1 || f.Commands[0] != "launchctl bootstrap gui/$(id -u) "+f.Path {
 		t.Fatal(f.Commands)
+	}
+	if !strings.Contains(string(f.Content), "/Users/zach/.folder-sync/logs/demo-1a2b3c4d.launchd.log") {
+		t.Errorf("the log stays under ~/.folder-sync:\n%s", f.Content)
+	}
+}
+
+func TestOnlyLaunchdLeavesTheFolderSyncDirectory(t *testing.T) {
+	for goos, vars := range map[string]map[string]string{
+		"linux":   {"HOME": "/home/bam"},
+		"windows": {"USERPROFILE": `C:\Users\BAM`},
+	} {
+		f, err := Generate(spec(t, goos, vars, "exe", "folder"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(f.Path, spec(t, goos, vars, "exe", "folder").Layout.Service) {
+			t.Errorf("%s: unit moved out of ~/.folder-sync/service: %s", goos, f.Path)
+		}
+	}
+}
+
+func TestWriteCreatesTheDirectoryItLivesIn(t *testing.T) {
+	// ~/Library/LaunchAgents does not exist on a Mac that never ran a user agent.
+	path := filepath.Join(t.TempDir(), "Library", "LaunchAgents", "dev.folder-sync.x.plist")
+	if err := (File{Path: path, Content: []byte("x")}).Write(); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "x" {
+		t.Fatalf("%q %v", data, err)
 	}
 }
 

@@ -1,6 +1,8 @@
 package rclone
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -55,5 +57,39 @@ func TestEnvCarriesTheRemoteAndDropsTheUsersRcloneSettings(t *testing.T) {
 func TestPath(t *testing.T) {
 	if got := Path("bkt", "/demo/hosts/x"); got != "fsremote:bkt/demo/hosts/x" {
 		t.Fatal(got)
+	}
+}
+
+// WHY: `rclone version` alone creates ~/.config/rclone, which the README promises never
+// happens (everything lives in ~/.folder-sync/). Version must say where the config is.
+func TestVersionPassesTheConfigUnderFolderSync(t *testing.T) {
+	home := t.TempDir()
+	l, err := layout.For("darwin", func(key string) string { return map[string]string{"HOME": home}[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	argvFile := filepath.Join(home, "argv")
+	fake := filepath.Join(home, "rclone")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argvFile + "\necho 'rclone v1.75.2'\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Skip("cannot write a fake rclone here:", err)
+	}
+	line, err := Version(fake, l)
+	if err != nil || line != "rclone v1.75.2" {
+		t.Fatalf("%q %v", line, err)
+	}
+	data, _ := os.ReadFile(argvFile)
+	argv := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if argv[0] != "version" {
+		t.Errorf("argv = %q", argv)
+	}
+	conf := ""
+	for i := 0; i < len(argv)-1; i++ {
+		if argv[i] == "--config" {
+			conf = argv[i+1]
+		}
+	}
+	if conf != filepath.Join(home, ".folder-sync", "rclone.conf") {
+		t.Errorf("--config = %q in %q", conf, argv)
 	}
 }
