@@ -19,6 +19,9 @@ import (
 	"folder-sync/internal/rclone"
 )
 
+// manifestPublishTimeout bounds the one publish a stop waits for.
+const manifestPublishTimeout = time.Minute
+
 // LocalFile is one file found in the project folder.
 type LocalFile struct {
 	Path  string
@@ -240,7 +243,14 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 	if err := manifest.Save(pending, m); err != nil {
 		return err
 	}
-	if _, err := p.Rclone.Run(ctx, "copyto", pending,
+	// WHY: a stop (SIGTERM, Ctrl-C) must not cut the publish between the PUT and the local
+	// commit below. The PUT lands, rclone is killed during its post-upload check, the rename
+	// never runs, and the next round sees the same files as changed and PUTs the manifest a
+	// second time (seq + 1), so every peer's conditional GET answers 200 instead of 304.
+	// The manifest is one small object; the stop waits for it, bounded.
+	publishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), manifestPublishTimeout)
+	defer cancel()
+	if _, err := p.Rclone.Run(publishCtx, "copyto", pending,
 		rclone.Path(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName), "--no-check-dest"); err != nil {
 		return err
 	}
