@@ -12,6 +12,7 @@ folder-sync init      # this folder becomes a synced folder
 folder-sync sync      # once, or as a background service
 folder-sync publish   # make it readable online
 folder-sync status    # last rounds; --json prints folder-sync-status/1 for apps
+folder-sync projects  # the projects under the key's account root (one LIST): what a new machine can join
 ```
 
 The design is [`docs/peps/0001`](docs/peps/0001-wrap-rclone-and-r2.md) (accepted): rclone moves the files, one Cloudflare R2 bucket is the always-on copy, R2-Explorer is the web backdoor, and a thin Go binary owns the rest. Apps read projects through [the bucket contract](docs/CONTRACT.md): "the folder is the database".
@@ -43,7 +44,7 @@ Each machine publishes its own files to `<project>/hosts/<host-id>/` and receive
 
 ### Short-lived credentials
 
-Instead of a stored key, `FOLDER_SYNC_CREDENTIAL_PROCESS` can name a program (a JSON array, its argv, `argv[0]` absolute) that prints short-lived keys scoped to one account prefix: AWS's `credential_process` JSON (`Version` 1, `AccessKeyId`, `SecretAccessKey`, `SessionToken`, `Expiration`) plus optional `Endpoint`, `Bucket` (the only bucket these keys can use), `Prefix` (the account root, like `users/AbC123/`), `Region` and `Provider`. folder-sync runs it before every round, caches the answer in `~/.folder-sync/session.json`, and syncs under that prefix ([`docs/CONTRACT.md`](docs/CONTRACT.md), "Bucket layout"). Exit 3 means signed out (`sync --once` then exits 4); any other failure is transient and still-valid cached keys carry on. `sync --once` exits 75 when another round holds the folder.
+Instead of a stored key, `FOLDER_SYNC_CREDENTIAL_PROCESS` can name a program (a JSON array, its argv, `argv[0]` absolute) that prints short-lived keys scoped to one account prefix: AWS's `credential_process` JSON (`Version` 1, `AccessKeyId`, `SecretAccessKey`, `SessionToken`, `Expiration`) plus optional `Endpoint`, `Bucket` (the only bucket these keys can use), `Prefix` (the account root, like `users/AbC123/`), `Region` and `Provider`. folder-sync runs it before every round, caches the answer in `~/.folder-sync/session.json`, and syncs under that prefix ([`docs/CONTRACT.md`](docs/CONTRACT.md), "Bucket layout"). Exit 3 means signed out (`sync --once` then exits 4); any other failure is transient and still-valid cached keys carry on. `sync --once` exits 75 when another round holds the folder. An app that signs a person's next machine in asks `folder-sync projects --json` which folders that person already syncs, and `sync --discover` looks for new machines at once instead of within 5 minutes ([`docs/peps/0002`](docs/peps/0002-short-lived-scoped-credentials.md)).
 
 ### Try it with no cloud account
 

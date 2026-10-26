@@ -257,6 +257,25 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 		}
 	})
 
+	t.Run("projects lists only the key's own account root", func(t *testing.T) {
+		for _, c := range []struct {
+			m    *machine
+			root string
+		}{{a2, rootA}, {b1, rootB}} {
+			var doc struct {
+				Schema   string   `json:"schema"`
+				Root     string   `json:"root"`
+				Projects []string `json:"projects"`
+			}
+			if err := json.Unmarshal([]byte(w.must(c.m, "projects", "--json")), &doc); err != nil {
+				t.Fatal(err)
+			}
+			if doc.Schema != "folder-sync-projects/1" || doc.Root != c.root || strings.Join(doc.Projects, ",") != "home" {
+				t.Errorf("%s: projects %+v", c.m.name, doc)
+			}
+		}
+	})
+
 	t.Run("B never sees A, and A never sees B", func(t *testing.T) {
 		if entries, _ := os.ReadDir(filepath.Join(b1.folder, "hosts")); len(entries) != 0 {
 			t.Fatalf("B1 holds peer copies: %v", entries)

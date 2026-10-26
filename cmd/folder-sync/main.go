@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -48,6 +49,8 @@ Usage:
                                                                      the R2-Explorer config and prints its deploy command
   folder-sync status  [--json] [--dir PATH]                          last push, pull and clean run, per project;
                                                                      --json prints folder-sync-status/1
+  folder-sync projects [--json] [--bucket NAME]                      the projects under the key's account root
+                                                                     (one LIST): what a new machine can join
   folder-sync version
 
 The key comes from FOLDER_SYNC_ACCESS_KEY_ID, FOLDER_SYNC_SECRET_ACCESS_KEY and
@@ -78,6 +81,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdPublish(args[1:], stdout)
 	case "status":
 		err = cmdStatus(args[1:], stdout)
+	case "projects":
+		err = cmdProjects(args[1:], stdout)
 	case "version":
 		l := mustLayout()
 		v, _ := rclone.Version(rcloneBinary(l), l)
@@ -582,6 +587,74 @@ type statusProject struct {
 	Root    string           `json:"root"`
 	Folder  string           `json:"folder"`
 	Last    *syncer.LastSync `json:"last"` // null before the first round
+}
+
+// ProjectsSchema names `projects --json`.
+const ProjectsSchema = "folder-sync-projects/1"
+
+// cmdProjects lists the projects under the credentials' account root (one delimiter LIST, nothing downloaded).
+// WHY: an app that signs a person's second machine in needs to know which folders that person already syncs, so the
+// machine joins them instead of starting empty ones of the same name (vibetracks PEP 0011b).
+func cmdProjects(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("projects", flag.ContinueOnError)
+	bucket := fs.String("bucket", "", "the bucket (default: the one the credentials are bound to, else "+config.DefaultBucket+")")
+	asJSON := fs.Bool("json", false, "print one folder-sync-projects/1 JSON document")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	l := mustLayout()
+	if err := ensureDirs(l); err != nil {
+		return err
+	}
+	bin, err := ensureRclone(l, out)
+	if err != nil {
+		return err
+	}
+	c, err := creds.NewResolver(l.Credentials, l.Session, os.Getenv).Current()
+	if err != nil {
+		return err
+	}
+	b := *bucket
+	if b == "" {
+		b = c.Bucket
+	}
+	if b == "" {
+		b = config.DefaultBucket
+	}
+	if err := syncer.CheckBucket(c, b); err != nil {
+		return err
+	}
+	runner := rclone.Runner{Bin: bin, Layout: l, Creds: c}
+	listed, err := runner.Run(context.Background(), "lsjson", "--dirs-only", "--no-mimetype", "--no-modtime",
+		rclone.Path(b, strings.TrimSuffix(c.Prefix, "/")))
+	if err != nil && !strings.Contains(err.Error(), "directory not found") {
+		return err
+	}
+	var dirs []struct{ Path string }
+	if len(listed) > 0 {
+		if err := json.Unmarshal(listed, &dirs); err != nil {
+			return fmt.Errorf("rclone lsjson: %w", err)
+		}
+	}
+	names := []string{}
+	for _, dir := range dirs {
+		if !strings.HasPrefix(dir.Path, "_") && config.ValidateProject(dir.Path) == nil {
+			names = append(names, dir.Path)
+		}
+	}
+	sort.Strings(names)
+	if *asJSON {
+		data, err := json.MarshalIndent(map[string]any{"schema": ProjectsSchema, "bucket": b, "root": c.Prefix, "projects": names}, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(out, string(data))
+		return nil
+	}
+	for _, name := range names {
+		fmt.Fprintln(out, name)
+	}
+	return nil
 }
 
 func cmdStatus(args []string, out io.Writer) error {

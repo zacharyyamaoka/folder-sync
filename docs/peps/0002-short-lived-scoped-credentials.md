@@ -29,7 +29,9 @@
    folder's files into another account"). WHY: two people on one computer account must never copy one person's folder
    into the other's prefix. A prefix-scoped key may not HEAD the bucket, so `init` checks it with one LIST under the root.
 4. **`sync --discover`** looks for new machines this round (one LIST) instead of waiting for the 5-minute scan, so an
-   app's "sync now" finds a machine that just joined. **`status --json`** prints `folder-sync-status/1` for apps.
+   app's "sync now" finds a machine that just joined. **`projects --json`** lists the projects under the keys' account
+   root (one delimiter LIST), so an app can join a person's next machine to the folders they already sync.
+   **`status --json`** prints `folder-sync-status/1` for apps.
 5. **The stand-in.** `e2e/r2standin` checks requests the way R2 documents its temporary credentials (the JWT, the derived
    secret, scope or actions, `prefixPaths`), conservatively where the page is silent (a listing's prefix and a copy's
    source must lie inside the scope), in front of `rclone serve s3`. `e2e/scoped_test.go` syncs two people on three
