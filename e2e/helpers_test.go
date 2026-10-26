@@ -1,0 +1,61 @@
+package e2e
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestTwinPlanOnACaseInsensitiveFolderHasNoTwinAssertions(t *testing.T) {
+	insensitive := planTwins(false)
+	if insensitive.writeTwin || len(insensitive.forbidden) > 0 || len(insensitive.statusWants) > 0 {
+		t.Errorf("one file, not a twin: %+v", insensitive)
+	}
+	if len(insensitive.uploaded) != 1 || insensitive.uploaded[0] != "README.md" {
+		t.Errorf("the single README.md is a normal file and uploads: %+v", insensitive)
+	}
+	sensitive := planTwins(true)
+	if !sensitive.writeTwin || len(sensitive.forbidden) != 2 || len(sensitive.uploaded) != 0 {
+		t.Errorf("a case-sensitive folder keeps the twin check: %+v", sensitive)
+	}
+}
+
+func TestCaseProbeAnswersForThisFilesystem(t *testing.T) {
+	dir := t.TempDir()
+	got, err := folderIsCaseSensitive(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An independent oracle: write two names that differ only in case and count the files.
+	os.WriteFile(filepath.Join(dir, "Twin"), []byte("1"), 0o644)
+	os.WriteFile(filepath.Join(dir, "twin"), []byte("2"), 0o644)
+	entries, _ := os.ReadDir(dir)
+	if want := len(entries) == 2; got != want {
+		t.Errorf("probe says case-sensitive=%v, but %d entries after writing Twin and twin", got, len(entries))
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, ".case-probe-*")); len(left) != 0 {
+		t.Errorf("the probe left %v behind", left)
+	}
+}
+
+func TestMissingPythonModuleNamesTheModule(t *testing.T) {
+	reason := missingPythonModule("python3", "folder_sync_no_such_module")
+	if !strings.Contains(reason, `"folder_sync_no_such_module"`) || !strings.Contains(reason, "pip install folder_sync_no_such_module") {
+		t.Errorf("skip message must name the module and how to get it: %q", reason)
+	}
+	if reason := missingPythonModule("python3", "json"); reason != "" {
+		t.Errorf("json is stdlib: %q", reason)
+	}
+}
+
+func TestServiceExpectationPerOS(t *testing.T) {
+	glob, command := serviceExpectation("darwin", "/Users/zach")
+	if glob != "/Users/zach/Library/LaunchAgents/dev.folder-sync.demo-*.plist" || !strings.HasPrefix(command, "launchctl bootstrap") {
+		t.Errorf("darwin: %s %s", glob, command)
+	}
+	glob, command = serviceExpectation("linux", "/home/bam")
+	if !strings.HasSuffix(glob, ".folder-sync/service/folder-sync-demo-*.service") || !strings.HasPrefix(command, "systemctl --user") {
+		t.Errorf("linux: %s %s", glob, command)
+	}
+}
