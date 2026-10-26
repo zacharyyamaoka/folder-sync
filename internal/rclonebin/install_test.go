@@ -69,6 +69,63 @@ func TestInstallVerifiesThePinnedChecksum(t *testing.T) {
 	}
 }
 
+// TestConcurrentInstallsBothSucceed: an app's background service and its sign-in can run folder-sync's first command on
+// a new machine at once; both must end with a whole rclone and no temp file left (each writes a temp file of its own).
+func TestConcurrentInstallsBothSucceed(t *testing.T) {
+	exe := "rclone"
+	if runtime.GOOS == "windows" {
+		exe = "rclone.exe"
+	}
+	// a binary of a few MB, so the writes overlap the way a real 60 MB rclone's do
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	f, err := w.Create("rclone-" + Version + "-test/" + exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Write([]byte("#!/bin/sh\necho rclone " + Version + "\n#" + strings.Repeat("x", 4<<20) + "\n"))
+	w.Close()
+	data := buf.Bytes()
+	whole := 4 << 20
+	platform := Platform(runtime.GOOS, runtime.GOARCH)
+	saved, had := SHA256[platform]
+	sum := sha256.Sum256(data)
+	SHA256[platform] = hex.EncodeToString(sum[:])
+	defer func() {
+		if had {
+			SHA256[platform] = saved
+		} else {
+			delete(SHA256, platform)
+		}
+	}()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(data) }))
+	defer server.Close()
+	dir := filepath.Join(t.TempDir(), "bin")
+	dest := filepath.Join(dir, exe)
+	const n = 8
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() { errs <- Install(server.URL, runtime.GOOS, runtime.GOARCH, dest) }()
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("install %d: %v", i, err)
+		}
+	}
+	if got, _ := os.ReadFile(dest); !strings.HasPrefix(string(got), "#!/bin/sh\necho rclone "+Version) || len(got) < whole {
+		t.Errorf("the installed rclone is not whole: %d bytes", len(got))
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, entry := range entries {
+		if entry.Name() != exe {
+			t.Errorf("left behind: %s", entry.Name())
+		}
+	}
+	if info, err := os.Stat(dest); err == nil && runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
+		t.Errorf("rclone is not executable: %v", info.Mode())
+	}
+}
+
 func TestPinsCoverEveryTarget(t *testing.T) {
 	for _, target := range []string{"linux-amd64", "linux-arm64", "osx-amd64", "osx-arm64", "windows-amd64", "windows-arm64"} {
 		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(SHA256[target]) {

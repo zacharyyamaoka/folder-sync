@@ -11,6 +11,7 @@ Two reference readers implement this page and are tested against a live stand-in
 
 ```text
 <bucket>/
+  <root>                             optional account root, like users/AbC123/ (below); every key starts with it
   <project>/
     hosts/
       <host-id>/                     one machine's files; only that machine writes here
@@ -23,6 +24,7 @@ Two reference readers implement this page and are tested against a live stand-in
   _leases/<project>.json             the shared folder's lock: v1
 ```
 
+- `<root>` is the empty string (the layout above, unchanged) or an account root: one to eight segments, each `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, each followed by `/` (so `users/AbC123/`; exactly `^([A-Za-z0-9][A-Za-z0-9._-]{0,127}/){1,8}$`). With a root, every key in this page, `_trash/` included, is that key with `<root>` in front: `<root><project>/hosts/<host-id>/manifest.json`, `<root>_trash/<project>/<host-id>/<UTC-stamp>/<path>`. The root comes from the credentials folder-sync is given, never from a project's config, and a folder keeps the root it was first synced under (a round under another root is refused). Readers take the root as an optional parameter whose default, `""`, reads a v0 bucket.
 - `<project>` matches `^[a-z0-9][a-z0-9._-]{0,62}$`. A leading `_` is reserved for folder-sync's own prefixes.
 - `<host-id>` is a lowercase UUID v4, minted once per machine and kept in that machine's `~/.folder-sync/host.json`. The readable name is the manifest's `host_name`.
 - `<UTC-stamp>` is `YYYYMMDDTHHMMSSZ`, the start of the round that replaced the object.
@@ -70,9 +72,9 @@ Two reference readers implement this page and are tested against a live stand-in
 
 Only manifests and GETs. An app never needs to list the files themselves.
 
-1. **Find the hosts.** One delimiter listing: `ListObjectsV2(prefix="<project>/hosts/", delimiter="/")` returns one common prefix per host. Cache it; a new machine appears at most rarely. (An app that already knows its host ids skips this.)
-2. **Read each host's manifest.** `GET <project>/hosts/<host-id>/manifest.json`. Keep the ETag and send it as `If-None-Match` next time: an unchanged manifest costs one `304`.
-3. **The project's view** is the union of all hosts' `files[]`. A file's identity is `(host_id, path)`; its key is `<project>/hosts/<host-id>/<path>`. Two hosts may publish the same `path`: they are two files, and the app decides how to show them (Vibe Tracks shows them under their machine).
+1. **Find the hosts.** One delimiter listing: `ListObjectsV2(prefix="<root><project>/hosts/", delimiter="/")` returns one common prefix per host. Cache it; a new machine appears at most rarely. (An app that already knows its host ids skips this.)
+2. **Read each host's manifest.** `GET <root><project>/hosts/<host-id>/manifest.json`. Keep the ETag and send it as `If-None-Match` next time: an unchanged manifest costs one `304`.
+3. **The project's view** is the union of all hosts' `files[]`. A file's identity is `(host_id, path)`; its key is `<root><project>/hosts/<host-id>/<path>`. Two hosts may publish the same `path`: they are two files, and the app decides how to show them (Vibe Tracks shows them under their machine).
 4. **Read a file.** `GET` its key. Optionally check `sha256`.
 
 Costs on R2: step 1 is one Class A operation; each manifest check and each file read is one Class B operation; egress is free.
@@ -95,7 +97,7 @@ Either way, re-read the manifest (it has changed) and retry once. Never treat an
 ## Deletions and the trash
 
 - A path missing from the manifest is deleted. That is the only deletion signal; there are no tombstones.
-- The deleted or overwritten object is kept at `_trash/<project>/<host-id>/<UTC-stamp>/<path>`. An app can offer "restore" by copying it back to the owner's folder, never into `hosts/`.
+- The deleted or overwritten object is kept at `<root>_trash/<project>/<host-id>/<UTC-stamp>/<path>`. An app can offer "restore" by copying it back to the owner's folder, never into `hosts/`.
 - A bucket lifecycle rule expires `_trash/` after 30 days, and an R2 bucket lock on `_trash/` stops anyone deleting it sooner. Both are set once in the R2 dashboard (README, "Pending").
 - folder-sync never deletes more than `max_delete` files (default 50) in one round, and refuses outright when a folder that had files looks empty (unmounted disk).
 

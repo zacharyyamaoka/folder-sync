@@ -28,6 +28,7 @@ type Client struct {
 	Region          string // "auto" for R2
 	AccessKeyID     string
 	SecretAccessKey string
+	SessionToken    string // temporary credentials only; signed as x-amz-security-token
 	HTTP            *http.Client
 	Now             func() time.Time
 }
@@ -72,6 +73,16 @@ func uriEncode(s string) string {
 // Sign adds SigV4 headers (x-amz-date, x-amz-content-sha256, Authorization) to req.
 // Every header already on req, plus host, is signed.
 func Sign(req *http.Request, accessKeyID, secretAccessKey, region string, now time.Time, payloadHash string) {
+	SignWithToken(req, accessKeyID, secretAccessKey, "", region, now, payloadHash)
+}
+
+// SignWithToken is Sign for temporary credentials: a non-empty sessionToken is
+// added as x-amz-security-token and signed with the other headers (R2 and S3
+// reject temporary keys whose token is unsigned or missing).
+func SignWithToken(req *http.Request, accessKeyID, secretAccessKey, sessionToken, region string, now time.Time, payloadHash string) {
+	if sessionToken != "" {
+		req.Header.Set("x-amz-security-token", sessionToken)
+	}
 	amzDate := now.UTC().Format("20060102T150405Z")
 	day := amzDate[:8]
 	req.Header.Set("x-amz-date", amzDate)
@@ -140,6 +151,10 @@ func hmacSHA256(key []byte, data string) []byte {
 	return mac.Sum(nil)
 }
 
+func (c *Client) sign(req *http.Request) {
+	SignWithToken(req, c.AccessKeyID, c.SecretAccessKey, c.SessionToken, c.Region, c.now(), EmptySHA256)
+}
+
 func (c *Client) newRequest(method, bucket, key string) (*http.Request, error) {
 	u, err := url.Parse(strings.TrimRight(c.Endpoint, "/"))
 	if err != nil {
@@ -160,7 +175,7 @@ func (c *Client) HeadBucket(bucket string) error {
 	if err != nil {
 		return err
 	}
-	Sign(req, c.AccessKeyID, c.SecretAccessKey, c.Region, c.now(), EmptySHA256)
+	c.sign(req)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return err
@@ -175,6 +190,37 @@ func (c *Client) HeadBucket(bucket string) error {
 		return fmt.Errorf("the key cannot read bucket %q (HEAD returned %d): check the token's bucket scope", bucket, resp.StatusCode)
 	default:
 		return fmt.Errorf("HEAD bucket %q returned %s", bucket, resp.Status)
+	}
+}
+
+// ListOne lists at most one key under prefix: the cheapest request a
+// prefix-scoped credential may make (it cannot HEAD the bucket). 200 means the
+// key can read that prefix.
+func (c *Client) ListOne(bucket, prefix string) error {
+	req, err := c.newRequest(http.MethodGet, bucket, "")
+	if err != nil {
+		return err
+	}
+	query := url.Values{}
+	query.Set("list-type", "2")
+	query.Set("prefix", prefix)
+	query.Set("max-keys", "1")
+	req.URL.RawQuery = query.Encode()
+	c.sign(req)
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return fmt.Errorf("bucket %q does not exist (LIST returned 404)", bucket)
+	case http.StatusForbidden, http.StatusUnauthorized:
+		return fmt.Errorf("the key cannot list prefix %q in bucket %q (LIST returned %d): the credentials are expired or scoped to another prefix", prefix, bucket, resp.StatusCode)
+	default:
+		return fmt.Errorf("LIST prefix %q in bucket %q returned %s", prefix, bucket, resp.Status)
 	}
 }
 
@@ -195,7 +241,7 @@ func (c *Client) GetIfNoneMatch(bucket, key, etag string) (GetResult, error) {
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
-	Sign(req, c.AccessKeyID, c.SecretAccessKey, c.Region, c.now(), EmptySHA256)
+	c.sign(req)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return GetResult{}, err

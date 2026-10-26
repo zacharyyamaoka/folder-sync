@@ -34,6 +34,7 @@ type Registration struct {
 	Bucket       string `json:"bucket"`
 	Folder       string `json:"folder"`
 	HostID       string `json:"host_id"`
+	Root         string `json:"root,omitempty"` // the account root the folder was first synced under ("" = v0, none)
 	RegisteredAt string `json:"registered_at"`
 }
 
@@ -42,9 +43,54 @@ const RegistrationSchema = "folder-sync-project/1"
 
 // StateKey names a project folder's state dir: the project plus a hash of the folder's path,
 // so two clones of one project on a machine never share state.
-func StateKey(project, folder string) string {
-	sum := sha256.Sum256([]byte(folder))
+// WHY the root joins the hash only when set: v0 state dirs (root "") must keep their key.
+func StateKey(project, folder, root string) string {
+	hashed := folder
+	if root != "" {
+		hashed = folder + "\x00" + root
+	}
+	sum := sha256.Sum256([]byte(hashed))
 	return project + "-" + hex.EncodeToString(sum[:])[:8]
+}
+
+// RegisteredRoot is the account root the folder's state dir was registered with ("" when none or unregistered).
+func RegisteredRoot(l layout.Layout, project, folder string) string {
+	regs, _ := AllStates(l)
+	for _, reg := range regs {
+		if reg.Project == project && reg.Folder == folder {
+			return reg.Root
+		}
+	}
+	return ""
+}
+
+// ErrBusy matches (errors.Is) the lock being held by another round: nothing was done.
+var ErrBusy = errors.New("another folder-sync round is running for this folder")
+
+// ErrRootChanged matches (errors.Is) a round whose credentials carry another account root than the folder's.
+var ErrRootChanged = errors.New("account root changed")
+
+type rootChangedError struct{ old, now string }
+
+func (e *rootChangedError) Error() string {
+	return fmt.Sprintf("this folder syncs to account root %s; these credentials are for %s: "+
+		"folder-sync never moves a folder's files into another account", rootLabel(e.old), rootLabel(e.now))
+}
+
+func (e *rootChangedError) Is(target error) bool { return target == ErrRootChanged }
+
+func rootLabel(root string) string {
+	if root == "" {
+		return `""`
+	}
+	return root
+}
+
+// rootError explains why a folder never moves between account roots.
+// WHY refused: two people on one computer account must never copy one person's
+// folder into the other's prefix.
+func rootError(old, now string) error {
+	return &rootChangedError{old: old, now: now}
 }
 
 // Project is one synced folder on this machine, ready to run rounds.
@@ -54,6 +100,8 @@ type Project struct {
 	Layout   layout.Layout
 	Host     host.Host
 	Creds    creds.Creds
+	Root     string                      // the account root of Creds ("" = none): every key starts with it
+	Refresh  func() (creds.Creds, error) // the credentials to use now; Round calls it first
 	Rclone   rclone.Runner
 	S3       *s3.Client
 	StateDir string
@@ -79,22 +127,28 @@ func Open(folder string, l layout.Layout, getenv func(string) string, rcloneBin 
 	if err != nil {
 		return nil, err
 	}
-	c, err := creds.Load(l.Credentials, getenv)
+	resolver := creds.NewResolver(l.Credentials, l.Session, getenv)
+	c, err := resolver.Current()
 	if err != nil {
 		return nil, err
 	}
-	key := StateKey(cfg.Project, abs)
+	if err := CheckBucket(c, cfg.Bucket); err != nil {
+		return nil, err
+	}
+	key := StateKey(cfg.Project, abs, c.Prefix)
 	p := &Project{
 		Folder:   abs,
 		Config:   cfg,
 		Layout:   l,
 		Host:     h,
 		Creds:    c,
+		Root:     c.Prefix,
+		Refresh:  resolver.Current,
 		StateDir: filepath.Join(l.Projects, key),
 		Out:      out,
 		Now:      time.Now,
 	}
-	if err := EnsureRegistered(l, p.StateDir, Registration{Project: cfg.Project, Bucket: cfg.Bucket, Folder: abs, HostID: h.ID}); err != nil {
+	if err := EnsureRegistered(l, p.StateDir, Registration{Project: cfg.Project, Bucket: cfg.Bucket, Folder: abs, HostID: h.ID, Root: c.Prefix}); err != nil {
 		return nil, err
 	}
 	logFile, err := os.OpenFile(filepath.Join(l.Logs, key+".log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
@@ -103,8 +157,50 @@ func Open(folder string, l layout.Layout, getenv func(string) string, rcloneBin 
 	}
 	p.Log = logFile
 	p.Rclone = rclone.Runner{Bin: rcloneBin, Layout: l, Creds: c, Log: logFile, Debug: getenv("FOLDER_SYNC_DEBUG") != ""}
-	p.S3 = &s3.Client{Endpoint: c.Endpoint, Region: c.Region, AccessKeyID: c.AccessKeyID, SecretAccessKey: c.SecretAccessKey}
+	p.S3 = &s3.Client{}
+	p.useCreds(c)
 	return p, nil
+}
+
+// CheckBucket refuses a bucket other than the one the credentials are bound to.
+func CheckBucket(c creds.Creds, bucket string) error {
+	if c.Bucket != "" && c.Bucket != bucket {
+		return fmt.Errorf("bucket %q (from %s) differs from %q, the only bucket these credentials can use", bucket, config.FileName, c.Bucket)
+	}
+	return nil
+}
+
+// useCreds points the rclone runner and the S3 client at c's keys and token.
+func (p *Project) useCreds(c creds.Creds) {
+	p.Creds, p.Root = c, c.Prefix
+	p.Rclone.Creds = c
+	p.S3.Endpoint, p.S3.Region = c.Endpoint, c.Region
+	p.S3.AccessKeyID, p.S3.SecretAccessKey, p.S3.SessionToken = c.AccessKeyID, c.SecretAccessKey, c.SessionToken
+}
+
+// refreshCreds fetches the credentials for this round (a short-lived key may have
+// rolled over, or the person may have signed in as someone else) and refuses a
+// bucket or account root this folder is not bound to.
+func (p *Project) refreshCreds() error {
+	if p.Refresh == nil {
+		return nil
+	}
+	c, err := p.Refresh()
+	if err != nil {
+		return err
+	}
+	if err := CheckBucket(c, p.Config.Bucket); err != nil {
+		return err
+	}
+	registered := p.Root
+	if reg, err := ReadRegistration(p.StateDir); err == nil {
+		registered = reg.Root
+	}
+	if c.Prefix != registered {
+		return rootError(registered, c.Prefix)
+	}
+	p.useCreds(c)
+	return nil
 }
 
 // Close releases the log file.
@@ -117,6 +213,10 @@ func (p *Project) Close() {
 // EnsureRegistered writes project.json for a state dir, refusing a second folder on
 // this machine for the same project and bucket: both would write hosts/<host-id>/.
 func EnsureRegistered(l layout.Layout, stateDir string, reg Registration) error {
+	// WHY first: the same folder under another root is the account switch to refuse, not "a second folder".
+	if others := registrationsOfFolder(l, stateDir, reg); len(others) > 0 && others[0].Root != reg.Root {
+		return rootError(others[0].Root, reg.Root)
+	}
 	entries, _ := os.ReadDir(l.Projects)
 	for _, entry := range entries {
 		other := filepath.Join(l.Projects, entry.Name())
@@ -141,6 +241,23 @@ func EnsureRegistered(l layout.Layout, stateDir string, reg Registration) error 
 	return writeJSON(filepath.Join(stateDir, "project.json"), reg)
 }
 
+// registrationsOfFolder lists other state dirs registered for the same project, bucket and folder.
+func registrationsOfFolder(l layout.Layout, stateDir string, reg Registration) []Registration {
+	var found []Registration
+	entries, _ := os.ReadDir(l.Projects)
+	for _, entry := range entries {
+		other := filepath.Join(l.Projects, entry.Name())
+		if other == stateDir {
+			continue
+		}
+		existing, err := ReadRegistration(other)
+		if err == nil && existing.Project == reg.Project && existing.Bucket == reg.Bucket && existing.Folder == reg.Folder {
+			found = append(found, existing)
+		}
+	}
+	return found
+}
+
 // ReadRegistration reads a state dir's project.json.
 func ReadRegistration(stateDir string) (Registration, error) {
 	var reg Registration
@@ -153,14 +270,19 @@ func ReadRegistration(stateDir string) (Registration, error) {
 
 // Keys in the bucket (docs/CONTRACT.md).
 
-// HostPrefix is <project>/hosts/<host-id>.
+// HostPrefix is <root><project>/hosts/<host-id>.
 func (p *Project) HostPrefix(hostID string) string {
-	return p.Config.Project + "/hosts/" + hostID
+	return p.Root + p.Config.Project + "/hosts/" + hostID
 }
 
-// TrashPrefix is _trash/<project>/<host-id>/<UTC-stamp>.
+// TrashPrefix is <root>_trash/<project>/<host-id>/<UTC-stamp>.
 func (p *Project) TrashPrefix(stamp string) string {
-	return "_trash/" + p.Config.Project + "/" + p.Host.ID + "/" + stamp
+	return p.Root + "_trash/" + p.Config.Project + "/" + p.Host.ID + "/" + stamp
+}
+
+// HostsPrefix is <root><project>/hosts: the folder Discover lists.
+func (p *Project) HostsPrefix() string {
+	return p.Root + p.Config.Project + "/hosts"
 }
 
 // Stamp formats a round's UTC time for trash folders.
@@ -239,7 +361,7 @@ func (p *Project) AcquireLock() (*Lock, error) {
 			continue
 		}
 		holder, _ := os.ReadFile(path)
-		return nil, fmt.Errorf("another folder-sync round is running for this folder (%s: %s)", path, strings.TrimSpace(string(holder)))
+		return nil, fmt.Errorf("%w (%s: %s)", ErrBusy, path, strings.TrimSpace(string(holder)))
 	}
 	return nil, fmt.Errorf("cannot take the lock %s", path)
 }

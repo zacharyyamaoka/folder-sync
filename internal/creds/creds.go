@@ -1,8 +1,10 @@
 // Package creds holds the bucket key: environment variables first, then
 // ~/.folder-sync/credentials.json (written by `folder-sync login`, mode 0600).
 //
-// v0 uses one bucket-scoped R2 key (docs/peps/0001 §9). A secret is never
-// logged or printed; Redacted shows only the key id's last four characters.
+// v0 uses one bucket-scoped R2 key (docs/peps/0001 §9). v1 adds a credential
+// process (process.go): a program folder-sync runs for short-lived keys limited
+// to one account prefix. A secret or session token is never logged or printed;
+// Redacted shows only the key id's last four characters.
 package creds
 
 import (
@@ -12,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Environment variables a machine or cloud agent can set instead of logging in.
@@ -35,7 +38,13 @@ type Creds struct {
 	Endpoint        string `json:"endpoint"`
 	Provider        string `json:"provider"`
 	Region          string `json:"region"`
-	Source          string `json:"-"` // "env" or the file path
+	Source          string `json:"-"` // "env", "process" or the file path
+
+	// The fields below come only from a credential process (process.go) and are never stored in credentials.json.
+	SessionToken string    `json:"-"` // signed as x-amz-security-token; rclone gets it as SESSION_TOKEN
+	Expiration   time.Time `json:"-"` // zero: the process gave none
+	Prefix       string    `json:"-"` // the account root every key starts with ("" or "users/AbC123/")
+	Bucket       string    `json:"-"` // the only bucket these credentials can use ("" = any)
 }
 
 // FromEnv reads the key from the environment. ok is false when no key is set.
@@ -121,12 +130,19 @@ func (c Creds) Redacted() string {
 	} else {
 		id = "…"
 	}
-	return fmt.Sprintf("key %s at %s (provider %s, from %s)", id, c.Endpoint, c.Provider, c.Source)
+	scope := ""
+	if c.Prefix != "" {
+		scope = ", prefix " + c.Prefix
+	}
+	if c.SessionToken != "" {
+		scope += ", short-lived"
+	}
+	return fmt.Sprintf("key %s at %s (provider %s%s, from %s)", id, c.Endpoint, c.Provider, scope, c.Source)
 }
 
-// Scrub replaces the secret (and the key id) in text before it is logged or shown.
+// Scrub replaces the secret, the session token and the key id in text before it is logged or shown.
 func (c Creds) Scrub(text string) string {
-	for _, secret := range []string{c.SecretAccessKey, c.AccessKeyID} {
+	for _, secret := range []string{c.SecretAccessKey, c.SessionToken, c.AccessKeyID} {
 		if len(secret) >= 4 {
 			text = strings.ReplaceAll(text, secret, "[redacted]")
 		}

@@ -6,7 +6,8 @@ a boto3 client instead; nothing else changes.
 
     from folder_sync_read import Project, StdlibStore
     store = StdlibStore(endpoint, access_key_id, secret_access_key, bucket="folder-sync")
-    project = Project(store, "demo")
+    project = Project(store, "demo")                          # folder-sync v0: keys start at the project
+    mine = Project(store, "demo", root="users/AbC123/")      # an account root: every key starts with it
     for ref in project.files():
         print(ref.host_name, ref.path, ref.size)
     data = project.read(ref.host_id, ref.path)
@@ -16,6 +17,7 @@ the endpoint from FOLDER_SYNC_ENDPOINT or FOLDER_SYNC_ACCOUNT_ID):
 
     python3 folder_sync_read.py --bucket folder-sync --project demo list
     python3 folder_sync_read.py --bucket folder-sync --project demo cat <host-id> notes/plan.md
+    python3 folder_sync_read.py --bucket folder-sync --root users/AbC123/ --project demo list
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ import urllib.request
 import xml.etree.ElementTree as ElementTree
 
 SCHEMA = "folder-sync-manifest/1"
+ROOT_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 HOST_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
@@ -195,10 +198,20 @@ class FileRef:
     mtime: str
     sha256: str
     written_at: str
+    root: str = ""
 
     @property
     def key(self) -> str:
-        return f"{self.project}/hosts/{self.host_id}/{self.path}"
+        return f"{self.root}{self.project}/hosts/{self.host_id}/{self.path}"
+
+
+def check_root(root: str) -> None:
+    """An account root is "" or one to eight slash-ended segments, like "users/AbC123/" (docs/CONTRACT.md)."""
+    if root == "":
+        return
+    *segments, last = root.split("/")
+    if last != "" or not 1 <= len(segments) <= 8 or not all(ROOT_SEGMENT.match(s) for s in segments):
+        raise ContractError(f"bad account root {root!r}")
 
 
 def check_path(path: str) -> None:
@@ -226,16 +239,19 @@ def validate_manifest(manifest: dict, project: str, host_id: str) -> dict:
 class Project:
     """One project's view: the union of every host's manifest."""
 
-    def __init__(self, store, project: str):
+    def __init__(self, store, project: str, root: str = ""):
+        """root: the account root every key starts with ("" = folder-sync v0, unchanged)."""
+        check_root(root)
         self.store = store
         self.project = project
+        self.root = root
         self._manifests: dict[str, tuple[str, dict]] = {}  # host_id -> (etag, manifest)
         self._hosts: list[str] | None = None
 
     def hosts(self, refresh: bool = False) -> list[str]:
         """Host ids, from one delimiter listing of <project>/hosts/ (cached)."""
         if self._hosts is None or refresh:
-            prefix = f"{self.project}/hosts/"
+            prefix = f"{self.root}{self.project}/hosts/"
             found = [p[len(prefix):].rstrip("/") for p in self.store.list_prefixes(prefix)]
             self._hosts = sorted(host for host in found if HOST_ID.match(host))
         return self._hosts
@@ -243,7 +259,7 @@ class Project:
     def manifest(self, host_id: str) -> dict | None:
         """The host's manifest, re-fetched only if its ETag changed (conditional GET)."""
         etag, cached = self._manifests.get(host_id, ("", None))
-        result = self.store.get(f"{self.project}/hosts/{host_id}/manifest.json", etag)
+        result = self.store.get(f"{self.root}{self.project}/hosts/{host_id}/manifest.json", etag)
         if result.status == 304 and cached is not None:
             return cached
         if result.status == 404:
@@ -261,7 +277,7 @@ class Project:
                 continue
             for entry in manifest["files"]:
                 refs.append(FileRef(self.project, host_id, manifest.get("host_name", ""), entry["path"],
-                                    int(entry["size"]), entry["mtime"], entry["sha256"], entry["written_at"]))
+                                    int(entry["size"]), entry["mtime"], entry["sha256"], entry["written_at"], self.root))
         return sorted(refs, key=lambda ref: (ref.host_id, ref.path))
 
     def read(self, host_id: str, path: str, verify: bool = True) -> bytes:
@@ -272,7 +288,7 @@ class Project:
             entry = next((e for e in (manifest or {}).get("files", []) if e["path"] == path), None)
             if entry is None:
                 raise FileNotFoundError(f"{host_id}/{path} is not in the manifest (deleted, or never published)")
-            result = self.store.get(f"{self.project}/hosts/{host_id}/{path}")
+            result = self.store.get(f"{self.root}{self.project}/hosts/{host_id}/{path}")
             if result.status == 200 and (not verify or hashlib.sha256(result.body).hexdigest() == entry["sha256"]):
                 return result.body
             self._manifests.pop(host_id, None)  # the writer moved on; take its next manifest
@@ -297,13 +313,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read a folder-sync project (docs/CONTRACT.md).")
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--project", required=True)
+    parser.add_argument("--root", default="", help='account root, like "users/AbC123/" (default: none)')
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list", help="every file of every host, as JSON lines")
     cat = commands.add_parser("cat", help="print one file")
     cat.add_argument("host_id")
     cat.add_argument("path")
     args = parser.parse_args(argv)
-    project = Project(store_from_env(args.bucket), args.project)
+    project = Project(store_from_env(args.bucket), args.project, args.root)
     if args.command == "list":
         for ref in project.files():
             print(json.dumps(dataclasses.asdict(ref) | {"key": ref.key}))

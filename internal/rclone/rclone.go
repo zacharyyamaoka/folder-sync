@@ -62,6 +62,9 @@ func (r Runner) Env(base []string) []string {
 		}
 	}
 	prefix := "RCLONE_CONFIG_" + strings.ToUpper(Remote) + "_"
+	if r.Creds.SessionToken != "" {
+		env = append(env, prefix+"SESSION_TOKEN="+r.Creds.SessionToken)
+	}
 	env = append(env,
 		prefix+"TYPE=s3",
 		prefix+"PROVIDER="+r.Creds.Provider,

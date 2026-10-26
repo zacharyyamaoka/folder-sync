@@ -32,10 +32,15 @@ import (
 )
 
 const (
-	standInAddr = "127.0.0.1:4801"
-	proxyAddr   = "127.0.0.1:4802"
-	bucket      = "fs-test"
-	project     = "demo"
+	bucket  = "fs-test"
+	project = "demo"
+)
+
+// The stand-in's and the proxy's addresses: 4801 and 4802 unless FOLDER_SYNC_E2E_STANDIN / FOLDER_SYNC_E2E_PROXY
+// name others. WHY overridable: a machine where those ports are taken (or reserved for other work) still runs it.
+var (
+	standInAddr = addr("FOLDER_SYNC_E2E_STANDIN", "127.0.0.1:4801")
+	proxyAddr   = addr("FOLDER_SYNC_E2E_PROXY", "127.0.0.1:4802")
 )
 
 var repo = func() string {
@@ -102,7 +107,7 @@ func startProxy(t *testing.T, log *opLog) {
 	proxy := httputil.NewSingleHostReverseProxy(target) // keeps the client's Host header: SigV4 still verifies
 	listener, err := net.Listen("tcp", proxyAddr)
 	if err != nil {
-		t.Fatalf("port 4802 is busy (%v): stop whatever holds it", err)
+		t.Fatalf("%s is busy (%v): stop whatever holds it", proxyAddr, err)
 	}
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, status: 200}
@@ -127,7 +132,7 @@ func randomHex(n int) string {
 func startStandIn(t *testing.T, rcloneBin, dataDir, keyID, secret string) {
 	if conn, err := net.DialTimeout("tcp", standInAddr, 200*time.Millisecond); err == nil {
 		conn.Close()
-		t.Fatalf("port 4801 is busy: stop whatever holds it")
+		t.Fatalf("%s is busy: stop whatever holds it", standInAddr)
 	}
 	logFile := filepath.Join(filepath.Dir(dataDir), "stand-in.log")
 	cmd := exec.Command(rcloneBin, "serve", "s3", "--addr", standInAddr, "--auth-key", keyID+","+secret,

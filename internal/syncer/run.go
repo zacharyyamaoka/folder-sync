@@ -22,6 +22,7 @@ type LastSync struct {
 	Project        string          `json:"project"`
 	Bucket         string          `json:"bucket"`
 	Folder         string          `json:"folder"`
+	Root           string          `json:"root"`
 	HostID         string          `json:"host_id"`
 	HostName       string          `json:"host_name"`
 	RoundStarted   string          `json:"round_started"`
@@ -75,6 +76,9 @@ func ReconcileDue(last LastSync, now time.Time) bool {
 type Options struct {
 	PushOnly       bool // publish: bring the manifest up to date, skip the pull
 	ForceReconcile bool // sync --watch: reconcile at start
+	// ForceDiscover looks for new peers this round (one delimiter LIST) instead of waiting for DiscoverEvery.
+	// WHY: an app's "sync now" (vt sync now) should find a machine that joined a minute ago, not in 5 minutes.
+	ForceDiscover bool
 }
 
 // Round runs one round: (reconcile if due), push, pull, then writes last-sync.json.
@@ -89,7 +93,7 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 	stamp := Stamp(started)
 	last, _ := LoadLastSync(p.StateDir)
 	last.Schema = LastSyncSchema
-	last.Project, last.Bucket, last.Folder = p.Config.Project, p.Config.Bucket, p.Folder
+	last.Project, last.Bucket, last.Folder, last.Root = p.Config.Project, p.Config.Bucket, p.Folder, p.Root
 	last.HostID, last.HostName = p.Host.ID, p.Host.Name
 	last.RoundStarted = started.UTC().Format(time.RFC3339Nano)
 	p.reportedSkips = map[string]bool{}
@@ -99,13 +103,16 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 
 	var result Result
 	runErr := func() error {
+		if err := p.refreshCreds(); err != nil {
+			return err
+		}
 		if opts.ForceReconcile || ReconcileDue(last, started) {
 			if err := p.Reconcile(ctx, stamp, &result); err != nil {
 				return fmt.Errorf("reconcile: %w", err)
 			}
 			last.LastReconcile = p.Now().UTC().Format(time.RFC3339Nano)
 			last.LastDiscover = last.LastReconcile
-		} else if due(last.LastDiscover, DiscoverEvery, started) {
+		} else if opts.ForceDiscover || due(last.LastDiscover, DiscoverEvery, started) {
 			if err := p.Discover(ctx); err != nil {
 				return fmt.Errorf("discover peers: %w", err)
 			}

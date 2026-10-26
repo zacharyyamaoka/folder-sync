@@ -350,7 +350,7 @@ func (p *Project) Reconcile(ctx context.Context, stamp string, result *Result) e
 // Discover lists the project's hosts/ folder one level deep (one delimiter LIST, not a
 // full listing) and adds new peers. It runs with every reconcile and every DiscoverEvery.
 func (p *Project) Discover(ctx context.Context) error {
-	out, err := p.Rclone.Run(ctx, "lsjson", "--dirs-only", "--no-mimetype", "--no-modtime", rclone.Path(p.Config.Bucket, p.Config.Project+"/hosts"))
+	out, err := p.Rclone.Run(ctx, "lsjson", "--dirs-only", "--no-mimetype", "--no-modtime", rclone.Path(p.Config.Bucket, p.HostsPrefix()))
 	if err != nil && !strings.Contains(err.Error(), "directory not found") {
 		return err
 	}

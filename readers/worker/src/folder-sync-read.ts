@@ -2,7 +2,8 @@
 // only manifests and GETs: the reference reader for docs/CONTRACT.md.
 //
 //   import { Project } from "./folder-sync-read.ts";
-//   const project = new Project(env.BUCKET, "demo");
+//   const project = new Project(env.BUCKET, "demo");            // folder-sync v0: keys start at the project
+//   const mine = new Project(env.BUCKET, "demo", "users/AbC123/"); // an account root: every key starts with it
 //   const files = await project.files();
 //   const bytes = await project.read(files[0].hostId, files[0].path);
 //
@@ -10,6 +11,7 @@
 // with erasable TypeScript only, so Node runs the tests without a build step.
 
 export const SCHEMA = "folder-sync-manifest/1";
+const ROOT_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HOST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 // The subset of Cloudflare's R2Bucket binding this reader uses.
@@ -65,6 +67,16 @@ function hasBody(object: R2ObjectBodyLike | R2ObjectLike): object is R2ObjectBod
 	return typeof (object as R2ObjectBodyLike).arrayBuffer === "function";
 }
 
+/** An account root is "" or one to eight slash-ended segments, like "users/AbC123/" (docs/CONTRACT.md). */
+export function checkRoot(root: string): void {
+	if (root === "") return;
+	const segments = root.split("/");
+	const last = segments.pop();
+	if (last !== "" || segments.length < 1 || segments.length > 8 || !segments.every((s) => ROOT_SEGMENT.test(s))) {
+		throw new ContractError(`bad account root ${JSON.stringify(root)}`);
+	}
+}
+
 export function checkPath(path: string): void {
 	if (
 		!path ||
@@ -105,18 +117,22 @@ async function sha256Hex(data: ArrayBuffer): Promise<string> {
 export class Project {
 	readonly bucket: R2BucketLike;
 	readonly project: string;
+	readonly root: string;
 	private manifests = new Map<string, { etag: string; manifest: Manifest }>();
 	private hostIds: string[] | null = null;
 
-	constructor(bucket: R2BucketLike, project: string) {
+	/** root: the account root every key starts with ("" = folder-sync v0, unchanged). */
+	constructor(bucket: R2BucketLike, project: string, root = "") {
+		checkRoot(root);
 		this.bucket = bucket;
 		this.project = project;
+		this.root = root;
 	}
 
-	/** Host ids, from one delimiter listing of <project>/hosts/ (cached). */
+	/** Host ids, from one delimiter listing of <root><project>/hosts/ (cached). */
 	async hosts(refresh = false): Promise<string[]> {
 		if (this.hostIds && !refresh) return this.hostIds;
-		const prefix = `${this.project}/hosts/`;
+		const prefix = `${this.root}${this.project}/hosts/`;
 		const found: string[] = [];
 		let cursor: string | undefined;
 		do {
@@ -132,7 +148,7 @@ export class Project {
 	async manifest(hostId: string): Promise<Manifest | null> {
 		const cached = this.manifests.get(hostId);
 		const object = await this.bucket.get(
-			`${this.project}/hosts/${hostId}/manifest.json`,
+			`${this.root}${this.project}/hosts/${hostId}/manifest.json`,
 			cached ? { onlyIf: { etagDoesNotMatch: cached.etag } } : undefined,
 		);
 		if (object === null) {
@@ -160,7 +176,7 @@ export class Project {
 					project: this.project,
 					hostId,
 					hostName: manifest.host_name,
-					key: `${this.project}/hosts/${hostId}/${entry.path}`,
+					key: `${this.root}${this.project}/hosts/${hostId}/${entry.path}`,
 				});
 			}
 		}
@@ -174,7 +190,7 @@ export class Project {
 			const manifest = await this.manifest(hostId);
 			const entry = manifest?.files.find((e) => e.path === path);
 			if (!entry) throw new ContractError(`${hostId}/${path} is not in the manifest (deleted, or never published)`);
-			const object = await this.bucket.get(`${this.project}/hosts/${hostId}/${path}`);
+			const object = await this.bucket.get(`${this.root}${this.project}/hosts/${hostId}/${path}`);
 			if (object && hasBody(object)) {
 				const data = await object.arrayBuffer();
 				if (!verify || (await sha256Hex(data)) === entry.sha256) return data;
