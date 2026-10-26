@@ -21,7 +21,7 @@ The design is [`docs/peps/0001`](docs/peps/0001-wrap-rclone-and-r2.md) (accepted
 ~/.local/go/bin/go build -o ~/.folder-sync/bin/folder-sync ./cmd/folder-sync
 ```
 
-On first `init`, folder-sync downloads the pinned rclone v1.75.2 from downloads.rclone.org into `~/.folder-sync/bin/`, checks its SHA-256 against the pin compiled into the binary, and refuses on a mismatch. Everything it keeps lives in `~/.folder-sync/`, never in AppData. Cross-compile for Windows with `GOOS=windows GOARCH=amd64 go build -o dist/folder-sync.exe ./cmd/folder-sync`.
+On first `init`, folder-sync downloads the pinned rclone v1.75.2 from downloads.rclone.org into `~/.folder-sync/bin/`, checks its SHA-256 against the pin compiled into the binary, and refuses on a mismatch. Everything it keeps lives in `~/.folder-sync/`, never in AppData and never in `~/.config/rclone` (every rclone call is told its config path). The one exception is the macOS launchd plist, below. Cross-compile for Windows with `GOOS=windows GOARCH=amd64 go build -o dist/folder-sync.exe ./cmd/folder-sync`.
 
 ## Quick start
 
@@ -38,16 +38,27 @@ folder-sync init --project notes --bucket folder-sync
 folder-sync sync --watch
 ```
 
-Each machine publishes its own files to `<project>/hosts/<host-id>/` and receives its peers' files, read-only, in `<folder>/hosts/<host-id>/`. `folder-sync status` shows the last push, pull and clean run, peers, skipped names and conflicts. `folder-sync sync --install-service` writes a systemd user unit, a Task Scheduler task or a launchd agent and prints the one command that enables it. `folder-sync publish --viewer` writes the R2-Explorer Worker config (read-only, behind Cloudflare Access, `workers_dev` and previews off) and prints its deploy command.
+Each machine publishes its own files to `<project>/hosts/<host-id>/` and receives its peers' files, read-only, in `<folder>/hosts/<host-id>/`. `folder-sync status` shows the last push, pull and clean run, peers, skipped names and conflicts. `folder-sync sync --install-service` writes a systemd user unit, a Task Scheduler task or a launchd agent and prints the one command that enables it. The unit and task file live in `~/.folder-sync/service/`; the macOS plist goes to `~/Library/LaunchAgents/`, the only place launchd reloads at login, so it survives a reboot. `folder-sync publish --viewer` writes the R2-Explorer Worker config (read-only, behind Cloudflare Access, `workers_dev` and previews off) and prints its deploy command.
 
 ### Try it with no cloud account
 
+These assume the checkout is at `~/folder-sync`; Go is on your `PATH`, or at `~/.local/go/bin`.
+
 ```bash
-/home/bam/folder-sync/scripts/dev-tools
-PATH=$HOME/.local/go/bin:$PATH go test ./...
+"$HOME/folder-sync/scripts/dev-tools"
+PATH="$HOME/.local/go/bin:$PATH" go -C "$HOME/folder-sync" test ./...
 ```
 
-The end-to-end test (`e2e/`) runs two simulated machines (two HOME dirs, two folders) against `rclone serve s3` on 127.0.0.1:4801 with throwaway keys, through a counting proxy on :4802.
+`scripts/dev-tools` fetches the pinned rclone for Linux (amd64, arm64) or macOS (Intel, Apple silicon) into `.tools/`, checked against the same SHA-256 table `init` uses (`internal/rclonebin/install.go`). On Windows, use `folder-sync init`.
+
+The end-to-end test (`e2e/`) runs two simulated machines (two HOME dirs, two folders) against `rclone serve s3` on 127.0.0.1:4801 with throwaway keys, through a counting proxy on :4802. It needs:
+
+- `.tools/rclone` from `scripts/dev-tools`, or the whole suite skips.
+- `python3` with the `jsonschema` module (`python3 -m pip install jsonschema`) for the manifest-schema check. macOS's stock `python3` (3.9) does not ship it; without it that one subtest skips and says so.
+- `node` ≥ 22.18 for the Worker-reader check, which skips without it.
+- Ports 4801 and 4802 free.
+
+On a case-insensitive folder (the macOS default) `README.md` and `readme.md` are one file, so the case-twin checks are skipped there and the single file is expected to upload.
 
 ## What is real and what is pending
 
@@ -72,7 +83,7 @@ The end-to-end test (`e2e/`) runs two simulated machines (two HOME dirs, two fol
 
    ```bash
    export FOLDER_SYNC_ACCOUNT_ID=<account id> FOLDER_SYNC_ACCESS_KEY_ID=<key id> FOLDER_SYNC_SECRET_ACCESS_KEY=<secret> FOLDER_SYNC_CHECK_BUCKET=folder-sync
-   /home/bam/folder-sync/scripts/check-r2
+   "$HOME/folder-sync/scripts/check-r2"
    ```
 
    It writes and then deletes two objects under `_checks/<stamp>/`. All five lines should say PASS.

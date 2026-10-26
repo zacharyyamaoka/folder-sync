@@ -1,23 +1,53 @@
 #!/usr/bin/env bash
 # Fetch the pinned rclone into <repo>/.tools/ for development and the end-to-end test.
-# The pin and checksum match internal/rclonebin (a Go test keeps them equal).
+# The version and checksums are read from internal/rclonebin/install.go, the same table
+# `folder-sync init` verifies against, so there is one pin. Runs on Linux and macOS.
+#   scripts/dev-tools --print-plan   print "<platform> <url> <sha256>" and stop (used by a Go test)
+# FOLDER_SYNC_UNAME_S / FOLDER_SYNC_UNAME_M stand in for `uname -s` / `uname -m` (tests pose as another machine).
 set -euo pipefail
-RCLONE_VERSION="v1.75.2"
-RCLONE_SHA256="349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702"  # rclone-v1.75.2-linux-amd64.zip
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+pins="$repo/internal/rclonebin/install.go"
 tools="$repo/.tools"
-if [[ "$(uname -s)-$(uname -m)" != "Linux-x86_64" ]]; then
-  echo "dev-tools: only linux-amd64 is pinned here; use 'folder-sync init' for other platforms" >&2
+
+RCLONE_VERSION="$(awk -F'"' '/^const Version = /{print $2}' "$pins")"
+BASE_URL="$(awk -F'"' '/^const BaseURL = /{print $2}' "$pins")"
+
+# rclone's names for the machine: osx, not darwin; amd64/arm64, not x86_64/aarch64.
+machine="${FOLDER_SYNC_UNAME_S:-$(uname -s)}-${FOLDER_SYNC_UNAME_M:-$(uname -m)}"
+case "$machine" in
+  Linux-x86_64)          platform="linux-amd64" ;;
+  Linux-aarch64|Linux-arm64) platform="linux-arm64" ;;
+  Darwin-x86_64)         platform="osx-amd64" ;;
+  Darwin-arm64)          platform="osx-arm64" ;;
+  *)
+    echo "dev-tools: no pinned rclone for $machine; use 'folder-sync init' (Windows: see the README)" >&2
+    exit 1 ;;
+esac
+RCLONE_SHA256="$(awk -v key="\"$platform\":" '$1 == key {gsub(/[",]/, "", $2); print $2}' "$pins")"
+zip_name="rclone-$RCLONE_VERSION-$platform.zip"
+url="$BASE_URL/$RCLONE_VERSION/$zip_name"
+if [[ -z "$RCLONE_VERSION" || -z "$RCLONE_SHA256" ]]; then
+  echo "dev-tools: no pinned rclone for $platform in $pins" >&2
   exit 1
 fi
-if [[ -x "$tools/rclone" ]] && "$tools/rclone" version | head -1 | grep -q "rclone $RCLONE_VERSION"; then
+if [[ "${1:-}" == "--print-plan" ]]; then
+  echo "$platform $url $RCLONE_SHA256"
+  exit 0
+fi
+
+if [[ -x "$tools/rclone" ]] && "$tools/rclone" version --config /dev/null | head -1 | grep -q "rclone $RCLONE_VERSION"; then
   echo "dev-tools: $tools/rclone is already $RCLONE_VERSION"
   exit 0
 fi
 mkdir -p "$tools"
-zip="$tools/rclone-$RCLONE_VERSION-linux-amd64.zip"
-curl -fsSL "https://downloads.rclone.org/$RCLONE_VERSION/rclone-$RCLONE_VERSION-linux-amd64.zip" -o "$zip"
-echo "$RCLONE_SHA256  $zip" | sha256sum -c -
+zip="$tools/$zip_name"
+curl -fsSL "$url" -o "$zip"
+# macOS has shasum, not sha256sum.
+if command -v sha256sum >/dev/null 2>&1; then
+  echo "$RCLONE_SHA256  $zip" | sha256sum -c -
+else
+  echo "$RCLONE_SHA256  $zip" | shasum -a 256 -c -
+fi
 python3 - "$zip" "$tools/rclone" <<'PY'
 import sys, zipfile, os
 zip_path, out = sys.argv[1], sys.argv[2]
@@ -29,4 +59,4 @@ os.chmod(out + ".tmp", 0o755)
 os.replace(out + ".tmp", out)
 PY
 rm -f "$zip"
-"$tools/rclone" version | head -1
+"$tools/rclone" version --config /dev/null | head -1
