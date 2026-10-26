@@ -105,6 +105,7 @@ Either way, re-read the manifest (it has changed) and retry once. Never treat an
 
 - Only folder-sync writes `hosts/<host-id>/`, and only from the machine that owns `<host-id>`. An app that writes there breaks the single-writer rule and will be overwritten or moved to `_trash/` by the owner's next reconcile.
 - An app that wants to change a file writes it into a synced folder on some machine; folder-sync publishes it from there.
+- A browser writes through folder-sync's accounts Worker, which is itself one more host of the folder: its web host (`host_name` `"web"`, a host id minted on the first write) writes files, `_trash/` and its manifest exactly as a round does, its manifest PUT conditional on the last ETag, and every machine pulls it read-only like any peer ([`docs/peps/0003`](peps/0003-accounts.md) §3.4).
 - Two-way folders (`<project>/shared/`, under a lease in `_leases/`) are v1. v0 refuses a `shared` mode in `.folder-sync.toml` with an error.
 
 ## The same layout on disk

@@ -1,0 +1,7 @@
+# Local secrets and wrangler's local state (D1, logs): never committed
+.dev.vars
+.wrangler/
+node_modules/
+# test/ and scripts/dev.mjs scratch
+.state/
+src/.mutant-*

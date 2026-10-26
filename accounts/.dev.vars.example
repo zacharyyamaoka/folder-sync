@@ -1,0 +1,12 @@
+# Local development only (`wrangler dev` reads .dev.vars; scripts/dev.mjs writes a fresh one with generated keys).
+# Every value here is a clearly fake fixture: never put a real secret, R2 key or production credential in this file.
+ENVIRONMENT=dev
+PUBLIC_URL=http://127.0.0.1:4932
+BETTER_AUTH_SECRET=dev-only-not-a-secret-0123456789abcdef0123456789abcdef
+R2_ACCOUNT_ID=devaccount0123456789abcdef
+R2_ENDPOINT=http://127.0.0.1:4930
+SYNC_BUCKET=folder-sync
+SYNC_CREDENTIAL_TTL_S=900
+R2_PARENT_ACCESS_KEY_ID=dev-only-parent-key-id
+R2_PARENT_SECRET_ACCESS_KEY=dev-only-not-a-secret-parent-key
+SIGN_UP_EMAILS=*

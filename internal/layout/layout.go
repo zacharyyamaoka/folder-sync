@@ -34,6 +34,7 @@ type Layout struct {
 	HostFile    string // ~/.folder-sync/host.json
 	Credentials string // ~/.folder-sync/credentials.json
 	Session     string // ~/.folder-sync/session.json (the credential process's cached keys, mode 0600)
+	Account     string // ~/.folder-sync/account.json (`folder-sync login`'s session, mode 0600; PEP 0003)
 }
 
 // Getenv is os.Getenv, injectable so tests can pose as another OS.
@@ -112,13 +113,14 @@ func For(goos string, getenv Getenv) (Layout, error) {
 		HostFile:    Join(goos, root, "host.json"),
 		Credentials: Join(goos, root, "credentials.json"),
 		Session:     Join(goos, root, "session.json"),
+		Account:     Join(goos, root, "account.json"),
 	}, nil
 }
 
 // All lists every path in the layout, for checks that none escapes Root.
 func (l Layout) All() []string {
 	return []string{l.Bin, l.Rclone, l.RcloneConf, l.Cache, l.Tmp, l.Work, l.Logs,
-		l.Projects, l.Service, l.Viewer, l.Conflicts, l.HostFile, l.Credentials, l.Session}
+		l.Projects, l.Service, l.Viewer, l.Conflicts, l.HostFile, l.Credentials, l.Session, l.Account}
 }
 
 // Dirs lists the directories to create on first use.

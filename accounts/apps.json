@@ -1,0 +1,17 @@
+{
+  "folder-sync": {
+    "name": "folder-sync",
+    "origins": [],
+    "project": null
+  },
+  "robotparts": {
+    "name": "Robot Parts",
+    "origins": [
+      "https://robotparts.dev",
+      "https://www.robotparts.dev",
+      "http://127.0.0.1:4933",
+      "http://localhost:4933"
+    ],
+    "project": "robotparts"
+  }
+}

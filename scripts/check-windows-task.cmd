@@ -5,7 +5,7 @@ rem that writes a log into ~/.folder-sync/").
 rem
 rem Usage:  scripts\check-windows-task.cmd C:\path\to\synced\folder [C:\path\to\folder-sync.exe]
 rem
-rem Before: run "folder-sync init" in that folder and "folder-sync login". A scheduled
+rem Before: run "folder-sync init" in that folder and "folder-sync login --key". A scheduled
 rem task does not see your shell's environment variables, so the key must be stored.
 rem It registers a one-off task, runs it once, waits for its round, checks the result,
 rem checks nothing landed in AppData, and deletes the task. A .cmd file, not PowerShell,

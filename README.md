@@ -27,7 +27,7 @@ On first `init`, folder-sync downloads the pinned rclone v1.75.2 from downloads.
 
 ## Quick start
 
-Give it a bucket-scoped R2 key, through the environment (cloud agents) or once with `folder-sync login` (stored in `~/.folder-sync/credentials.json`, mode 0600):
+Give it a bucket-scoped R2 key, through the environment (cloud agents) or once with `folder-sync login --key` (stored in `~/.folder-sync/credentials.json`, mode 0600; plain `login` signs in to an account instead, below):
 
 ```bash
 export FOLDER_SYNC_ACCOUNT_ID=… FOLDER_SYNC_ACCESS_KEY_ID=… FOLDER_SYNC_SECRET_ACCESS_KEY=…
@@ -45,6 +45,23 @@ Each machine publishes its own files to `<project>/hosts/<host-id>/` and receive
 ### Short-lived credentials
 
 Instead of a stored key, `FOLDER_SYNC_CREDENTIAL_PROCESS` can name a program (a JSON array, its argv, `argv[0]` absolute) that prints short-lived keys scoped to one account prefix: AWS's `credential_process` JSON (`Version` 1, `AccessKeyId`, `SecretAccessKey`, `SessionToken`, `Expiration`) plus optional `Endpoint`, `Bucket` (the only bucket these keys can use), `Prefix` (the account root, like `users/AbC123/`), `Region` and `Provider`. folder-sync runs it before every round, caches the answer in `~/.folder-sync/session.json`, and syncs under that prefix ([`docs/CONTRACT.md`](docs/CONTRACT.md), "Bucket layout"). Exit 3 means signed out (`sync --once` then exits 4); any other failure is transient and still-valid cached keys carry on. `sync --once` exits 75 when another round holds the folder. An app that signs a person's next machine in asks `folder-sync projects --json` which folders that person already syncs, and `sync --discover` looks for new machines at once instead of within 5 minutes ([`docs/peps/0002`](docs/peps/0002-short-lived-scoped-credentials.md)).
+
+### Accounts: sign in instead of pasting a key
+
+folder-sync has its own accounts ([`docs/peps/0003`](docs/peps/0003-accounts.md)): one sign-in across every app that syncs a folder (robotparts.dev first), served by the `accounts/` Worker (Better Auth on Cloudflare Workers + D1), mounted at `/fs/` on each app's own domain.
+
+```text
+folder-sync login [--server URL]     sign this machine in: open the printed link, approve the code in your browser
+folder-sync whoami                   who this machine is signed in as, and its account root (users/<id>/)
+folder-sync credentials              the credential-process JSON (short-lived keys for users/<id>/); exit 3 signed out
+folder-sync publish --public         anyone can read this folder online; --private undoes it
+folder-sync logout                   end this machine's session on the server, then delete account.json
+folder-sync login --key              v0's stored bucket key instead (credentials.json)
+```
+
+The server is `--server`, else `FOLDER_SYNC_SERVER`, else the accounts Worker's own host; an app prints its own (`folder-sync login --server https://robotparts.dev`) so the approving browser is usually signed in already. The session is kept in `~/.folder-sync/account.json` (`folder-sync-account/1`, mode 0600). Once it exists, and neither `FOLDER_SYNC_CREDENTIAL_PROCESS` nor a key is set in the environment, folder-sync runs its own `credentials` as the credential process, so the short-lived keys, their cache and their exit codes are PEP 0002's, unchanged; a key in the environment still wins, and a signed-in machine no longer uses a stored `credentials.json`.
+
+Run the Worker locally (rclone serve s3, the R2 stand-in, `wrangler dev` with a local D1 and generated test keys): `npm install --prefix accounts`, then `node accounts/scripts/dev.mjs up` (`down` stops exactly what it started). Its tests: `node --test accounts/test/worker.test.ts` and the end-to-end proof `node accounts/test/proof.mjs` (ports 4930-4932).
 
 ### Try it with no cloud account
 
@@ -71,6 +88,7 @@ On a case-insensitive folder (the macOS default) `README.md` and `readme.md` are
 | | State |
 |---|---|
 | `init`, `login`, `sync --once`, `sync --watch`, `status`, `publish` | Built, tested end to end against a local S3 stand-in |
+| Accounts: `login` (device grant), `credentials`, `whoami`, `logout`, `publish --public/--private`, the `accounts/` Worker and its web host | Built; tested end to end locally (`accounts/test/proof.mjs`: `wrangler dev`, local D1, the R2 stand-in). **Not deployed**: the D1 database, the secrets and Google's OAuth client are Zach's |
 | Push from the manifest diff, pull by conditional GET, `_trash/` on overwrite and delete, `max_delete`, empty-folder guard | Built and tested |
 | Ignore rules (gitignore syntax → rclone filters) | Built; tested against `git` itself as the oracle |
 | Windows paths, reserved names, case twins, nothing in AppData | Unit-tested on Linux; the Windows binary cross-compiles. **Not yet run on Windows** |
@@ -98,7 +116,7 @@ On a case-insensitive folder (the macOS default) `README.md` and `readme.md` are
 ### The Windows check (Zach, on the Windows box)
 
 1. Build on Linux: `GOOS=windows GOARCH=amd64 ~/.local/go/bin/go build -o dist/folder-sync.exe ./cmd/folder-sync`, and copy it to `C:\Users\BAM\.folder-sync\bin\folder-sync.exe`.
-2. In `cmd.exe` (not PowerShell: AllSigned), with the key set via `set FOLDER_SYNC_…=…`: `folder-sync.exe login`, then `folder-sync.exe init --project wincheck --bucket folder-sync --dir C:\Users\BAM\wincheck`. If Defender or Smart App Control blocks rclone, init says so and stops; adding an exclusion is your call.
+2. In `cmd.exe` (not PowerShell: AllSigned), with the key set via `set FOLDER_SYNC_…=…`: `folder-sync.exe login --key`, then `folder-sync.exe init --project wincheck --bucket folder-sync --dir C:\Users\BAM\wincheck`. If Defender or Smart App Control blocks rclone, init says so and stops; adding an exclusion is your call.
 3. Run `scripts\check-windows-task.cmd C:\Users\BAM\wincheck`. It registers a one-off task, runs one round from Task Scheduler, checks the log in `%USERPROFILE%\.folder-sync\logs` and that nothing appeared under AppData, and deletes the task.
 
 ## What it does not do (in the spirit of Unix)

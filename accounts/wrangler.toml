@@ -1,0 +1,49 @@
+# folder-sync's accounts Worker (PEP 0003): one account across Zach's apps. Better Auth (Google; the device grant for
+# `folder-sync login`) on D1, short-lived R2 keys per person, each person's folders online, a web host per folder.
+# Apps mount it at /fs/ on their own domain through a service binding (§3.2); it also answers on its own host.
+# Deploying is Zach's call (never from an agent):
+#   npx --prefix accounts wrangler d1 migrations apply DB --remote --config accounts/wrangler.toml
+#   npx --prefix accounts wrangler deploy --config accounts/wrangler.toml
+name = "folder-sync-accounts"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+# WHY nodejs_compat: Better Auth keeps its request context in AsyncLocalStorage
+compatibility_flags = ["nodejs_compat"]
+
+# For now the Worker's own host is its workers.dev address (PUBLIC_URL below); a custom domain can replace it later.
+workers_dev = true
+preview_urls = false
+
+[assets]
+# The sign-in and device pages' own script and style, served at /fs/site/<name> by the Worker (never directly)
+directory = "./site"
+binding = "ASSETS"
+run_worker_first = true
+
+# Users, sessions (each machine's device grant), pending device codes, and folder-sync's folder / folder_reader /
+# web_host rows. Create it once (wrangler d1 create folder-sync-accounts) and put its id here.
+[[d1_databases]]
+binding = "DB"
+database_name = "folder-sync-accounts"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+# No R2 binding (§3.1): the Worker reads and writes each person's files through a temporary credential it signs for
+# exactly one prefix per request, with the parent key below.
+
+[vars]
+ENVIRONMENT = "production"
+# This Worker's own host: the CLI's default server and the account pages (placeholder until the first deploy)
+PUBLIC_URL = "https://folder-sync-accounts.example.workers.dev"
+# The sync store: folder-sync's bucket, one prefix per person (users/<account id>/). Placeholder: Zach sets the real
+# account id at deploy.
+R2_ACCOUNT_ID = "0123456789abcdef0123456789abcdef"
+SYNC_BUCKET = "folder-sync"
+# Empty: https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com (a local stand-in in the proof)
+R2_ENDPOINT = ""
+# How long a machine's storage keys live: a revoked machine stops within this (and refreshes a third before it ends)
+SYNC_CREDENTIAL_TTL_S = "900"
+# Secrets, set once by the operator (never in this file): BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+# R2_PARENT_ACCESS_KEY_ID, R2_PARENT_SECRET_ACCESS_KEY, and SIGN_UP_EMAILS (who may create an account, comma-separated;
+# unset means nobody new, "*" anyone; it holds real emails, so it is a secret). Until they are set, sign-in answers 503
+# and nothing is served.

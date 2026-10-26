@@ -1,0 +1,20 @@
+{
+  "name": "folder-sync-accounts",
+  "private": true,
+  "type": "module",
+  "description": "folder-sync's accounts Worker (PEP 0003): Better Auth + D1, the device grant for `folder-sync login`, short-lived R2 keys per person, each person's folders online, a web host per folder.",
+  "scripts": {
+    "test": "node --test test/worker.test.ts",
+    "proof": "node test/proof.mjs",
+    "dev": "node scripts/dev.mjs up"
+  },
+  "dependencies": {
+    "better-auth": "1.7.11"
+  },
+  "devDependencies": {
+    "wrangler": "4.151.2"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}

@@ -1,0 +1,623 @@
+// folder-sync's accounts Worker (PEP 0003): one account across Zach's apps, mounted at /fs/ on each app's own domain
+// (the app's Worker forwards /fs/* here through a service binding) and on this Worker's own host for the CLI.
+//
+//   *    /fs/api/auth/*                           Better Auth: Google sign-in, sessions, the device grant, sign-out
+//   GET  /fs/signin?return=<path>                 the sign-in page; back to <path> signed in
+//   GET  /fs/device[?user_code=…]                 approve a machine that ran `folder-sync login` (RFC 8628)
+//   GET  /fs/dev/mailbox?email=                   dev + loopback only: the last sign-in code
+//   GET  /fs/v1/me                                the session's person, root and app
+//   POST /fs/v1/sign-out                          ends this session
+//   GET  /fs/v1/folders                           my folders and the ones I may read
+//   GET  /fs/v1/folders/:project[?owner=]         the union view of a folder's hosts
+//   GET  /fs/v1/folders/:project/bundle?prefix=   a folder's small UTF-8 files in one answer
+//   GET  /fs/v1/folders/:project/files/:host/<p>  one file's bytes
+//   PUT|DELETE /fs/v1/folders/:project/web/<p>    the folder's web host (§3.4)
+//   PATCH /fs/v1/folders/:project {visibility}    public or private
+//   POST /fs/v1/folders/:project/readers {email}, DELETE …/readers/:email
+//   GET  /fs/v1/access?project=&owner=            for an app's own server
+//   POST /fs/v1/credentials                       a machine's bearer session -> R2 keys for users/<id>/ (15 min)
+//
+// The table in PEP 0003 §3.3 is the contract (another app builds against it); errors are
+// { "error": "<code>", "why": "<sentence>" }.
+//
+// WHY the separation is R2's: each person's files live under users/<their account id>/ in the one bucket, and every
+// key this Worker hands out or uses is a temporary credential R2 itself scopes to one person's root or folder. The
+// root is only ever the session's (or, for a read, the owner's once access is decided), never a URL's, body's or
+// header's.
+//
+// This file imports no npm module: Better Auth lives behind `Deps` (auth.ts), so the unit tests run on bare Node.
+
+import { appFor, apps, OWN_APP, type App } from "./apps.ts";
+import { folderPrefix, mint, NotConfigured, PROJECT, ttlOf, USER_ID, userRoot, type CredsEnv } from "./creds.ts";
+import { checkPath, ContractError, Project } from "../../readers/worker/src/folder-sync-read.ts";
+import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
+import type { Store, Visibility } from "./store.ts";
+import { BadPath, Busy, deleteWebFile, writeWebFile } from "./webhost.ts";
+
+export interface Env extends CredsEnv {
+	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
+	ENVIRONMENT?: string;
+	/** This Worker's own host (the CLI's server, the account pages). */
+	PUBLIC_URL?: string;
+	DB?: unknown;
+	ASSETS?: { fetch(request: Request): Promise<Response> };
+	BETTER_AUTH_SECRET?: string;
+	GOOGLE_CLIENT_ID?: string;
+	GOOGLE_CLIENT_SECRET?: string;
+	/** Who may create an account (signup.ts): listed emails, "*" = anyone, unset = nobody new. A secret: real emails. */
+	SIGN_UP_EMAILS?: string;
+}
+
+/** A signed-in person, as a session proves them. */
+export interface Person {
+	userId: string;
+	email: string;
+	name: string | null;
+	image: string | null;
+	sessionId: string;
+	sessionToken: string;
+}
+
+export type Via = "cookie" | "bearer";
+
+/** What the routes need from the accounts layer (auth.ts builds the live one over Better Auth and D1). */
+export interface Deps {
+	/** Better Auth's handler for this app's origin (baseURL = that origin, basePath /fs/api/auth). */
+	auth(request: Request, app: App): Promise<Response>;
+	/** The person whose session this request carries: by its cookie (a browser) or its bearer token (a machine). */
+	person(request: Request, via: Via, app: App | null): Promise<Person | null>;
+	/** Ends that session; the Set-Cookie headers that clear a browser's cookie. */
+	signOut(request: Request, via: Via, app: App | null, person: Person): Promise<string[]>;
+	store: Store;
+	/** Requests to the S3 endpoint (tests and the proof answer them locally). */
+	s3: FetchLike;
+	now(): number;
+	/** A new lowercase UUID v4 (a web host's id). */
+	uuid(): string;
+	/** Dev only: the last sign-in code sent to an email. */
+	mailbox?(email: string): string | null;
+}
+
+const READ_TTL_S = 300;
+const WRITE_TTL_S = 300;
+/** §3.3: the bundle's limits. */
+const BUNDLE_FILE_MAX = 256 * 1024;
+const BUNDLE_TOTAL_MAX = 2 * 1024 * 1024;
+/** The largest file the web host takes in one PUT (the body is held in memory to hash it). */
+const WEB_FILE_MAX = 32 * 1024 * 1024;
+const EMAIL = /^[^\s@<>()",;:]{1,64}@[^\s@<>()",;:]{1,255}$/;
+const HOST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/** What a folder's file is served as; anything else is application/octet-stream. */
+const TYPES: Record<string, string> = {
+	".json": "application/json; charset=utf-8",
+	".jsonl": "application/x-ndjson; charset=utf-8",
+	".md": "text/markdown; charset=utf-8",
+	".txt": "text/plain; charset=utf-8",
+	".csv": "text/csv; charset=utf-8",
+	".yaml": "text/plain; charset=utf-8",
+	".yml": "text/plain; charset=utf-8",
+	".toml": "text/plain; charset=utf-8",
+	".html": "text/html; charset=utf-8",
+	".htm": "text/html; charset=utf-8",
+	".svg": "image/svg+xml",
+	".png": "image/png",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
+	".webp": "image/webp",
+	".gif": "image/gif",
+	".pdf": "application/pdf",
+	".stl": "model/stl",
+	".step": "application/step",
+	".stp": "application/step",
+};
+const ACTIVE = new Set([".html", ".htm", ".svg"]);
+const SITE_FILES: Record<string, string> = { "signin.js": "text/javascript; charset=utf-8", "device.js": "text/javascript; charset=utf-8", "account.css": "text/css; charset=utf-8" };
+
+// ------------------------------------------------------------------------------------------------ answers
+
+function headers(extra: Record<string, string> = {}): Headers {
+	const out = new Headers(extra);
+	out.set("Referrer-Policy", "no-referrer");
+	out.set("X-Content-Type-Options", "nosniff");
+	if (!out.has("Cache-Control")) out.set("Cache-Control", "no-store");
+	return out;
+}
+
+function json(status: number, body: unknown, extra: Record<string, string> = {}): Response {
+	return new Response(JSON.stringify(body), { status, headers: headers({ "Content-Type": "application/json; charset=utf-8", ...extra }) });
+}
+
+function fail(status: number, error: string, why: string, extra: Record<string, string> = {}): Response {
+	return json(status, { error, why }, extra);
+}
+
+// ------------------------------------------------------------------------------------------------ the path
+
+/** The path exactly as sent: no URL parser has resolved dot segments or decoded anything yet. */
+export function rawPath(url: string): string {
+	const afterHost = url.replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*/, "");
+	return afterHost.split(/[?#]/, 1)[0] || "/";
+}
+
+/** The path's segments, each percent-decoded exactly once; null when any is refused. A trailing "" means a folder. */
+export function segments(raw: string): string[] | null {
+	if (!raw.startsWith("/")) return null;
+	const parts = raw.slice(1).split("/");
+	const out: string[] = [];
+	for (let i = 0; i < parts.length; i++) {
+		const piece = parts[i];
+		const last = i === parts.length - 1;
+		if (piece === "") {
+			if (last) {
+				out.push("");
+				continue;
+			}
+			return null; // an empty segment inside the path
+		}
+		let decoded: string;
+		try {
+			decoded = decodeURIComponent(piece);
+		} catch {
+			return null;
+		}
+		// WHY all of these: ".." or "%2e%2e" would climb out of a prefix; an encoded "/" or "\" would split a
+		// segment after the check; a control character has no business in a file name.
+		if (decoded === "." || decoded === ".." || /[\/\\\u0000-\u001f\u007f]/.test(decoded)) return null;
+		out.push(decoded);
+	}
+	return out;
+}
+
+/** A file path made of the URL's remaining segments, under the contract's rules; null when refused. */
+function filePath(rest: string[]): string | null {
+	if (rest.length === 0 || rest.includes("")) return null;
+	const path = rest.join("/");
+	try {
+		checkPath(path);
+	} catch {
+		return null;
+	}
+	return path;
+}
+
+// ------------------------------------------------------------------------------------------------ sessions
+
+function loopback(request: Request): boolean {
+	const host = new URL(request.url).hostname;
+	return host === "127.0.0.1" || host === "localhost" || host === "[::1]";
+}
+
+/** The request's session: a bearer token when one is sent (a machine, an app's server), else the cookie, and the
+ *  cookie only on a registered origin. */
+async function session(request: Request, deps: Deps, app: App | null): Promise<{ person: Person; via: Via } | null> {
+	const authorization = request.headers.get("Authorization");
+	if (authorization) {
+		if (!/^bearer\s+\S/i.test(authorization)) return null;
+		const person = await deps.person(request, "bearer", app);
+		return person ? { person, via: "bearer" } : null;
+	}
+	if (!app) return null; // an origin no app lists gets no cookie routes
+	const person = await deps.person(request, "cookie", app);
+	return person ? { person, via: "cookie" } : null;
+}
+
+/** CSRF (§3.3): a cookie-authenticated write needs X-Folder-Sync: 1 and its own origin. A cross-site form can set
+ *  neither, and a cross-site fetch can't set the header without a preflight this Worker refuses. */
+function csrfOk(request: Request, app: App | null): boolean {
+	const origin = request.headers.get("Origin");
+	return request.headers.get("X-Folder-Sync") === "1" && !!app && !!origin && origin === new URL(request.url).origin && app.origins.includes(origin); // fs-mutation: the CSRF rule
+}
+
+/** The session a write needs, or the answer refusing it. */
+async function writer(request: Request, deps: Deps, app: App | null): Promise<{ person: Person; via: Via } | Response> {
+	const who = await session(request, deps, app);
+	if (!who) return fail(401, "signed_out", "sign in first");
+	if (who.via === "cookie" && !csrfOk(request, app)) return fail(403, "csrf", "a browser's write must carry X-Folder-Sync: 1 from this site's own pages");
+	return who;
+}
+
+// ------------------------------------------------------------------------------------------------ storage
+
+function bucketFor(env: Env, deps: Deps, prefix: string, scope: "object-read-only" | "object-read-write", ttl: number): Promise<S3Bucket> {
+	return mint(env, prefix, scope, ttl, deps.now()).then((creds) => new S3Bucket(creds, deps.s3));
+}
+
+type Role = "owner" | "reader" | "public";
+
+/** Who may read owner's project: decided from the session and the folder's rows, never from the request's say-so. */
+async function decide(deps: Deps, person: Person | null, project: string, ownerParam: string | null): Promise<{ owner: string; role: Role; visibility: Visibility } | Response> {
+	const owner = ownerParam ?? person?.userId ?? null;
+	if (!owner) return fail(401, "signed_out", "sign in, or name the folder's owner (?owner=) of a public folder");
+	if (!USER_ID.test(owner)) return fail(400, "bad_owner", "owner is not an account id");
+	const row = await deps.store.folder(owner, project);
+	const visibility: Visibility = row?.visibility === "public" ? "public" : "private";
+	if (person && person.userId === owner) return { owner, role: "owner", visibility };
+	if (person && (await deps.store.isReader(owner, project, person.email.toLowerCase()))) return { owner, role: "reader", visibility };
+	if (visibility === "public") return { owner, role: "public", visibility }; // fs-mutation: public is readable signed out
+	// WHY 404 to a signed-in stranger: a private folder's existence is not theirs to learn
+	return person ? fail(404, "not_found", "no such folder, or it is not shared with you") : fail(401, "signed_out", "sign in to read this folder"); // fs-mutation: private stays private
+}
+
+async function readProject(env: Env, deps: Deps, owner: string, project: string): Promise<Project> {
+	// WHY a read-only credential for exactly this folder: whatever a route below does with a path, R2 lets this
+	// request read users/<owner>/<project>/ and nothing else (a public folder's read too)
+	const bucket = await bucketFor(env, deps, folderPrefix(owner, project), "object-read-only", READ_TTL_S); // fs-mutation: the read scope
+	return new Project(bucket, project, userRoot(owner));
+}
+
+// ------------------------------------------------------------------------------------------------ routes
+
+async function me(request: Request, deps: Deps, app: App | null): Promise<Response> {
+	const who = await session(request, deps, app);
+	if (!who) return fail(401, "signed_out", "not signed in");
+	const { person } = who;
+	return json(200, {
+		user: { id: person.userId, email: person.email, name: person.name, image: person.image },
+		root: userRoot(person.userId),
+		app: app && app.id !== OWN_APP ? { id: app.id, project: app.project } : null,
+	});
+}
+
+async function signOut(request: Request, deps: Deps, app: App | null): Promise<Response> {
+	const who = await writer(request, deps, app);
+	if (who instanceof Response) return who;
+	const cookies = await deps.signOut(request, who.via, app, who.person);
+	const answer = json(200, { ok: true });
+	for (const cookie of cookies) answer.headers.append("Set-Cookie", cookie);
+	return answer;
+}
+
+async function credentials(request: Request, env: Env, deps: Deps, app: App | null): Promise<Response> {
+	// WHY a bearer only: these are a machine's keys; a browser's cookie never gets storage credentials
+	if (!/^bearer\s+\S/i.test(request.headers.get("Authorization") || "")) return fail(401, "signed_out", "a machine signs in with folder-sync login");
+	const person = await deps.person(request, "bearer", app); // fs-mutation: the bearer session
+	if (!person) return fail(401, "signed_out", "this machine is signed out (signed out or revoked): run folder-sync login");
+	const minted = await mint(env, userRoot(person.userId), "object-read-write", ttlOf(env), deps.now()); // fs-mutation: the session's root
+	return json(200, minted);
+}
+
+async function access(request: Request, deps: Deps, app: App | null): Promise<Response> {
+	const who = await session(request, deps, app);
+	if (!who) return fail(401, "signed_out", "not signed in");
+	const query = new URL(request.url).searchParams;
+	const project = query.get("project") || "";
+	if (!PROJECT.test(project)) return fail(400, "bad_project", "project must match ^[a-z0-9][a-z0-9._-]{0,62}$");
+	const decided = await decide(deps, who.person, project, query.get("owner"));
+	if (decided instanceof Response) {
+		if (decided.status === 400) return decided;
+		return json(200, { allowed: false, role: null, root: null });
+	}
+	return json(200, { allowed: true, role: decided.role, root: userRoot(decided.owner) });
+}
+
+async function folders(request: Request, env: Env, deps: Deps, app: App | null): Promise<Response> {
+	const who = await session(request, deps, app);
+	if (!who) return fail(401, "signed_out", "not signed in");
+	const owner = who.person.userId;
+	const root = userRoot(owner);
+	const bucket = await bucketFor(env, deps, root, "object-read-only", READ_TTL_S);
+	const names = new Set<string>();
+	let cursor: string | undefined;
+	do {
+		const page = await bucket.list({ prefix: root, delimiter: "/", cursor });
+		for (const p of page.delimitedPrefixes) {
+			const name = p.slice(root.length).replace(/\/$/, "");
+			if (PROJECT.test(name)) names.add(name); // a leading "_" (the trash) never matches
+		}
+		cursor = page.truncated ? page.cursor : undefined;
+	} while (cursor);
+	const rows = new Map((await deps.store.folders(owner)).map((r) => [r.project, r]));
+	for (const project of rows.keys()) names.add(project);
+	const out = [];
+	for (const project of [...names].sort()) {
+		const hosts = await new Project(bucket, project, root).hosts();
+		out.push({ project, visibility: rows.get(project)?.visibility === "public" ? "public" : "private", hosts });
+	}
+	const readable = (await deps.store.readable(who.person.email.toLowerCase())).filter((r) => r.owner !== owner).map((r) => ({ ...r, role: "reader" as const }));
+	return json(200, { folders: out, readable });
+}
+
+async function folderView(request: Request, env: Env, deps: Deps, app: App | null, project: string): Promise<Response> {
+	const who = await session(request, deps, app);
+	const decided = await decide(deps, who?.person ?? null, project, new URL(request.url).searchParams.get("owner"));
+	if (decided instanceof Response) return decided;
+	const reader = await readProject(env, deps, decided.owner, project);
+	const web = await deps.store.webHost(decided.owner, project);
+	const hosts = [];
+	const files = [];
+	for (const id of await reader.hosts()) {
+		const manifest = await reader.manifest(id);
+		if (!manifest) continue;
+		hosts.push({ id, name: manifest.host_name, seq: manifest.seq, generatedAt: manifest.generated_at, web: id === web });
+		for (const e of manifest.files) files.push({ host: id, path: e.path, size: e.size, sha256: e.sha256, mtime: e.mtime, writtenAt: e.written_at });
+	}
+	return json(200, { project, owner: decided.owner, visibility: decided.visibility, hosts, files }, cacheFor(decided.visibility));
+}
+
+function cacheFor(visibility: Visibility): Record<string, string> {
+	return { "Cache-Control": visibility === "public" ? "public, max-age=60" : "private, no-store" };
+}
+
+async function bundle(request: Request, env: Env, deps: Deps, app: App | null, project: string): Promise<Response> {
+	const query = new URL(request.url).searchParams;
+	const prefix = query.get("prefix") ?? "";
+	if (prefix && (prefix.startsWith("/") || prefix.includes("\\") || prefix.split("/").some((s, i, all) => s === "." || s === ".." || (s === "" && i < all.length - 1)))) {
+		return fail(400, "bad_prefix", "prefix is a relative path like saved/ (no '.', '..' or backslash)");
+	}
+	const who = await session(request, deps, app);
+	const decided = await decide(deps, who?.person ?? null, project, query.get("owner"));
+	if (decided instanceof Response) return decided;
+	const reader = await readProject(env, deps, decided.owner, project);
+	const out = [];
+	let total = 0;
+	const utf8 = new TextDecoder("utf-8", { fatal: true });
+	for (const f of await reader.files()) {
+		if (!f.path.startsWith(prefix) || f.size > BUNDLE_FILE_MAX || total + f.size > BUNDLE_TOTAL_MAX) continue;
+		let data: ArrayBuffer;
+		try {
+			data = await reader.read(f.hostId, f.path); // sha256-checked against the manifest, re-read once on a race
+		} catch (error) {
+			if (error instanceof ContractError) continue; // deleted since the manifest was read
+			throw error;
+		}
+		let text: string;
+		try {
+			text = utf8.decode(data);
+		} catch {
+			continue; // not UTF-8: read it by its own URL
+		}
+		total += data.byteLength;
+		out.push({ host: f.hostId, path: f.path, mtime: f.mtime, sha256: f.sha256, text });
+	}
+	return json(200, { files: out }, cacheFor(decided.visibility));
+}
+
+async function file(request: Request, env: Env, deps: Deps, app: App | null, project: string, host: string, rest: string[], head: boolean): Promise<Response> {
+	const path = filePath(rest);
+	if (!HOST_ID.test(host) || path === null) return fail(400, "bad_path", "a file is /files/<host id>/<path> under the contract's path rules");
+	const who = await session(request, deps, app);
+	const decided = await decide(deps, who?.person ?? null, project, new URL(request.url).searchParams.get("owner"));
+	if (decided instanceof Response) return decided;
+	const reader = await readProject(env, deps, decided.owner, project);
+	const entry = (await reader.manifest(host))?.files.find((e) => e.path === path); // exact: never a prefix, never a trashed version
+	if (!entry) return fail(404, "not_found", "that host does not publish that file");
+	const name = path.slice(path.lastIndexOf("/") + 1);
+	const dot = name.lastIndexOf(".");
+	const suffix = dot > 0 ? name.slice(dot).toLowerCase() : "";
+	const etag = `"${entry.sha256}"`;
+	const base: Record<string, string> = { "Content-Type": TYPES[suffix] || "application/octet-stream", ETag: etag, ...cacheFor(decided.visibility) };
+	// WHY sandboxed: a folder's .html or .svg is someone's file, never this site's page
+	if (ACTIVE.has(suffix)) base["Content-Security-Policy"] = "sandbox";
+	if ((request.headers.get("If-None-Match") || "") === etag) return new Response(null, { status: 304, headers: headers(base) });
+	let data: ArrayBuffer;
+	try {
+		data = await reader.read(host, path);
+	} catch (error) {
+		if (error instanceof ContractError) return fail(404, "not_found", "that file changed or went away while it was read");
+		throw error;
+	}
+	return new Response(head ? null : data, { status: 200, headers: headers({ ...base, "Content-Length": String(data.byteLength) }) });
+}
+
+async function web(request: Request, env: Env, deps: Deps, app: App | null, project: string, rest: string[], method: string): Promise<Response> {
+	const who = await writer(request, deps, app);
+	if (who instanceof Response) return who;
+	const path = filePath(rest);
+	if (path === null) return fail(400, "bad_path", "the path breaks the contract's path rules");
+	const owner = who.person.userId; // fs-mutation: the web host's root. WHY: the session's, never a URL's, a body's or a header's
+	const root = userRoot(owner);
+	const clock = () => deps.now();
+	try {
+		if (method === "PUT") {
+			const declared = Number(request.headers.get("Content-Length") || 0);
+			if (declared > WEB_FILE_MAX) return fail(413, "too_large", `the web host takes files up to ${WEB_FILE_MAX >> 20} MiB`);
+			const data = new Uint8Array(await request.arrayBuffer());
+			if (data.byteLength > WEB_FILE_MAX) return fail(413, "too_large", `the web host takes files up to ${WEB_FILE_MAX >> 20} MiB`);
+			const bucket = await bucketFor(env, deps, root, "object-read-write", WRITE_TTL_S);
+			const hostId = await deps.store.ensureWebHost(owner, project, deps.uuid(), new Date(deps.now()).toISOString());
+			return json(200, await writeWebFile(bucket, { root, project, hostId }, path, data, clock));
+		}
+		const hostId = await deps.store.webHost(owner, project);
+		if (!hostId) return fail(404, "not_found", "this folder has no web host yet");
+		const bucket = await bucketFor(env, deps, root, "object-read-write", WRITE_TTL_S);
+		const gone = await deleteWebFile(bucket, { root, project, hostId }, path, clock);
+		return gone ? json(200, gone) : fail(404, "not_found", "the web host does not hold that file");
+	} catch (error) {
+		if (error instanceof BadPath) return fail(400, "bad_path", error.message);
+		if (error instanceof Busy) return fail(503, "busy", error.message, { "Retry-After": "1" });
+		throw error;
+	}
+}
+
+async function jsonBody(request: Request): Promise<Record<string, unknown> | Response> {
+	if (!(request.headers.get("Content-Type") || "").toLowerCase().startsWith("application/json")) return fail(415, "json_only", "send Content-Type: application/json");
+	try {
+		const body = await request.json();
+		if (!body || typeof body !== "object" || Array.isArray(body)) return fail(400, "bad_request", "the body is one JSON object");
+		return body as Record<string, unknown>;
+	} catch {
+		return fail(400, "bad_request", "the body is not JSON");
+	}
+}
+
+async function patchFolder(request: Request, deps: Deps, app: App | null, project: string): Promise<Response> {
+	const who = await writer(request, deps, app);
+	if (who instanceof Response) return who;
+	const body = await jsonBody(request);
+	if (body instanceof Response) return body;
+	if (body.visibility !== "public" && body.visibility !== "private") return fail(400, "bad_visibility", 'visibility is "public" or "private"');
+	return json(200, await deps.store.setVisibility(who.person.userId, project, body.visibility, new Date(deps.now()).toISOString()));
+}
+
+async function readers(request: Request, deps: Deps, app: App | null, project: string, rest: string[], method: string): Promise<Response> {
+	const who = await writer(request, deps, app);
+	if (who instanceof Response) return who;
+	const owner = who.person.userId;
+	if (method === "POST" && rest.length === 0) {
+		const body = await jsonBody(request);
+		if (body instanceof Response) return body;
+		const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+		if (!EMAIL.test(email)) return fail(400, "bad_email", "email is one address");
+		await deps.store.addReader(owner, project, email, new Date(deps.now()).toISOString());
+		return json(200, { project, readers: await deps.store.readers(owner, project) });
+	}
+	if (method === "DELETE" && rest.length === 1) {
+		const email = rest[0].trim().toLowerCase();
+		if (!EMAIL.test(email)) return fail(400, "bad_email", "email is one address");
+		if (!(await deps.store.removeReader(owner, project, email))) return fail(404, "not_found", "that email is not a reader of this folder");
+		return json(200, { project, readers: await deps.store.readers(owner, project) });
+	}
+	return fail(405, "method", "POST …/readers {email} or DELETE …/readers/<email>");
+}
+
+// ------------------------------------------------------------------------------------------------ pages
+
+/** The policy of the pages that hold a session: this Worker's own code only, never framed, nothing else. */
+export const PAGE_POLICY = [
+	"default-src 'none'",
+	"script-src 'self'",
+	"style-src 'self'",
+	"img-src 'self' data:",
+	"connect-src 'self'",
+	"base-uri 'none'",
+	"form-action 'self'",
+	"frame-ancestors 'none'",
+	"object-src 'none'",
+].join("; ");
+
+function signInMethod(env: Env): "google" | "email" | "none" {
+	if (env.ENVIRONMENT === "dev") return "email";
+	return env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET ? "google" : "none";
+}
+
+function escapeAttr(text: string): string {
+	return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
+/** `return` as a same-origin path, else "/". WHY: an open redirect would hand a signed-in tab to another site. */
+export function returnPath(value: string | null): string {
+	if (!value || !value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\") || /[\u0000-\u001f\u007f]/.test(value)) return "/";
+	return value;
+}
+
+function page(env: Env, app: App, title: string, script: string, back: string, head: boolean): Response {
+	const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeAttr(title)} · ${escapeAttr(app.name)}</title>
+<link rel="icon" href="data:,">
+<meta name="fs-signin" content="${signInMethod(env)}">
+<meta name="fs-app" content="${escapeAttr(app.name)}">
+<meta name="fs-return" content="${escapeAttr(back)}">
+<link rel="stylesheet" href="/fs/site/account.css">
+</head>
+<body>
+<main class="fs-cover" data-testid="fs-page"><div class="fs-card" role="status"><p class="fs-small">Loading…</p></div></main>
+<script src="/fs/site/signin.js"></script>
+${script ? `<script src="/fs/site/${script}"></script>\n` : ""}</body>
+</html>
+`;
+	return new Response(head ? null : html, {
+		status: 200,
+		headers: headers({ "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": PAGE_POLICY, "X-Frame-Options": "DENY" }),
+	});
+}
+
+async function site(env: Env, name: string, head: boolean): Promise<Response> {
+	const type = SITE_FILES[name];
+	if (!type || !env.ASSETS) return fail(404, "not_found", "no such file");
+	const answer = await env.ASSETS.fetch(new Request(new URL(`/${name}`, "https://assets.invalid/")));
+	if (!answer.ok) return fail(404, "not_found", "no such file");
+	return new Response(head ? null : answer.body, { status: 200, headers: headers({ "Content-Type": type, "Cache-Control": "no-cache" }) });
+}
+
+// ------------------------------------------------------------------------------------------------ CORS
+
+function cors(request: Request, registered: Map<string, App>): Record<string, string> {
+	const origin = request.headers.get("Origin");
+	// an origin no app lists gets no CORS at all
+	if (!origin || !appFor(origin, registered)) return {};
+	return { "Access-Control-Allow-Origin": origin, Vary: "Origin" };
+}
+
+// ------------------------------------------------------------------------------------------------ the router
+
+export async function handle(request: Request, env: Env, deps: Deps | null): Promise<Response> {
+	const registered = apps(env.PUBLIC_URL);
+	const allowed = cors(request, registered);
+	const answer = await route(request, env, deps, registered, allowed).catch((error) => {
+		if (error instanceof NotConfigured) return fail(503, "not_configured", "folder storage is not set up on this Worker yet");
+		if (error instanceof Denied) return fail(404, "not_found", "no such file");
+		if (error instanceof ContractError) return fail(502, "bad_manifest", "a host's manifest breaks the contract");
+		throw error;
+	});
+	if (!allowed["Access-Control-Allow-Origin"]) return answer;
+	const out = new Response(answer.body, answer);
+	for (const [key, value] of Object.entries(allowed)) out.headers.set(key, value);
+	return out;
+}
+
+async function route(request: Request, env: Env, deps: Deps | null, registered: Map<string, App>, allowed: Record<string, string>): Promise<Response> {
+	const method = request.method.toUpperCase();
+	const parts = segments(rawPath(request.url));
+	if (parts === null) return fail(400, "bad_path", "an empty, '.' or '..' segment (encoded or not), a backslash or an encoded slash");
+	if (parts[0] !== "fs") return fail(404, "not_found", "folder-sync answers under /fs/ only");
+	const app = appFor(new URL(request.url).origin, registered);
+	const head = method === "HEAD";
+	const read = method === "GET" || head;
+	const [, first, ...rest] = parts;
+
+	if (method === "OPTIONS") {
+		if (!allowed["Access-Control-Allow-Origin"]) return fail(403, "cors", "this origin is not a registered app");
+		return new Response(null, {
+			status: 204,
+			headers: headers({ ...allowed, "Access-Control-Allow-Methods": "GET, HEAD, PUT, PATCH, POST, DELETE", "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Folder-Sync", "Access-Control-Max-Age": "600" }),
+		});
+	}
+	if (first === "api" && rest[0] === "auth") {
+		if (!app) return fail(404, "unknown_origin", "this origin is not a registered app: no sign-in here");
+		if (!deps) return fail(503, "not_configured", "sign-in is not set up on this Worker yet");
+		// WHY a second guard: the email-code plugin is only loaded in dev; a production request for it is a 404 here
+		// even if a config mistake loaded it
+		if (env.ENVIRONMENT !== "dev" && rest.some((p) => p.includes("email-otp"))) return fail(404, "not_found", "no email codes here");
+		return deps.auth(request, app);
+	}
+	if (first === "dev" && rest[0] === "mailbox" && rest.length === 1) {
+		// the local proof reads its sign-in codes here; production has no mailbox (and no email codes) at all
+		if (env.ENVIRONMENT !== "dev" || !loopback(request) || !deps?.mailbox) return fail(404, "not_found", "no mailbox here");
+		const email = new URL(request.url).searchParams.get("email") || "";
+		return json(200, { email, code: deps.mailbox(email) });
+	}
+	if (first === "site" && rest.length === 1) return read ? site(env, rest[0], head) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if ((first === "signin" || first === "device") && rest.length === 0) {
+		if (!read) return fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+		if (!app) return fail(404, "unknown_origin", "this origin is not a registered app: no sign-in here");
+		const back = first === "signin" ? returnPath(new URL(request.url).searchParams.get("return")) : "/fs/device";
+		return first === "signin" ? page(env, app, "Sign in", "", back, head) : page(env, app, "Sign in a machine", "device.js", back, head);
+	}
+	if (first !== "v1") return fail(404, "not_found", "no such route");
+	if (!deps) return fail(503, "not_configured", "accounts are not set up on this Worker yet");
+	const [what, project, sub, ...more] = rest;
+
+	if (what === "me" && rest.length === 1) return read ? me(request, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (what === "sign-out" && rest.length === 1) return method === "POST" ? signOut(request, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
+	if (what === "credentials" && rest.length === 1) return method === "POST" ? credentials(request, env, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
+	if (what === "access" && rest.length === 1) return read ? access(request, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (what !== "folders") return fail(404, "not_found", "no such route");
+	if (rest.length === 1) return read ? folders(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (!PROJECT.test(project)) return fail(400, "bad_project", "project must match ^[a-z0-9][a-z0-9._-]{0,62}$");
+	if (sub === undefined) {
+		if (read) return folderView(request, env, deps, app, project);
+		if (method === "PATCH") return patchFolder(request, deps, app, project);
+		return fail(405, "method", "GET or PATCH", { Allow: "GET, HEAD, PATCH" });
+	}
+	if (sub === "bundle" && more.length === 0) return read ? bundle(request, env, deps, app, project) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (sub === "files" && more.length >= 2) return read ? file(request, env, deps, app, project, more[0], more.slice(1), head) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (sub === "web" && more.length >= 1) {
+		return method === "PUT" || method === "DELETE" ? web(request, env, deps, app, project, more, method) : fail(405, "method", "PUT or DELETE", { Allow: "PUT, DELETE" });
+	}
+	if (sub === "readers") return readers(request, deps, app, project, more, method);
+	return fail(404, "not_found", "no such route");
+}

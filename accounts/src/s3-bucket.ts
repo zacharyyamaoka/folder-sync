@@ -1,0 +1,142 @@
+// folder-sync's reader (readers/worker/src/folder-sync-read.ts) over the S3 API, plus the four writes the web host
+// makes (§3.4: PUT, a conditional manifest PUT, CopyObject into _trash/, DELETE), each signed with ONE temporary
+// credential (creds.ts). Moved from vibetracks worker/src/s3-bucket.ts. WHY the S3 API and not an R2 binding: the
+// Worker then binds no bucket at all, and every call it makes goes through a credential R2 itself scopes to one
+// person's prefix, so a bug in a route can at worst touch the signed-in person's own files.
+//
+// Signing is aws4fetch (vendored, MIT), the stock SigV4 signer for Workers.
+
+import { AwsClient } from "./vendor/aws4fetch.js";
+import type { R2BucketLike, R2ListResultLike, R2ObjectBodyLike, R2ObjectLike } from "../../readers/worker/src/folder-sync-read.ts";
+import type { Minted } from "./creds.ts";
+
+/** R2 refused the request (403): the credential does not cover the key. Never shown to the person as anything but
+ *  "not found". */
+export class Denied extends Error {}
+
+export type FetchLike = (request: Request) => Promise<Response>;
+
+function decodeXml(text: string): string {
+	return text.replace(/&(lt|gt|amp|quot|apos|#\d+|#x[0-9a-fA-F]+);/g, (whole, name: string) => {
+		const named: Record<string, string> = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
+		if (named[name]) return named[name];
+		const code = name.startsWith("#x") ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
+		return Number.isFinite(code) ? String.fromCodePoint(code) : whole;
+	});
+}
+
+function tagValues(xml: string, tag: string): string[] {
+	const out: string[] = [];
+	const pattern = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "g");
+	for (let match = pattern.exec(xml); match; match = pattern.exec(xml)) out.push(decodeXml(match[1]));
+	return out;
+}
+
+function etagOf(answer: Response): string {
+	return (answer.headers.get("ETag") || "").replace(/^W\//, "").replace(/"/g, "");
+}
+
+export class S3Bucket implements R2BucketLike {
+	private readonly client: AwsClient;
+	private readonly base: string;
+	private readonly bucket: string;
+	private readonly send: FetchLike;
+	readonly calls: string[] = [];
+
+	constructor(creds: Pick<Minted, "AccessKeyId" | "SecretAccessKey" | "SessionToken" | "Endpoint" | "Bucket">, send: FetchLike) {
+		this.client = new AwsClient({
+			accessKeyId: creds.AccessKeyId,
+			secretAccessKey: creds.SecretAccessKey,
+			sessionToken: creds.SessionToken,
+			service: "s3",
+			region: "auto",
+			retries: 0,
+		});
+		this.bucket = creds.Bucket;
+		this.base = `${creds.Endpoint}/${encodeURIComponent(creds.Bucket)}`;
+		this.send = send;
+	}
+
+	private encodeKey(key: string): string {
+		return key.split("/").map(encodeURIComponent).join("/");
+	}
+
+	private url(key: string): string {
+		return `${this.base}/${this.encodeKey(key)}`;
+	}
+
+	private async call(url: string, init: { method?: string; headers?: Record<string, string>; body?: BodyInit } = {}): Promise<Response> {
+		const signed = await this.client.sign(url, { method: init.method || "GET", headers: init.headers || {}, body: init.body });
+		const answer = await this.send(signed);
+		if (answer.status === 403) {
+			await answer.body?.cancel();
+			throw new Denied("the storage refused this credential");
+		}
+		return answer;
+	}
+
+	async get(key: string, options?: { onlyIf?: { etagDoesNotMatch?: string } }): Promise<R2ObjectBodyLike | R2ObjectLike | null> {
+		this.calls.push(`GET ${key}`);
+		const etag = options?.onlyIf?.etagDoesNotMatch;
+		const answer = await this.call(this.url(key), { headers: etag ? { "If-None-Match": `"${etag}"` } : {} });
+		if (answer.status === 404) {
+			await answer.body?.cancel();
+			return null;
+		}
+		const tag = etagOf(answer);
+		if (answer.status === 304) return { key, etag: tag || etag || "", size: 0 };
+		if (!answer.ok) {
+			await answer.body?.cancel();
+			throw new Error(`the storage answered ${answer.status} for a read`);
+		}
+		const data = await answer.arrayBuffer();
+		return { key, etag: tag, size: data.byteLength, arrayBuffer: async () => data };
+	}
+
+	async list(options: { prefix: string; delimiter: string; cursor?: string }): Promise<R2ListResultLike> {
+		this.calls.push(`LIST ${options.prefix}`);
+		const query = new URLSearchParams({ "list-type": "2", prefix: options.prefix, delimiter: options.delimiter });
+		if (options.cursor) query.set("continuation-token", options.cursor);
+		const answer = await this.call(`${this.base}?${query}`);
+		if (!answer.ok) {
+			await answer.body?.cancel();
+			throw new Error(`the storage answered ${answer.status} for a listing`);
+		}
+		const xml = await answer.text();
+		const prefixes = [...xml.matchAll(/<CommonPrefixes>([\s\S]*?)<\/CommonPrefixes>/g)].flatMap((m) => tagValues(m[1], "Prefix"));
+		const truncated = /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml);
+		const cursor = tagValues(xml, "NextContinuationToken")[0];
+		return { delimitedPrefixes: prefixes, truncated, ...(truncated && cursor ? { cursor } : {}) };
+	}
+
+	/** PUT an object. `ifMatch` / `ifNoneMatch` make it conditional; a 412 comes back as `{ ok: false, status: 412 }`. */
+	async put(key: string, body: Uint8Array, options: { ifMatch?: string; ifNoneMatch?: "*"; contentType?: string } = {}): Promise<{ ok: boolean; status: number; etag: string }> {
+		this.calls.push(`PUT ${key}`);
+		const headers: Record<string, string> = { "Content-Type": options.contentType || "application/octet-stream" };
+		if (options.ifMatch) headers["If-Match"] = `"${options.ifMatch}"`;
+		if (options.ifNoneMatch) headers["If-None-Match"] = options.ifNoneMatch;
+		const answer = await this.call(this.url(key), { method: "PUT", headers, body });
+		await answer.body?.cancel();
+		if (answer.status === 412) return { ok: false, status: 412, etag: "" };
+		if (!answer.ok) throw new Error(`the storage answered ${answer.status} for a write`);
+		return { ok: true, status: answer.status, etag: etagOf(answer) };
+	}
+
+	/** CopyObject `from` to `to` in this bucket (the trash copy). False when `from` is gone. */
+	async copy(from: string, to: string): Promise<boolean> {
+		this.calls.push(`COPY ${from} -> ${to}`);
+		const answer = await this.call(this.url(to), { method: "PUT", headers: { "x-amz-copy-source": `/${encodeURIComponent(this.bucket)}/${this.encodeKey(from)}` } });
+		const text = await answer.text();
+		if (answer.status === 404) return false;
+		// WHY the body too: S3 may answer a failed copy with 200 and an <Error> document
+		if (!answer.ok || /<Error>/.test(text)) throw new Error(`the storage answered ${answer.status} for a copy`);
+		return true;
+	}
+
+	async delete(key: string): Promise<void> {
+		this.calls.push(`DELETE ${key}`);
+		const answer = await this.call(this.url(key), { method: "DELETE" });
+		await answer.body?.cancel();
+		if (!answer.ok && answer.status !== 404) throw new Error(`the storage answered ${answer.status} for a delete`);
+	}
+}

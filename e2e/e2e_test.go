@@ -398,11 +398,12 @@ func TestTwoMachines(t *testing.T) {
 		}
 	}()
 
-	// Machine A logs in (key stored in ~/.folder-sync/credentials.json, env then removed);
-	// machine B, like a cloud agent, keeps the key in its environment.
+	// Machine A logs in with v0's key (`login --key`: stored in ~/.folder-sync/credentials.json, env then
+	// removed; plain `login` is the account sign-in since PEP 0003); machine B, like a cloud agent, keeps the key
+	// in its environment.
 	a := w.newMachine("A", true)
 	b := w.newMachine("B", true)
-	out := w.must(a, "login")
+	out := w.must(a, "login", "--key")
 	if !strings.Contains(out, "Stored key …") || strings.Contains(out, w.secret) {
 		t.Fatalf("login output: %s", out)
 	}

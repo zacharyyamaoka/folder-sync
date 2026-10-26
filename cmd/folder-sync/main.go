@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/term"
 
+	"folder-sync/internal/account"
 	"folder-sync/internal/config"
 	"folder-sync/internal/creds"
 	"folder-sync/internal/host"
@@ -41,12 +42,18 @@ const usage = `folder-sync %s: this folder, on every machine you use, and readab
 
 Usage:
   folder-sync init    [--project NAME] [--bucket NAME] [--dir PATH]   this folder becomes a synced folder
-  folder-sync login                                                  store the bucket key in ~/.folder-sync/
+  folder-sync login   [--server URL] [--key]                         sign this machine in (a code you approve in a
+                                                                     browser); --key stores a bucket key instead
+  folder-sync logout                                                 end this machine's session, delete account.json
+  folder-sync whoami                                                 who this machine is signed in as
+  folder-sync credentials                                            the credential-process JSON (short-lived keys);
+                                                                     exit 3 signed out or revoked
   folder-sync sync    [--once | --watch] [--discover] [--install-service] [--dir PATH]
                                                                      push this machine's changes, pull peers';
                                                                      --once exits 4 signed out, 75 round already running
   folder-sync publish [--viewer] [--dir PATH]                        bring the manifest up to date; --viewer writes
                                                                      the R2-Explorer config and prints its deploy command
+  folder-sync publish --public | --private [--dir PATH]              make the folder readable by anyone online, or not
   folder-sync status  [--json] [--dir PATH]                          last push, pull and clean run, per project;
                                                                      --json prints folder-sync-status/1
   folder-sync projects [--json] [--bucket NAME]                      the projects under the key's account root
@@ -54,8 +61,10 @@ Usage:
   folder-sync version
 
 The key comes from FOLDER_SYNC_ACCESS_KEY_ID, FOLDER_SYNC_SECRET_ACCESS_KEY and
-FOLDER_SYNC_ACCOUNT_ID (or FOLDER_SYNC_ENDPOINT), else from ~/.folder-sync/credentials.json.
+FOLDER_SYNC_ACCOUNT_ID (or FOLDER_SYNC_ENDPOINT); else, signed in (~/.folder-sync/account.json), from
+folder-sync's own short-lived keys; else from ~/.folder-sync/credentials.json.
 Short-lived keys: FOLDER_SYNC_CREDENTIAL_PROCESS, a JSON array (the argv of a program) that prints them; see README.
+The accounts server: --server, else FOLDER_SYNC_SERVER, else ` + account.DefaultServer + ` (docs/peps/0003).
 Everything folder-sync keeps lives in ~/.folder-sync/, never in AppData.
 Design: docs/peps/0001-wrap-rclone-and-r2.md. App contract: docs/CONTRACT.md.
 `
@@ -75,6 +84,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdInit(args[1:], stdout)
 	case "login":
 		err = cmdLogin(args[1:], stdout)
+	case "logout":
+		err = cmdLogout(args[1:], stdout)
+	case "whoami":
+		err = cmdWhoami(args[1:], stdout)
+	case "credentials":
+		return cmdCredentials(args[1:], stdout, stderr)
 	case "sync":
 		err = cmdSync(args[1:], stdout)
 	case "publish":
@@ -105,6 +120,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 4 // the credential process said exit 3: signed out or revoked
 		case errors.Is(err, syncer.ErrBusy):
 			return 75 // EX_TEMPFAIL: another round holds this folder's lock; nothing was done
+		case errors.Is(err, account.ErrNotSignedIn), errors.Is(err, account.ErrSignedOut):
+			return 3 // signed out: the credential-process convention (PEP 0002), for whoami and publish too
 		}
 		return 1
 	}
@@ -220,7 +237,7 @@ func cmdInit(args []string, out io.Writer) error {
 		fmt.Fprintf(out, "host:   %s (%s)\n", h.ID, h.Name)
 	}
 
-	resolver := creds.NewResolver(l.Credentials, l.Session, os.Getenv)
+	resolver := creds.NewResolver(l.Credentials, l.Session, credentialEnv(l, os.Getenv, os.Executable))
 	c, credsErr := resolver.Current()
 	if credsErr != nil && resolver.UsesProcess() {
 		return credsErr // a configured credential process that fails is an error, not "no key yet"
@@ -295,9 +312,22 @@ func cmdInit(args []string, out io.Writer) error {
 
 func cmdLogin(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
+	server := fs.String("server", "", "the accounts server or an app's own mount (default: $"+account.EnvServer+", else "+account.DefaultServer+")")
+	key := fs.Bool("key", false, "store a bucket-scoped R2 key instead (v0's login)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if *key {
+		if *server != "" {
+			return fmt.Errorf("--key and --server are exclusive")
+		}
+		return loginKey(out)
+	}
+	return loginDevice(*server, out)
+}
+
+// loginKey is v0's login: a bucket key from the environment, else asked for on the terminal.
+func loginKey(out io.Writer) error {
 	l := mustLayout()
 	if err := ensureDirs(l); err != nil {
 		return err
@@ -336,6 +366,9 @@ func cmdLogin(args []string, out io.Writer) error {
 	}
 	c.Source = l.Credentials
 	fmt.Fprintf(out, "Stored %s (mode 0600).\n", c.Redacted())
+	if a, err := account.Load(l.Account); err == nil {
+		fmt.Fprintf(out, "Note: this machine is also signed in as %s, which takes precedence over a stored key; `folder-sync logout` to use this key.\n", a.User.Email)
+	}
 	return nil
 }
 
@@ -352,7 +385,7 @@ func openProject(dir string, out io.Writer) (*syncer.Project, error) {
 	if err != nil {
 		return nil, err
 	}
-	return syncer.Open(folder, l, os.Getenv, bin, out)
+	return syncer.Open(folder, l, credentialEnv(l, os.Getenv, os.Executable), bin, out)
 }
 
 func cmdSync(args []string, out io.Writer) error {
@@ -517,9 +550,29 @@ func installService(dir string, out io.Writer) error {
 func cmdPublish(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("publish", flag.ContinueOnError)
 	withViewer := fs.Bool("viewer", false, "write the R2-Explorer viewer config and print its deploy command")
+	public := fs.Bool("public", false, "make the folder readable by anyone online (signed in: folder-sync login)")
+	private := fs.Bool("private", false, "make the folder readable online only by you and its readers")
 	dir := folderFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *public || *private {
+		if *public && *private || *withViewer {
+			return fmt.Errorf("--public, --private and --viewer are exclusive")
+		}
+		folder, err := findFolder(*dir)
+		if err != nil {
+			return err
+		}
+		cfg, err := config.Load(folder)
+		if err != nil {
+			return err
+		}
+		visibility := "private"
+		if *public {
+			visibility = "public"
+		}
+		return setVisibility(cfg.Project, visibility, out)
 	}
 	p, err := openProject(*dir, out)
 	if err != nil {
@@ -616,7 +669,7 @@ func cmdProjects(args []string, out, errOut io.Writer) error {
 	if err != nil {
 		return err
 	}
-	c, err := creds.NewResolver(l.Credentials, l.Session, os.Getenv).Current()
+	c, err := creds.NewResolver(l.Credentials, l.Session, credentialEnv(l, os.Getenv, os.Executable)).Current()
 	if err != nil {
 		return err
 	}
