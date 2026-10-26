@@ -273,6 +273,22 @@ test("the registry: apps.json's origins, plus PUBLIC_URL's for the Worker's own 
 	assert.equal(appFor(null, registered), null);
 });
 
+test("the registry: a plain-http (loopback, dev) origin counts only when ENVIRONMENT=dev", async () => {
+	// WHY: apps.json lists robotparts' local demo origins beside its real ones; production must not treat a page on
+	// someone's 127.0.0.1:4933 as robotparts.dev (sign-in, cookie routes, CORS)
+	const production = apps("https://accounts.example.test", undefined, false);
+	assert.equal(appFor("https://robotparts.dev", production)?.id, "robotparts");
+	assert.equal(appFor("http://127.0.0.1:4933", production), null);
+	assert.equal(appFor("http://localhost:4933", production), null);
+	const dev = apps("http://127.0.0.1:4932/", undefined, true);
+	assert.equal(appFor("http://127.0.0.1:4933", dev)?.id, "robotparts");
+	const { deps, authCalls } = fakeDeps(people());
+	const loop = "http://127.0.0.1:4933";
+	assert.equal((await call(handle, env({ ENVIRONMENT: "production" }), deps, "/fs/signin", { origin: loop })).status, 404, "no sign-in page for a loopback origin in production");
+	assert.equal((await call(handle, env({ ENVIRONMENT: "production" }), deps, "/fs/v1/me", { origin: loop, headers: cookie(OWNER) })).status, 401, "no cookie session for a loopback origin in production");
+	assert.deepEqual(authCalls, []);
+});
+
 test("folders: my folders with their hosts and visibility, and the ones shared with me", async () => {
 	const s3 = people();
 	const { deps } = fakeDeps(s3);

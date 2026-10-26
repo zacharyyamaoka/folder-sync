@@ -545,7 +545,7 @@ function cors(request: Request, registered: Map<string, App>): Record<string, st
 // ------------------------------------------------------------------------------------------------ the router
 
 export async function handle(request: Request, env: Env, deps: Deps | null): Promise<Response> {
-	const registered = apps(env.PUBLIC_URL);
+	const registered = apps(env.PUBLIC_URL, undefined, env.ENVIRONMENT === "dev");
 	const allowed = cors(request, registered);
 	const answer = await route(request, env, deps, registered, allowed).catch((error) => {
 		if (error instanceof NotConfigured) return fail(503, "not_configured", "folder storage is not set up on this Worker yet");

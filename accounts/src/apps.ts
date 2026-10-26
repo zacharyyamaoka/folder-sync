@@ -17,12 +17,17 @@ export interface App {
 
 export const OWN_APP = "folder-sync";
 
-export function apps(publicUrl: string | undefined, raw: Record<string, unknown> = registry): Map<string, App> {
+export function apps(publicUrl: string | undefined, raw: Record<string, unknown> = registry, dev = true): Map<string, App> {
 	const out = new Map<string, App>();
 	for (const [id, value] of Object.entries(raw)) {
 		if (!value || typeof value !== "object") continue;
 		const entry = value as { name?: unknown; origins?: unknown; project?: unknown };
-		const origins = Array.isArray(entry.origins) ? entry.origins.filter((o): o is string => typeof o === "string") : [];
+		// WHY https only outside dev: apps.json lists an app's local demo origins (http://127.0.0.1:<port>) beside its
+		// real ones; in production a page on someone's loopback port must never count as that app (sign-in, cookie
+		// routes, CORS). PUBLIC_URL's own origin, below, is the operator's and always counts.
+		const origins = Array.isArray(entry.origins)
+			? entry.origins.filter((o): o is string => typeof o === "string" && (dev || o.startsWith("https://")))
+			: [];
 		out.set(id, { id, name: typeof entry.name === "string" ? entry.name : id, origins, project: typeof entry.project === "string" ? entry.project : null });
 	}
 	let own: string | null = null;
