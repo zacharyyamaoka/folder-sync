@@ -114,5 +114,37 @@ class ProjectTest(unittest.TestCase):
             reader.validate_manifest(manifest(HOST_B, {}), "demo", HOST_A)
 
 
+class AccountRootTest(unittest.TestCase):
+    ROOT = "users/AbC123/"
+
+    def setUp(self):
+        self.store = MemoryStore()
+        self.store.put(f"{self.ROOT}demo/hosts/{HOST_A}/manifest.json",
+                       json.dumps(manifest(HOST_A, {"notes/a.md": b"hello"})).encode())
+        self.store.put(f"{self.ROOT}demo/hosts/{HOST_A}/notes/a.md", b"hello")
+        # Another person's project and a v0 project in the same bucket stay invisible.
+        self.store.put(f"users/Other1/demo/hosts/{HOST_B}/manifest.json", json.dumps(manifest(HOST_B, {})).encode())
+        self.store.put(f"demo/hosts/{HOST_B}/manifest.json", json.dumps(manifest(HOST_B, {})).encode())
+
+    def test_every_key_starts_with_the_root(self):
+        project = reader.Project(self.store, "demo", root=self.ROOT)
+        files = project.files()
+        self.assertEqual([(f.host_id, f.path, f.key) for f in files],
+                         [(HOST_A, "notes/a.md", f"{self.ROOT}demo/hosts/{HOST_A}/notes/a.md")])
+        self.assertEqual(project.read(HOST_A, "notes/a.md"), b"hello")
+        self.assertEqual(project.hosts(), [HOST_A])
+        self.assertEqual([c for c in self.store.calls if c[0] == "LIST"], [("LIST", f"{self.ROOT}demo/hosts/", "")])
+
+    def test_no_root_reads_as_v0_does(self):
+        self.assertEqual(reader.Project(self.store, "demo").hosts(), [HOST_B])
+
+    def test_rejects_a_bad_root(self):
+        for root in ("users/x", "/users/x/", "users//x/", "users/../x/", "../", "a/b/c/d/e/f/g/h/i/"):
+            with self.assertRaises(reader.ContractError, msg=root):
+                reader.Project(self.store, "demo", root=root)
+        for root in ("", "users/AbC123/", "a/", "a/b/c/d/e/f/g/h/"):
+            reader.check_root(root)
+
+
 if __name__ == "__main__":
     unittest.main()

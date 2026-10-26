@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -40,15 +41,18 @@ const usage = `folder-sync %s: this folder, on every machine you use, and readab
 Usage:
   folder-sync init    [--project NAME] [--bucket NAME] [--dir PATH]   this folder becomes a synced folder
   folder-sync login                                                  store the bucket key in ~/.folder-sync/
-  folder-sync sync    [--once | --watch] [--install-service] [--dir PATH]
-                                                                     push this machine's changes, pull peers'
+  folder-sync sync    [--once | --watch] [--discover] [--install-service] [--dir PATH]
+                                                                     push this machine's changes, pull peers';
+                                                                     --once exits 4 signed out, 75 round already running
   folder-sync publish [--viewer] [--dir PATH]                        bring the manifest up to date; --viewer writes
                                                                      the R2-Explorer config and prints its deploy command
-  folder-sync status  [--dir PATH]                                   last push, pull and clean run, per project
+  folder-sync status  [--json] [--dir PATH]                          last push, pull and clean run, per project;
+                                                                     --json prints folder-sync-status/1
   folder-sync version
 
 The key comes from FOLDER_SYNC_ACCESS_KEY_ID, FOLDER_SYNC_SECRET_ACCESS_KEY and
 FOLDER_SYNC_ACCOUNT_ID (or FOLDER_SYNC_ENDPOINT), else from ~/.folder-sync/credentials.json.
+Short-lived keys: FOLDER_SYNC_CREDENTIAL_PROCESS, a JSON array (the argv of a program) that prints them; see README.
 Everything folder-sync keeps lives in ~/.folder-sync/, never in AppData.
 Design: docs/peps/0001-wrap-rclone-and-r2.md. App contract: docs/CONTRACT.md.
 `
@@ -89,8 +93,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stderr, "folder-sync %s: %v\n", args[0], err)
 		var shared config.ErrSharedIsV1
-		if errors.As(err, &shared) {
+		switch {
+		case errors.As(err, &shared):
 			return 3
+		case errors.Is(err, creds.ErrSignedOut):
+			return 4 // the credential process said exit 3: signed out or revoked
+		case errors.Is(err, syncer.ErrBusy):
+			return 75 // EX_TEMPFAIL: another round holds this folder's lock; nothing was done
 		}
 		return 1
 	}
@@ -206,6 +215,12 @@ func cmdInit(args []string, out io.Writer) error {
 		fmt.Fprintf(out, "host:   %s (%s)\n", h.ID, h.Name)
 	}
 
+	resolver := creds.NewResolver(l.Credentials, l.Session, os.Getenv)
+	c, credsErr := resolver.Current()
+	if credsErr != nil && resolver.UsesProcess() {
+		return credsErr // a configured credential process that fails is an error, not "no key yet"
+	}
+
 	var cfg config.Config
 	if _, statErr := os.Stat(filepath.Join(folder, config.FileName)); statErr == nil {
 		cfg, err = config.Load(folder)
@@ -215,6 +230,11 @@ func cmdInit(args []string, out io.Writer) error {
 		if (*project != "" && *project != cfg.Project) || (*bucket != "" && *bucket != cfg.Bucket) {
 			return fmt.Errorf("%s is already project %q in bucket %q; edit %s to change it", folder, cfg.Project, cfg.Bucket, config.FileName)
 		}
+		if credsErr == nil {
+			if err := syncer.CheckBucket(c, cfg.Bucket); err != nil {
+				return err
+			}
+		}
 		fmt.Fprintf(out, "config: %s already exists (project %q, bucket %q)\n", config.FileName, cfg.Project, cfg.Bucket)
 	} else {
 		name := *project
@@ -222,6 +242,9 @@ func cmdInit(args []string, out io.Writer) error {
 			name = config.ProjectFromFolder(folder)
 		}
 		b := *bucket
+		if b == "" && credsErr == nil && c.Bucket != "" {
+			b = c.Bucket // credentials bound to one bucket name it for us
+		}
 		if b == "" {
 			b = config.DefaultBucket
 		}
@@ -229,26 +252,38 @@ func cmdInit(args []string, out io.Writer) error {
 		if err := cfg.Validate(); err != nil {
 			return err
 		}
+		if credsErr == nil {
+			if err := syncer.CheckBucket(c, cfg.Bucket); err != nil {
+				return err
+			}
+		}
 		if err := config.Write(folder, cfg); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "config: wrote %s (project %q, bucket %q)\n", filepath.Join(folder, config.FileName), cfg.Project, cfg.Bucket)
 	}
-	stateDir := filepath.Join(l.Projects, syncer.StateKey(cfg.Project, folder))
-	if err := syncer.EnsureRegistered(l, stateDir, syncer.Registration{Project: cfg.Project, Bucket: cfg.Bucket, Folder: folder, HostID: h.ID}); err != nil {
-		return err
-	}
-
-	c, err := creds.Load(l.Credentials, os.Getenv)
-	if err != nil {
+	if credsErr != nil {
+		// WHY no registration yet: it records the account root, which only a key can tell (`sync` registers it).
 		fmt.Fprintf(out, "key:    none yet. Next: set the key in the environment, or run `folder-sync login`\n")
 		return nil
 	}
-	client := &s3.Client{Endpoint: c.Endpoint, Region: c.Region, AccessKeyID: c.AccessKeyID, SecretAccessKey: c.SecretAccessKey}
-	if err := client.HeadBucket(cfg.Bucket); err != nil {
-		return fmt.Errorf("key check: %w", err)
+	stateDir := filepath.Join(l.Projects, syncer.StateKey(cfg.Project, folder, c.Prefix))
+	if err := syncer.EnsureRegistered(l, stateDir, syncer.Registration{Project: cfg.Project, Bucket: cfg.Bucket, Folder: folder, HostID: h.ID, Root: c.Prefix}); err != nil {
+		return err
 	}
-	fmt.Fprintf(out, "key:    %s can reach bucket %q (one HEAD)\n", c.Redacted(), cfg.Bucket)
+	client := &s3.Client{Endpoint: c.Endpoint, Region: c.Region, AccessKeyID: c.AccessKeyID, SecretAccessKey: c.SecretAccessKey, SessionToken: c.SessionToken}
+	if c.Prefix != "" {
+		// A prefix-scoped key may not HEAD the bucket; one LIST under its own root proves it works.
+		if err := client.ListOne(cfg.Bucket, c.Prefix); err != nil {
+			return fmt.Errorf("key check: %w", err)
+		}
+		fmt.Fprintf(out, "key:    %s can reach prefix %q in bucket %q (one LIST)\n", c.Redacted(), c.Prefix, cfg.Bucket)
+	} else {
+		if err := client.HeadBucket(cfg.Bucket); err != nil {
+			return fmt.Errorf("key check: %w", err)
+		}
+		fmt.Fprintf(out, "key:    %s can reach bucket %q (one HEAD)\n", c.Redacted(), cfg.Bucket)
+	}
 	fmt.Fprintf(out, "Next:   folder-sync sync --once   (or --watch, or --install-service)\n")
 	return nil
 }
@@ -320,6 +355,7 @@ func cmdSync(args []string, out io.Writer) error {
 	once := fs.Bool("once", false, "run one round and exit (the default)")
 	watch := fs.Bool("watch", false, "run a round every `interval` (from .folder-sync.toml) until stopped")
 	install := fs.Bool("install-service", false, "write the autostart definition for `sync --watch` and print how to enable it")
+	discover := fs.Bool("discover", false, "look for new machines this round (one LIST) instead of every 5 min")
 	dir := folderFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -336,7 +372,7 @@ func cmdSync(args []string, out io.Writer) error {
 	}
 	defer p.Close()
 	if !*watch {
-		result, err := p.Round(context.Background(), syncer.Options{})
+		result, err := p.Round(context.Background(), syncer.Options{ForceDiscover: *discover})
 		if err != nil {
 			return err
 		}
@@ -456,8 +492,9 @@ func installService(dir string, out io.Writer) error {
 			}
 		}
 	}
+	key := syncer.StateKey(cfg.Project, folder, syncer.RegisteredRoot(l, cfg.Project, folder))
 	file, err := service.Generate(service.Spec{GOOS: runtime.GOOS, Exe: exe, Folder: folder, Project: cfg.Project,
-		StateKey: syncer.StateKey(cfg.Project, folder), User: user, Layout: l})
+		StateKey: key, User: user, Layout: l})
 	if err != nil {
 		return err
 	}
@@ -468,7 +505,7 @@ func installService(dir string, out io.Writer) error {
 	for _, command := range file.Commands {
 		fmt.Fprintf(out, "  %s\n", command)
 	}
-	fmt.Fprintf(out, "Its log: %s\n", filepath.Join(l.Logs, syncer.StateKey(cfg.Project, folder)+".log"))
+	fmt.Fprintf(out, "Its log: %s\n", filepath.Join(l.Logs, key+".log"))
 	return nil
 }
 
@@ -525,9 +562,32 @@ func viewerSettings(p *syncer.Project) viewer.Settings {
 	return viewer.Settings{Bucket: p.Config.Bucket, AccessTeam: p.Config.Viewer.AccessTeam, Domain: p.Config.Viewer.Domain, WorkerName: name}
 }
 
+// StatusSchema names `status --json`.
+const StatusSchema = "folder-sync-status/1"
+
+type statusDoc struct {
+	Schema   string          `json:"schema"`
+	Host     statusHost      `json:"host"`
+	Projects []statusProject `json:"projects"`
+}
+
+type statusHost struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type statusProject struct {
+	Project string           `json:"project"`
+	Bucket  string           `json:"bucket"`
+	Root    string           `json:"root"`
+	Folder  string           `json:"folder"`
+	Last    *syncer.LastSync `json:"last"` // null before the first round
+}
+
 func cmdStatus(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	dir := fs.String("dir", "", "show only this synced folder")
+	asJSON := fs.Bool("json", false, "print one folder-sync-status/1 JSON document")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -536,7 +596,6 @@ func cmdStatus(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "host %s (%s), state in %s\n", h.ID, h.Name, l.Root)
 	only := ""
 	if *dir != "" {
 		if only, err = findFolder(*dir); err != nil {
@@ -544,6 +603,28 @@ func cmdStatus(args []string, out io.Writer) error {
 		}
 	}
 	regs, lasts := syncer.AllStates(l)
+	if *asJSON {
+		doc := statusDoc{Schema: StatusSchema, Host: statusHost{ID: h.ID, Name: h.Name}, Projects: []statusProject{}}
+		for i, reg := range regs {
+			if only != "" && reg.Folder != only {
+				continue
+			}
+			entry := statusProject{Project: reg.Project, Bucket: reg.Bucket, Root: reg.Root, Folder: reg.Folder}
+			if lasts[i].Schema != "" {
+				last := lasts[i]
+				last.Root = reg.Root // a round from before roots existed has none; the registration is the truth
+				entry.Last = &last
+			}
+			doc.Projects = append(doc.Projects, entry)
+		}
+		data, err := json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(out, string(data))
+		return nil
+	}
+	fmt.Fprintf(out, "host %s (%s), state in %s\n", h.ID, h.Name, l.Root)
 	shown := 0
 	for i, reg := range regs {
 		if only != "" && reg.Folder != only {

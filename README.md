@@ -11,6 +11,7 @@ Point it at any folder; that folder is now on every machine you use, and readabl
 folder-sync init      # this folder becomes a synced folder
 folder-sync sync      # once, or as a background service
 folder-sync publish   # make it readable online
+folder-sync status    # last rounds; --json prints folder-sync-status/1 for apps
 ```
 
 The design is [`docs/peps/0001`](docs/peps/0001-wrap-rclone-and-r2.md) (accepted): rclone moves the files, one Cloudflare R2 bucket is the always-on copy, R2-Explorer is the web backdoor, and a thin Go binary owns the rest. Apps read projects through [the bucket contract](docs/CONTRACT.md): "the folder is the database".
@@ -39,6 +40,10 @@ folder-sync sync --watch
 ```
 
 Each machine publishes its own files to `<project>/hosts/<host-id>/` and receives its peers' files, read-only, in `<folder>/hosts/<host-id>/`. `folder-sync status` shows the last push, pull and clean run, peers, skipped names and conflicts. `folder-sync sync --install-service` writes a systemd user unit, a Task Scheduler task or a launchd agent and prints the one command that enables it. The unit and task file live in `~/.folder-sync/service/`; the macOS plist goes to `~/Library/LaunchAgents/`, the only place launchd reloads at login, so it survives a reboot. `folder-sync publish --viewer` writes the R2-Explorer Worker config (read-only, behind Cloudflare Access, `workers_dev` and previews off) and prints its deploy command.
+
+### Short-lived credentials
+
+Instead of a stored key, `FOLDER_SYNC_CREDENTIAL_PROCESS` can name a program (a JSON array, its argv, `argv[0]` absolute) that prints short-lived keys scoped to one account prefix: AWS's `credential_process` JSON (`Version` 1, `AccessKeyId`, `SecretAccessKey`, `SessionToken`, `Expiration`) plus optional `Endpoint`, `Bucket` (the only bucket these keys can use), `Prefix` (the account root, like `users/AbC123/`), `Region` and `Provider`. folder-sync runs it before every round, caches the answer in `~/.folder-sync/session.json`, and syncs under that prefix ([`docs/CONTRACT.md`](docs/CONTRACT.md), "Bucket layout"). Exit 3 means signed out (`sync --once` then exits 4); any other failure is transient and still-valid cached keys carry on. `sync --once` exits 75 when another round holds the folder.
 
 ### Try it with no cloud account
 
@@ -70,7 +75,7 @@ On a case-insensitive folder (the macOS default) `README.md` and `readme.md` are
 | Windows paths, reserved names, case twins, nothing in AppData | Unit-tested on Linux; the Windows binary cross-compiles. **Not yet run on Windows** |
 | `sync --install-service` | Writes the unit / task XML / plist and prints the command; never registers anything |
 | `publish --viewer` | Writes the R2-Explorer config and prints the deploy command; never deploys |
-| Two-way `shared/` folders (bisync under a lease), short-lived agent credentials | v1. v0 refuses a `shared` mode with a clear error |
+| Two-way `shared/` folders (bisync under a lease) | v1. v0 refuses a `shared` mode with a clear error |
 | **Real R2** | **Pending Zach**: `scripts/check-r2` (mtime round trip, conditional writes through rclone). Against the stand-in, mtimes pass and conditional writes fail, because the stand-in ignores those headers |
 | **Task Scheduler run on the Windows box** | **Pending Zach**: `scripts\check-windows-task.cmd` |
 | Lifecycle rule on `_trash/` (30 days), bucket lock, budget alert | Pending Zach, in the R2 dashboard |

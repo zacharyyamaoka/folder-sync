@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +25,7 @@ func testLayout(t *testing.T) layout.Layout {
 }
 
 func TestStateKeySeparatesClones(t *testing.T) {
-	a, b := StateKey("demo", "/home/bam/demo"), StateKey("demo", "/home/bam/demo-copy")
+	a, b := StateKey("demo", "/home/bam/demo", ""), StateKey("demo", "/home/bam/demo-copy", "")
 	if a == b || !strings.HasPrefix(a, "demo-") || len(a) != len("demo-")+8 {
 		t.Fatalf("%s %s", a, b)
 	}
@@ -37,7 +38,7 @@ func TestOneFolderPerProjectPerMachine(t *testing.T) {
 		config.Write(folder, config.New("demo", "folder-sync"))
 	}
 	reg := func(folder string) error {
-		return EnsureRegistered(l, filepath.Join(l.Projects, StateKey("demo", folder)),
+		return EnsureRegistered(l, filepath.Join(l.Projects, StateKey("demo", folder, "")),
 			Registration{Project: "demo", Bucket: "folder-sync", Folder: folder, HostID: "h"})
 	}
 	if err := reg(first); err != nil {
@@ -80,7 +81,7 @@ func TestLockIsExclusive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.AcquireLock(); err == nil || !strings.Contains(err.Error(), "another folder-sync round") {
+	if _, err := p.AcquireLock(); !errors.Is(err, ErrBusy) || !strings.Contains(err.Error(), "another folder-sync round") {
 		t.Fatalf("second lock: %v", err)
 	}
 	lock.Release()
