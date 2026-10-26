@@ -82,7 +82,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "status":
 		err = cmdStatus(args[1:], stdout)
 	case "projects":
-		err = cmdProjects(args[1:], stdout)
+		err = cmdProjects(args[1:], stdout, stderr)
 	case "version":
 		l := mustLayout()
 		v, _ := rclone.Version(rcloneBinary(l), l)
@@ -595,7 +595,7 @@ const ProjectsSchema = "folder-sync-projects/1"
 // cmdProjects lists the projects under the credentials' account root (one delimiter LIST, nothing downloaded).
 // WHY: an app that signs a person's second machine in needs to know which folders that person already syncs, so the
 // machine joins them instead of starting empty ones of the same name (vibetracks PEP 0011b).
-func cmdProjects(args []string, out io.Writer) error {
+func cmdProjects(args []string, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("projects", flag.ContinueOnError)
 	bucket := fs.String("bucket", "", "the bucket (default: the one the credentials are bound to, else "+config.DefaultBucket+")")
 	asJSON := fs.Bool("json", false, "print one folder-sync-projects/1 JSON document")
@@ -606,7 +606,13 @@ func cmdProjects(args []string, out io.Writer) error {
 	if err := ensureDirs(l); err != nil {
 		return err
 	}
-	bin, err := ensureRclone(l, out)
+	// WHY progress to stderr under --json: on a new machine this is often the first command, so it installs rclone,
+	// and an app parsing stdout must get exactly one JSON document
+	progress := out
+	if *asJSON {
+		progress = errOut
+	}
+	bin, err := ensureRclone(l, progress)
 	if err != nil {
 		return err
 	}

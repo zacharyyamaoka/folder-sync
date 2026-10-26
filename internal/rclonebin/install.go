@@ -96,19 +96,35 @@ func Install(baseURL, goos, goarch, dest string) error {
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			return err
 		}
-		tmp := dest + ".download"
-		out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+		// WHY a temp file of its own: an app's service and its sign-in can each run folder-sync's first command on a
+		// new machine at the same moment; one shared temp name let the second truncate what the first had written.
+		out, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+"-*.download")
 		if err != nil {
 			return err
 		}
+		tmp := out.Name()
 		if _, err := io.Copy(out, src); err != nil {
 			out.Close()
+			os.Remove(tmp)
 			return err
 		}
 		if err := out.Close(); err != nil {
+			os.Remove(tmp)
 			return err
 		}
-		return os.Rename(tmp, dest)
+		if err := os.Chmod(tmp, 0o755); err != nil {
+			os.Remove(tmp)
+			return err
+		}
+		if err := os.Rename(tmp, dest); err != nil {
+			os.Remove(tmp)
+			// Windows can't replace a binary another process is running: that process installed the same pin
+			if _, statErr := os.Stat(dest); statErr == nil {
+				return nil
+			}
+			return err
+		}
+		return nil
 	}
 	return fmt.Errorf("%s has no %s inside", ZipName(platform), exe)
 }

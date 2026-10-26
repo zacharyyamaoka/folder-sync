@@ -1,7 +1,10 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -262,4 +265,58 @@ func keys(m map[string]json.RawMessage) string {
 	}
 	sort.Strings(names)
 	return strings.Join(names, ",")
+}
+
+// TestProjectsJSONStaysOneDocumentWhenItInstallsRclone: on a person's next machine `projects --json` is often the first
+// folder-sync command, so it installs rclone first; that progress line goes to stderr and stdout stays the one
+// document an app parses (vibetracks reads it to join the machine to the person's folders).
+func TestProjectsJSONStaysOneDocumentWhenItInstallsRclone(t *testing.T) {
+	sandbox(t)
+	t.Setenv("FOLDER_SYNC_RCLONE", "") // nothing installed yet: ~/.folder-sync/bin/rclone is missing
+	exe := "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in\n" +
+		"version) echo 'rclone " + rclonebin.Version + "'; exit 0;;\n" +
+		"lsjson) echo '[{\"Path\":\"home\",\"IsDir\":true},{\"Path\":\"_trash\",\"IsDir\":true}]'; exit 0;;\n" +
+		"esac; done\nexit 1\n"
+	var zipped bytes.Buffer
+	w := zip.NewWriter(&zipped)
+	f, err := w.Create("rclone-" + rclonebin.Version + "-test/rclone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Write([]byte(exe))
+	w.Close()
+	data := zipped.Bytes()
+	platform := rclonebin.Platform(runtime.GOOS, runtime.GOARCH)
+	saved, had := rclonebin.SHA256[platform]
+	sum := sha256.Sum256(data)
+	rclonebin.SHA256[platform] = hex.EncodeToString(sum[:])
+	defer func() {
+		if had {
+			rclonebin.SHA256[platform] = saved
+		} else {
+			delete(rclonebin.SHA256, platform)
+		}
+	}()
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { rw.Write(data) }))
+	defer server.Close()
+	t.Setenv("FOLDER_SYNC_RCLONE_BASE_URL", server.URL)
+	useProcess(t, "echo '"+processOutput("http://127.0.0.1:1", "users/AbC123/", "vt-bucket")+"'\n")
+
+	code, stdout, stderr := runCmd("projects", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	var doc struct {
+		Schema   string   `json:"schema"`
+		Projects []string `json:"projects"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("stdout is not one JSON document (%v):\n%s", err, stdout)
+	}
+	if doc.Schema != ProjectsSchema || strings.Join(doc.Projects, ",") != "home" {
+		t.Errorf("projects %q (schema %q), want home only", doc.Projects, doc.Schema)
+	}
+	if !strings.Contains(stderr, "Installing rclone") {
+		t.Errorf("the install's progress line belongs on stderr; stderr was %q", stderr)
+	}
 }
