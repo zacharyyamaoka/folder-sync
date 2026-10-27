@@ -40,6 +40,8 @@ export class Busy extends Error {}
 export class Stale extends Error {}
 /** The body lacks what the write asked to be compared (keepNewest's field; answered 400). */
 export class BadBody extends Error {}
+/** A cut-off change could not be undone yet; nothing new runs until it is (answered 503: try again). */
+export class Recovering extends Error {}
 
 /** A JSON field name a write may ask the web host to keep the newest of (X-Folder-Sync-Keep-Newest). */
 export const NEWEST_FIELD = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
@@ -173,7 +175,8 @@ export function memoryJournal(): Journal {
 }
 
 /** Puts a cut-off write or delete right: when the manifest did not take it, the file goes back to the bytes the
- *  manifest lists (the trash copy), or away when it lists none. Every web-host operation starts with this. */
+ *  manifest lists (the trash copy), or away when it lists none. Every web-host operation starts with this. The journal
+ *  is cleared only once that has worked, so a failed undo is tried again by the next one. */
 export async function settle(bucket: WritableBucket, w: Where, journal: Journal): Promise<void> {
 	const pending = await journal.get();
 	if (!pending) return;
@@ -187,18 +190,35 @@ export async function settle(bucket: WritableBucket, w: Where, journal: Journal)
 	await journal.delete();
 }
 
-/** Runs one change (its file steps, then the manifest PUT); undoes the file steps unless the manifest took them. */
+/** Settles any cut-off change first; one that cannot be undone yet stops this operation (Recovering). */
+async function recover(bucket: WritableBucket, w: Where, journal: Journal): Promise<void> {
+	try {
+		await settle(bucket, w, journal);
+	} catch (error) {
+		throw new Recovering(`an earlier change to this folder's web host could not be undone yet (${error instanceof Error ? error.message : String(error)}); try again`);
+	}
+}
+
+/** Runs one change (its file steps, then the manifest PUT); undoes the file steps unless the manifest took them.
+ *  WHY a failed undo throws (review r2 #3): a retry would journal a new change over this one, and the record of the
+ *  bytes to put back would be lost; so the change stops, its journal stays, and the next operation (or the alarm,
+ *  webhost-do.ts) undoes it before anything else runs. */
 async function change(bucket: WritableBucket, w: Where, journal: Journal, pending: Pending, steps: () => Promise<boolean>): Promise<boolean> {
 	await journal.put(pending);
 	let committed = false;
+	let failure: unknown = null;
 	try {
 		committed = await steps();
-	} finally {
-		// WHY swallowed: the step's own error is the one to report; a failed undo stays journalled for the next write
-		if (committed) await journal.delete();
-		else await settle(bucket, w, journal).catch(() => undefined);
+	} catch (error) {
+		failure = error;
 	}
-	return committed;
+	if (committed) {
+		await journal.delete();
+		return true;
+	}
+	await recover(bucket, w, journal);
+	if (failure) throw failure;
+	return false;
 }
 
 /** Writes `path` into the web host: trash copy of the old version, the file, then the manifest (If-Match).
@@ -209,7 +229,7 @@ export async function writeWebFile(bucket: WritableBucket, w: Where, path: strin
 	const sha256 = await sha256Hex(data);
 	const mine = keepNewest ? instantOf(data, keepNewest) : null;
 	if (keepNewest && mine === null) throw new BadBody(`the body is not a JSON object with an RFC 3339 ${JSON.stringify(keepNewest)}, which X-Folder-Sync-Keep-Newest names`);
-	await settle(bucket, w, journal);
+	await recover(bucket, w, journal);
 	for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
 		const now = clock();
 		const { manifest, etag } = await readManifest(bucket, w);
@@ -241,7 +261,7 @@ export async function writeWebFile(bucket: WritableBucket, w: Where, path: strin
 /** Removes `path` from the web host (moved to _trash/); null when the web host does not hold it. */
 export async function deleteWebFile(bucket: WritableBucket, w: Where, path: string, clock: () => number, journal: Journal = memoryJournal()): Promise<{ host: string; path: string; seq: number } | null> {
 	checkWebPath(path);
-	await settle(bucket, w, journal);
+	await recover(bucket, w, journal);
 	for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
 		const now = clock();
 		const { manifest, etag } = await readManifest(bucket, w);
@@ -317,6 +337,7 @@ export async function runWebOp(env: CredsEnv, s3: FetchLike, op: WebOp, journal:
 		if (error instanceof BadPath) return { status: 400, body: { error: "bad_path", why: error.message } };
 		if (error instanceof Busy) return { status: 503, body: { error: "busy", why: error.message }, headers: { "Retry-After": "1" } };
 		if (error instanceof Stale) return { status: 409, body: { error: "stale", why: error.message } };
+		if (error instanceof Recovering) return { status: 503, body: { error: "recovering", why: error.message }, headers: { "Retry-After": "5" } };
 		if (error instanceof BadBody) return { status: 400, body: { error: "bad_body", why: error.message } };
 		if (error instanceof NotConfigured) return { status: 503, body: { error: "not_configured", why: "folder storage is not set up on this Worker yet" } };
 		if (error instanceof Denied) return { status: 404, body: { error: "not_found", why: "no such file" } };

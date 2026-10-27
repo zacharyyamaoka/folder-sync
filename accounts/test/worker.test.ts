@@ -714,7 +714,9 @@ test("review r1 #3: a write cut off between its bytes and its manifest is undone
 	// hosts/, from _trash/): the trash copy before the write must succeed, or no bytes would have changed (review r2)
 	const xKey = `users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/x.json`;
 	s3.fail = (method, key) => (method === "PUT" && key === manifestKey) || (method === "COPY" && key === xKey);
-	await assert.rejects(at("saved/x.json", "three\n"));
+	const cut = await at("saved/x.json", "three\n");
+	assert.equal(cut.status, 503, "a change that cannot be undone yet answers 503 recovering (review r2 #3)");
+	assert.equal((await cut.json()).error, "recovering");
 	s3.fail = null;
 	assert.deepEqual(mismatched(s3), ["saved/x.json"], "the undo really failed: the file holds the uncommitted bytes");
 	assert.equal((await at("saved/y.json", "why\n")).status, 200);
