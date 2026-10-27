@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -118,18 +119,26 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 			}
 			last.LastDiscover = p.Now().UTC().Format(time.RFC3339Nano)
 		}
-		if err := p.Push(ctx, stamp, &result); err != nil {
+		// WHY an empty folder still pulls (review r1 #6): the refusal guards this machine's files in the bucket, not
+		// its copies of the others'; an edit on another machine or the web must still arrive. The round still
+		// fails with the refusal, so `status` and the watch loop show it.
+		var refused error
+		var empty *EmptyFolderError
+		if err := p.Push(ctx, stamp, &result); errors.As(err, &empty) {
+			refused = fmt.Errorf("push: %w", err)
+		} else if err != nil {
 			return fmt.Errorf("push: %w", err)
+		} else {
+			last.LastPush = p.Now().UTC().Format(time.RFC3339Nano)
 		}
-		last.LastPush = p.Now().UTC().Format(time.RFC3339Nano)
 		if opts.PushOnly {
-			return nil
+			return refused
 		}
 		if err := p.Pull(ctx, &result); err != nil {
-			return fmt.Errorf("pull: %w", err)
+			return errors.Join(refused, fmt.Errorf("pull: %w", err))
 		}
 		last.LastPull = p.Now().UTC().Format(time.RFC3339Nano)
-		return nil
+		return refused
 	}()
 
 	finished := p.Now()

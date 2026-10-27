@@ -117,6 +117,17 @@ func reservedPaths() map[string]string {
 	}
 }
 
+// EmptyFolderError is Push refusing a folder that lists no file when its last
+// manifest had some: an unmounted disk or a wiped folder must never delete them all.
+type EmptyFolderError struct {
+	Folder string
+	Had    int
+}
+
+func (e *EmptyFolderError) Error() string {
+	return fmt.Sprintf("%s looks empty or unmounted (0 files, the last manifest had %d); refusing to delete them all", e.Folder, e.Had)
+}
+
 // Push uploads this machine's changes, moves overwritten and deleted objects to
 // _trash/, and rewrites the manifest (docs/peps/0001 §4-§5).
 func (p *Project) Push(ctx context.Context, stamp string, result *Result) error {
@@ -147,7 +158,7 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		return fmt.Errorf("this machine's last manifest: %w", err)
 	}
 	if len(okPaths) == 0 && len(prev.Files) > 0 {
-		return fmt.Errorf("%s looks empty or unmounted (0 files, the last manifest had %d); refusing to delete them all", p.Folder, len(prev.Files))
+		return &EmptyFolderError{Folder: p.Folder, Had: len(prev.Files)}
 	}
 	prevIndex := prev.Index()
 	now := manifest.FormatTime(p.Now())
