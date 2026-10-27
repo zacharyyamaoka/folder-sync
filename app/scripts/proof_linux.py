@@ -357,7 +357,14 @@ def main():
         try:
             code = subprocess.run(["dbus-run-session", "--", sys.executable, *sys.argv]).returncode
         finally:
-            shutil.rmtree(runtime, ignore_errors=True)
+            # the private bus's document portal may still have <runtime>/doc mounted for a moment after the bus exits
+            for _ in range(40):
+                shutil.rmtree(runtime, ignore_errors=True)
+                if not os.path.exists(runtime):
+                    break
+                time.sleep(0.25)
+            else:
+                print(f"note: could not remove {runtime}", file=sys.stderr)
         sys.exit(code)
     display = args.display or next(n for n in range(140, 200) if not os.path.exists(f"/tmp/.X11-unix/X{n}"))
     out = args.out.resolve()

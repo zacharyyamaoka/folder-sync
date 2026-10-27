@@ -70,7 +70,21 @@ STATES = [
 ]
 
 
-def build(proof_dir: pathlib.Path, extra: pathlib.Path | None, out: pathlib.Path) -> str:
+def runs_table(runs: list[pathlib.Path]):
+    """One row per passing proof run: load, the app's and the CLI's file → page times."""
+    rows, app_all, cli_all = [], [], []
+    for run in runs:
+        r = json.loads((run / "proof.json").read_text())
+        app = [t["ms"] for t in r.get("disk_to_page_ms", []) if t["ms"] is not None]
+        cli = [t["ms"] for t in r.get("cli_disk_to_page_ms", []) if t["ms"] is not None]
+        app_all += app
+        cli_all += cli
+        load = r.get("load_average", [None])[0]
+        rows.append((run.name, load, app, cli))
+    return rows, app_all, cli_all
+
+
+def build(proof_dir: pathlib.Path, extra: pathlib.Path | None, out: pathlib.Path, runs: list[pathlib.Path]) -> str:
     proof = json.loads((proof_dir / "proof.json").read_text())
     media = out.parent / NAME
     media.mkdir(parents=True, exist_ok=True)
@@ -90,6 +104,15 @@ def build(proof_dir: pathlib.Path, extra: pathlib.Path | None, out: pathlib.Path
     cli_under = sum(1 for m in cli if m < 1000)
     load = proof.get("load_average", [None])[0]
     all_under = bool(ms) and under == len(trials)
+    run_rows, app_all, cli_all = runs_table(runs)
+    agg_med = round(statistics.median(app_all)) if app_all else None
+    agg_under = sum(1 for m in app_all if m < 1000)
+    cli_agg_med = round(statistics.median(cli_all)) if cli_all else None
+    cli_agg_under = sum(1 for m in cli_all if m < 1000)
+    runs_html = "".join(
+        f"<tr><td>{esc(name)}</td><td>{load:.0f}</td><td>{round(statistics.median(a))} ms</td><td>{sum(1 for m in a if m < 1000)} of {len(a)}</td>"
+        f"<td>{round(statistics.median(c)) if c else '—'} ms</td><td>{sum(1 for m in c if m < 1000)} of {len(c)}</td></tr>"
+        for name, load, a, c in run_rows if a)
     token_files = proof.get("token_files_on_disk", ["(not checked)"])
     old_token = proof.get("old_token_after_sign_out")
     after_exit = proof.get("account_process_after_sign_out_exit")
@@ -174,8 +197,8 @@ details summary {{ cursor:pointer; color:var(--muted) }}
 </style></head><body><main>
 <h1>folder-sync desktop app</h1>
 <p class="muted">PEP 0005 prototype · lane <code>lane/desktop</code> (folder-sync), not merged · 2026-10-27 · proved against the local accounts stack only, never production</p>
-<div class="verdict"><b>Sign in, click Create folder, and the folder syncs. A file dropped in it showed on the robotparts page in a median of {med} ms ({under} of {len(trials)} under 1 s), with the machine at load {load:.0f}; the CLI, measured at the same moment, had a median of {cli_med} ms.</b>
-The 1 s target is met by the median but not by every file on this loaded machine; the app adds no time of its own (robotparts' bench measured 584 ms on the same engine path on a quieter machine).
+<div class="verdict"><b>Sign in, click Create folder, and the folder syncs. Across {len(run_rows)} full runs, a file dropped in it showed on the robotparts page in a median of {agg_med} ms ({agg_under} of {len(app_all)} under 1 s); the CLI, measured at the same moments, {cli_agg_med} ms ({cli_agg_under} of {len(cli_all)}).</b>
+The 1 s target holds for the median, not for every file: this machine ran at load {min(l for _, l, _, _ in run_rows):.0f}–{max(l for _, l, _, _ in run_rows):.0f} on 24 cores during the runs. The app adds no time of its own; it runs the same engine path the CLI does.
 The token lives only in the OS keychain. Linux .deb and AppImage are built locally. macOS and Windows are written down, not built. There is no download link yet (needs a build host).</div>
 
 <div class="hero">
@@ -192,6 +215,10 @@ The token lives only in the OS keychain. Linux .deb and AppImage are built local
 <tr><th colspan="2">The same moment, through the demo's CLI machine</th></tr>{cli_rows}</table>
 <div><p class="muted">Measured by the proof driver: the time the file is written, to a MutationObserver on the signed-in page seeing <code>[data-saved-part]</code> for it (the same probe as robotparts' <code>tools/sync_bench.py</code>). The path: fsnotify (100 ms debounce) → the engine's round uploads → hub announce → the page refetches. The app adds nothing to that path. It runs the same engine with push on.</p></div>
 </div>
+
+<h3>Every full run</h3>
+<table><tr><th>Run</th><th>Load (1 min)</th><th>App median</th><th>App under 1 s</th><th>CLI median (same moment)</th><th>CLI under 1 s</th></tr>{runs_html}</table>
+<p class="muted">Every run is a fresh stack, sign-in, folder and six files per side. The per-file table above is the run the hero clip and the screenshots come from.</p>
 
 <h2>The tray, in every state</h2>
 <p class="muted">The open tray menu in each state, from the same run (stalonetray standing in for the desktop's tray under Xvfb). The icon's badge is green check, blue arrows, grey slash, amber or red !, pause bars, or a hollow ring. Amber and red are kept for the two states that need the person (over quota, error).</p>
@@ -316,9 +343,10 @@ def main():
     ap.add_argument("--proof", required=True, type=pathlib.Path)
     ap.add_argument("--extra", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, default=OUT)
+    ap.add_argument("--runs", type=pathlib.Path, nargs="*", default=[], help="every passing proof run, for the latency table")
     args = ap.parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    page = build(args.proof, args.extra, args.out)
+    page = build(args.proof, args.extra, args.out, args.runs or [args.proof])
     args.out.write_text(page)
     print(args.out)
 
