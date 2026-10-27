@@ -182,6 +182,9 @@ Worker in the write path), not built.
   own (`sync.py:653-672` stops setting `FOLDER_SYNC_CREDENTIAL_PROCESS`).
 - `/me/<space>/…` reads through `/fs/v1/folders/<space>/files/…`; the Access-gated `/s/` shares are unchanged.
 - Its invite list (`SIGN_UP_EMAILS`) becomes the accounts Worker's (§6).
+- Deferred from review r2 (finding 10): until then, vt's own credential process has one argv for every `VT_HOME`, so two
+  homes signed in as different people share `session.json`'s cache entry (keyed by argv). The switch above removes it
+  (folder-sync's own process names the sign-in in its argv, §3.5); if the switch slips, vt's argv must name its home.
 
 ## 5. What does not change
 
