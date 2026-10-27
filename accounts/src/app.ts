@@ -6,6 +6,7 @@
 //   GET  /fs/device[?user_code=…]                 approve a machine that ran `folder-sync login` (RFC 8628)
 //   GET  /fs/dev/mailbox?email=                   dev + loopback only: the last sign-in code
 //   GET  /fs/v1/me                                the session's person, root and app
+//   GET  /fs/v1/usage                             the session's storage, its quota, and whether it is over
 //   POST /fs/v1/sign-out                          ends this session
 //   GET  /fs/v1/folders                           my folders and the ones I may read
 //   GET  /fs/v1/folders/:project[?owner=]         the union view of a folder's hosts
@@ -293,6 +294,28 @@ async function me(request: Request, deps: Deps, app: App | null): Promise<Respon
 		root: userRoot(person.userId),
 		app: app && app.id !== OWN_APP ? { id: app.id, project: app.project } : null,
 	});
+}
+
+/** GET /fs/v1/usage: the person's storage against their quota (§3.7), so a page can offer the ways back under
+ *  (permanent delete, empty trash) when it is over. `over` is the reason, as read-only keys' Reason says it. */
+async function usage(request: Request, env: Env, deps: Deps, app: App | null): Promise<Response> {
+	const who = await session(request, deps, app);
+	if (!who) return fail(401, "signed_out", "not signed in");
+	const quota = quotaOf(env);
+	const root = userRoot(who.person.userId);
+	const bucket = await bucketFor(env, deps, root, "object-read-only", READ_TTL_S);
+	let used: { bytes: number; objects: number; partial?: boolean };
+	let over: string | null;
+	try {
+		used = await usageOf(deps.store, who.person.userId, quota, deps.now(), () => bucket.measure(root, { bytes: quota.bytes, objects: quota.objects }));
+		over = overQuota(used, quota);
+	} catch (error) {
+		if (!(error instanceof Measuring)) throw error;
+		const known = await deps.store.usage(who.person.userId);
+		used = known ?? { bytes: 0, objects: 0 };
+		over = error instanceof TooOld ? error.message : null;
+	}
+	return json(200, { used: { bytes: used.bytes, objects: used.objects }, quota: { bytes: quota.bytes, objects: quota.objects }, over, partial: !!used.partial });
 }
 
 async function signOut(request: Request, deps: Deps, app: App | null): Promise<Response> {
@@ -733,6 +756,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 	const [what, project, sub, ...more] = rest;
 
 	if (what === "me" && rest.length === 1) return read ? me(request, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (what === "usage" && rest.length === 1) return read ? usage(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (what === "sign-out" && rest.length === 1) return method === "POST" ? signOut(request, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
 	if (what === "credentials" && rest.length === 1) return method === "POST" ? credentials(request, env, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
 	if (what === "access" && rest.length === 1) return read ? access(request, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
