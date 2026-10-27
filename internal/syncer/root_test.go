@@ -292,3 +292,18 @@ func TestLastSyncCarriesTheRoot(t *testing.T) {
 		t.Fatalf("a v0 last-sync.json says root \"\" (status --json shows it): %s", data)
 	}
 }
+
+// Review r2 #9: two rounds in one UTC second must not share a trash folder (or a conflict-copy folder), or the
+// second version replaced moves onto the first's key. The stamp keeps the contract's second first.
+func TestStampIsUniqueWithinASecond(t *testing.T) {
+	at := time.Date(2026, 10, 25, 12, 0, 0, 789_000_000, time.UTC)
+	a, b := Stamp(at), Stamp(at)
+	if a == b {
+		t.Fatalf("two rounds in the same instant share the stamp %q", a)
+	}
+	for _, s := range []string{a, b} {
+		if !strings.HasPrefix(s, "20261025T120000Z-789-") || len(s) != len("20261025T120000Z-789-")+8 {
+			t.Fatalf("stamp %q: want the UTC second, the millisecond and 8 hex digits, like the web host's", s)
+		}
+	}
+}
