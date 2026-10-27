@@ -7,4 +7,8 @@ require (
 	golang.org/x/term v0.47.0
 )
 
-require golang.org/x/sys v0.49.0 // indirect
+require (
+	github.com/coder/websocket v1.8.15 // indirect
+	github.com/fsnotify/fsnotify v1.10.1 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+)

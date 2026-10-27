@@ -433,3 +433,26 @@ func (p *Project) say(format string, args ...any) {
 	}
 	p.logf(format, args...)
 }
+
+// ManifestSeq is the seq of the last manifest this machine uploaded (0 before the first).
+func (p *Project) ManifestSeq() int {
+	m, err := p.ownManifest()
+	if err != nil {
+		return 0
+	}
+	return int(m.Seq)
+}
+
+// KnownPeers maps each peer this machine pulls to the seq of the manifest it last read from it (0 if none yet).
+// WHY (PEP 0004): a hub message naming a host not in this map starts a discover in that round, not in 5 minutes.
+func (p *Project) KnownPeers() map[string]int {
+	out := map[string]int{}
+	for _, id := range p.loadPeers().Known {
+		seq := 0
+		if m, ok, err := manifest.Load(p.peerManifestPath(id)); err == nil && ok {
+			seq = int(m.Seq)
+		}
+		out[id] = seq
+	}
+	return out
+}
