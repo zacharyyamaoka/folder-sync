@@ -3,8 +3,10 @@ package syncer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,5 +94,72 @@ func TestReplayOfALostAnswerIsCheckedAgainstTheJobsBase(t *testing.T) {
 	}
 	if kept, _ := p.ownManifest(); kept.Seq != 4 {
 		t.Fatalf("the answer's manifest is kept: seq %d", kept.Seq)
+	}
+}
+
+// longPaths are n distinct paths of about 711 bytes (seven 99-byte segments), as in review r5 #3.
+func longPaths(n int) []string {
+	segment := strings.Repeat("s", 99)
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("%s/%s/%s/%s/%s/%s/%s/f%04d.md", segment, segment, segment, segment, segment, segment, segment, i)
+	}
+	return out
+}
+
+// deleteBodySize is the request body folder-sync's accounts client sends for one delete job.
+func deleteBodySize(job string, fromSeq int64, paths []string) int {
+	data, _ := json.Marshal(map[string]any{"job": job, "from_seq": fromSeq, "paths": paths})
+	return len(data)
+}
+
+// Review r5 #3: 400 long paths are a 285 KB request, over the server's 256 KiB; every request must fit, by bytes as
+// well as by count, and every path still goes.
+func TestDeletesAreBatchedByBytesAsWellAsCount(t *testing.T) {
+	paths := longPaths(400)
+	p, _ := readOnlyProject(t, 3, nil)
+	prev, _ := p.ownManifest()
+	for _, path := range paths {
+		prev.Files = append(prev.Files, manifest.Entry{Path: path, Size: 1, MTime: "2026-10-27T12:00:00Z", SHA256: strings.Repeat("0", 64), WrittenAt: "2026-10-27T12:00:00Z"})
+	}
+	prev.Sort()
+	if err := manifest.Save(filepath.Join(p.StateDir, "manifest.json"), prev); err != nil {
+		t.Fatal(err)
+	}
+	var sizes []int
+	sent := 0
+	current := prev
+	p.RemoteDelete = func(ctx context.Context, job string, fromSeq int64, batch []string) (DeleteAnswer, error) {
+		size := deleteBodySize(job, fromSeq, batch)
+		sizes = append(sizes, size)
+		if size > 256*1024 {
+			return DeleteAnswer{}, fmt.Errorf("413 too_large: a delete is a list of paths, at most 256 KiB")
+		}
+		gone := map[string]bool{}
+		for _, path := range batch {
+			gone[path] = true
+		}
+		next := current
+		next.Seq, next.Files = current.Seq+1, nil
+		for _, e := range current.Files {
+			if !gone[e.Path] {
+				next.Files = append(next.Files, e)
+			}
+		}
+		current = next
+		sent += len(batch)
+		return DeleteAnswer{Seq: next.Seq, Deleted: batch, Manifest: next}, nil
+	}
+	var result Result
+	if err := p.pushReadOnly(context.Background(), prev, nil, paths, &result); err != nil {
+		t.Fatalf("every batch must fit (sizes %v): %v", sizes, err)
+	}
+	for _, size := range sizes {
+		if size > 256*1024 {
+			t.Fatalf("a request of %d bytes (the review saw 285,669): %v", size, sizes)
+		}
+	}
+	if sent != len(paths) {
+		t.Fatalf("%d of %d paths deleted", sent, len(paths))
 	}
 }
