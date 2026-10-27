@@ -459,11 +459,13 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 		if (data.byteLength > WEB_FILE_MAX) return fail(413, "too_large", `the web host takes files up to ${WEB_FILE_MAX >> 20} MiB`);
 		const keepNewest = request.headers.get("X-Folder-Sync-Keep-Newest") || undefined;
 		if (keepNewest !== undefined && !NEWEST_FIELD.test(keepNewest)) return fail(400, "bad_header", "X-Folder-Sync-Keep-Newest names one JSON field, like at");
+		const tiePrefers = request.headers.get("X-Folder-Sync-Tie-Prefers") || undefined;
+		if (tiePrefers !== undefined && !NEWEST_FIELD.test(tiePrefers)) return fail(400, "bad_header", "X-Folder-Sync-Tie-Prefers names one JSON field, like saved");
 		// a replaced file's old bytes go to _trash/ and still count, so a write adds its size and up to two objects
 		const over = await quotaRefusal(env, deps, owner, data.byteLength, 2);
 		if (over) return fail(403, "over_quota", over);
 		const hostId = await deps.store.ensureWebHost(owner, project, deps.uuid(), new Date(deps.now()).toISOString());
-		op = { method: "PUT", owner, project, hostId, path, data, keepNewest };
+		op = { method: "PUT", owner, project, hostId, path, data, keepNewest, tiePrefers };
 	} else {
 		const hostId = await deps.store.webHost(owner, project);
 		if (!hostId) return fail(404, "not_found", "this folder has no web host yet");
@@ -621,7 +623,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 		if (!allowed["Access-Control-Allow-Origin"]) return fail(403, "cors", "this origin is not a registered app");
 		return new Response(null, {
 			status: 204,
-			headers: headers({ ...allowed, "Access-Control-Allow-Methods": "GET, HEAD, PUT, PATCH, POST, DELETE", "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Folder-Sync, X-Folder-Sync-User, X-Folder-Sync-Keep-Newest", "Access-Control-Max-Age": "600" }),
+			headers: headers({ ...allowed, "Access-Control-Allow-Methods": "GET, HEAD, PUT, PATCH, POST, DELETE", "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Folder-Sync, X-Folder-Sync-User, X-Folder-Sync-Keep-Newest, X-Folder-Sync-Tie-Prefers", "Access-Control-Max-Age": "600" }),
 		});
 	}
 	if (first === "api" && rest[0] === "auth") {

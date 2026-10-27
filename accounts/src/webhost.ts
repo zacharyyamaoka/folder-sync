@@ -46,6 +46,16 @@ export class Recovering extends Error {}
 /** A JSON field name a write may ask the web host to keep the newest of (X-Folder-Sync-Keep-Newest). */
 export const NEWEST_FIELD = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
+/** Whether `data`'s JSON field `field` is exactly true (X-Folder-Sync-Tie-Prefers). */
+export function prefers(data: Uint8Array, field: string): boolean {
+	try {
+		const doc = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data));
+		return !!doc && typeof doc === "object" && doc[field] === true;
+	} catch {
+		return false;
+	}
+}
+
 /** The instant in `data`'s JSON field `field` (an RFC 3339 string), or null when there is none. */
 export function instantOf(data: Uint8Array, field: string): number | null {
 	try {
@@ -225,8 +235,10 @@ async function change(bucket: WritableBucket, w: Where, journal: Journal, pendin
 
 /** Writes `path` into the web host: trash copy of the old version, the file, then the manifest (If-Match).
  *  `keepNewest` names a JSON field (an RFC 3339 instant): then a write older than the stored version is refused
- *  (Stale), so two tabs' writes arriving out of order keep the newest (review r1 #4: newest heart wins). */
-export async function writeWebFile(bucket: WritableBucket, w: Where, path: string, data: Uint8Array, clock: () => number, journal: Journal = memoryJournal(), keepNewest?: string): Promise<{ host: string; path: string; sha256: string; seq: number }> {
+ *  (Stale), so two tabs' writes arriving out of order keep the newest (review r1 #4: newest heart wins). An exact tie
+ *  is settled the same in either order (review r2 #5): the body whose `tiePrefers` field is true wins (robotparts' "a
+ *  heart wins a tie"), else the larger sha256. */
+export async function writeWebFile(bucket: WritableBucket, w: Where, path: string, data: Uint8Array, clock: () => number, journal: Journal = memoryJournal(), keepNewest?: string, tiePrefers?: string): Promise<{ host: string; path: string; sha256: string; seq: number }> {
 	checkWebPath(path);
 	const sha256 = await sha256Hex(data);
 	const mine = keepNewest ? instantOf(data, keepNewest) : null;
@@ -242,8 +254,14 @@ export async function writeWebFile(bucket: WritableBucket, w: Where, path: strin
 		if (keepNewest && old && mine !== null) {
 			// WHY the stored bytes are the manifest's: this runs in the folder's one queue, after settle()
 			const stored = await bucket.get(hostKey(w, path));
-			const theirs = stored && "arrayBuffer" in stored ? instantOf(new Uint8Array(await stored.arrayBuffer()), keepNewest) : null;
+			const bytes = stored && "arrayBuffer" in stored ? new Uint8Array(await stored.arrayBuffer()) : null;
+			const theirs = bytes ? instantOf(bytes, keepNewest) : null;
 			if (theirs !== null && theirs > mine) throw new Stale(`the web host already holds a newer ${keepNewest} (${new Date(theirs).toISOString()}) for ${JSON.stringify(path)}`);
+			if (theirs !== null && theirs === mine && bytes) {
+				const ours = !!tiePrefers && prefers(data, tiePrefers);
+				const kept = !!tiePrefers && prefers(bytes, tiePrefers);
+				if (kept !== ours ? kept : old.sha256 > sha256) throw new Stale(`the web host already holds a version of ${JSON.stringify(path)} with the same ${keepNewest} that wins the tie`);
+			}
 		}
 		const restore = old ? trashKey(w, path, now) : null;
 		if (restore) await bucket.copy(hostKey(w, path), restore);
@@ -309,6 +327,8 @@ export interface WebOp {
 	data?: Uint8Array;
 	/** X-Folder-Sync-Keep-Newest: the JSON field whose newest instant the web host keeps for this path. */
 	keepNewest?: string;
+	/** X-Folder-Sync-Tie-Prefers: on an exact tie of keepNewest, the body whose field is true wins. */
+	tiePrefers?: string;
 }
 
 /** The answer to send: a status, a JSON body (an error is { error, why }) and extra headers. */
@@ -337,7 +357,7 @@ export async function runWebOp(env: CredsEnv, s3: FetchLike, op: WebOp, journal:
 			await recover(bucket, w, journal);
 			return { status: 200, body: { settled: true } };
 		}
-		if (op.method === "PUT") return { status: 200, body: await writeWebFile(bucket, w, op.path, op.data ?? new Uint8Array(), clock, journal, op.keepNewest) };
+		if (op.method === "PUT") return { status: 200, body: await writeWebFile(bucket, w, op.path, op.data ?? new Uint8Array(), clock, journal, op.keepNewest, op.tiePrefers) };
 		const gone = await deleteWebFile(bucket, w, op.path, clock, journal);
 		return gone ? { status: 200, body: gone } : { status: 404, body: { error: "not_found", why: "the web host does not hold that file" } };
 	} catch (error) {
