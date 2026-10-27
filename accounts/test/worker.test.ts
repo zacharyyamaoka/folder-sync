@@ -13,7 +13,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { appFor, apps } from "../src/apps.ts";
@@ -24,6 +24,7 @@ import { checkWebPath, deleteWebFile, memoryJournal, settle, stamp, writeWebFile
 import { S3Bucket } from "../src/s3-bucket.ts";
 import { MemoryS3 } from "./memory-s3.ts";
 import { MemoryStore } from "./memory-store.ts";
+import { d1Store, type D1Like } from "../src/store.ts";
 
 const SITE = "https://robotparts.dev";
 const OWN = "https://accounts.example.test";
@@ -998,4 +999,45 @@ test("review r2 #8: a web write whose quota cannot be measured answers 503 measu
 	assert.equal(put.status, 503);
 	assert.equal((await put.json()).error, "measuring");
 	assert.ok(![...s3.objects.keys()].some((k) => k.endsWith("saved/m.json")), "nothing written");
+});
+
+// ------------------------------------------------------------------------------------------------ migrations
+
+const MIGRATIONS = new URL("../migrations/", import.meta.url);
+
+test("migrations are append-only: every file matches the sha256 it was first committed with (test/migrations.lock.json)", () => {
+	const lock = JSON.parse(readFileSync(new URL("./migrations.lock.json", import.meta.url), "utf8"));
+	const files = readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort();
+	for (const file of files) {
+		assert.ok(lock[file], `${file} is not locked: add its sha256 to test/migrations.lock.json as it is first committed`);
+		const sha = createHash("sha256").update(readFileSync(new URL(file, MIGRATIONS))).digest("hex");
+		assert.equal(sha, lock[file], `${file} changed after it was written: put the change in a new migration`);
+	}
+});
+
+test("the store's SQL runs against the migrations applied in order on SQLite, D1's engine", async () => {
+	const { DatabaseSync } = await import("node:sqlite");
+	const db = new DatabaseSync(":memory:");
+	for (const file of readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort()) db.exec(readFileSync(new URL(file, MIGRATIONS), "utf8"));
+	const d1: D1Like = {
+		prepare: (sql) => ({
+			bind: (...values) => {
+				const statement = db.prepare(sql);
+				return {
+					first: async <T>() => (statement.get(...(values as never[])) as T) ?? null,
+					all: async <T>() => ({ results: statement.all(...(values as never[])) as T[] }),
+					run: async () => ({ meta: { changes: Number(statement.run(...(values as never[])).changes) } }),
+				};
+			},
+		}),
+	};
+	db.prepare('INSERT INTO "user" (id, name, email, emailVerified, createdAt, updatedAt) VALUES (?, ?, ?, 1, ?, ?)').run(OWNER.userId, "Owner", OWNER.email, "2026-10-26", "2026-10-26");
+	const store = d1Store(d1);
+	assert.equal(await store.claimMeasurement(OWNER.userId, 1000, 61_000), true, "the first claim");
+	assert.equal(await store.claimMeasurement(OWNER.userId, 2000, 62_000), false, "a second while the first is live");
+	assert.equal(await store.claimMeasurement(OWNER.userId, 61_001, 121_001), true, "once it has run out");
+	await store.setUsage(OWNER.userId, 100, 2, "2026-10-26T12:00:00.000Z");
+	await store.addUsage(OWNER.userId, -40, -1);
+	assert.deepEqual({ ...(await store.usage(OWNER.userId)) }, { bytes: 60, objects: 1, measured_at: "2026-10-26T12:00:00.000Z" });
+	assert.equal(await store.ensureWebHost(OWNER.userId, "robotparts", WEB, "2026-10-26"), WEB);
 });
