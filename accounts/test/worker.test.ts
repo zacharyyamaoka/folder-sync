@@ -1423,3 +1423,21 @@ test("review r4 #3: a delete job has its alarm before its first bucket write, so
 	assert.equal(storage.alarm, null);
 	void store;
 });
+
+test("review r4 #7: a backup that cannot be removed after an undo is charged until the alarm removes it", async () => {
+	const s3 = people();
+	const store = new MemoryStore();
+	const { core, put } = await folderObject(s3, store);
+	assert.equal((await put("saved/x.json", "v0".repeat(100))).status, 200);
+	const manifestKey = `users/${OWNER.userId}/robotparts/hosts/${WEB}/manifest.json`;
+	// each replacement fails at its manifest and is undone, but its backup cannot be deleted
+	s3.fail = (method, key) => (method === "PUT" && key === manifestKey) || (method === "DELETE" && key.includes("/_trash/"));
+	for (let n = 1; n <= 5; n++) await put("saved/x.json", `v${n}`.repeat(100)).catch(() => null);
+	s3.fail = null;
+	const counted = async () => { const u = (await store.usage(OWNER.userId))!; return { bytes: u.bytes, objects: u.objects }; };
+	assert.deepEqual(await counted(), stored(s3, OWNER), "the backups left behind are charged (the review saw 1,728 / 8 counted, 3,228 / 13 stored)");
+	await core.alarm();
+	assert.ok(![...s3.objects.keys()].some((k) => k.includes("/_trash/robotparts/" + WEB + "/")), "the alarm removed them");
+	assert.deepEqual(await counted(), stored(s3, OWNER), "and credited them");
+	assert.deepEqual(mismatched(s3), []);
+});
