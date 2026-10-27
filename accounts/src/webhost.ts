@@ -102,7 +102,7 @@ async function sha256Hex(data: Uint8Array): Promise<string> {
 	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-interface Where {
+export interface Where {
 	root: string;
 	project: string;
 	hostId: string;
@@ -149,6 +149,8 @@ function next(manifest: Manifest, files: ManifestEntry[], now: number): Manifest
 
 /** What a write or delete is about to change, kept until the manifest lists it or it is undone (review r1 #3). */
 export interface Pending {
+	/** Which web host: so the folder's alarm can settle it with nothing else to go on (review r2 #2). */
+	where: Where;
 	path: string;
 	/** The trash copy of the bytes the manifest lists for `path`, or null when it lists none (a new path). */
 	restore: string | null;
@@ -248,7 +250,7 @@ export async function writeWebFile(bucket: WritableBucket, w: Where, path: strin
 		const iso = new Date(now).toISOString();
 		const entry: ManifestEntry = { path, size: data.byteLength, mtime: iso, sha256, written_at: iso };
 		const updated = next(manifest, [...manifest.files.filter((e) => e.path !== path), entry], now);
-		const committed = await change(bucket, w, journal, { path, restore, restoreSha256: old?.sha256 ?? null, sha256 }, async () => {
+		const committed = await change(bucket, w, journal, { where: w, path, restore, restoreSha256: old?.sha256 ?? null, sha256 }, async () => {
 			await bucket.put(hostKey(w, path), data);
 			return writeManifest(bucket, w, updated, etag);
 		});
@@ -270,7 +272,7 @@ export async function deleteWebFile(bucket: WritableBucket, w: Where, path: stri
 		const restore = trashKey(w, path, now);
 		await bucket.copy(hostKey(w, path), restore);
 		const updated = next(manifest, manifest.files.filter((e) => e.path !== path), now);
-		const committed = await change(bucket, w, journal, { path, restore, restoreSha256: old.sha256, sha256: null }, async () => {
+		const committed = await change(bucket, w, journal, { where: w, path, restore, restoreSha256: old.sha256, sha256: null }, async () => {
 			await bucket.delete(hostKey(w, path));
 			return writeManifest(bucket, w, updated, etag);
 		});
@@ -298,7 +300,8 @@ export class Serial {
 
 /** One web-host operation, as the route hands it to the folder's queue (plain data: it crosses into a Durable Object). */
 export interface WebOp {
-	method: "PUT" | "DELETE";
+	/** SETTLE only puts a cut-off change right (a read asks for it first: review r2 #2). */
+	method: "PUT" | "DELETE" | "SETTLE";
 	owner: string;
 	project: string;
 	hostId: string;
@@ -330,6 +333,10 @@ export async function runWebOp(env: CredsEnv, s3: FetchLike, op: WebOp, journal:
 		const root = userRoot(op.owner);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, clock()), s3);
 		const w = { root, project: op.project, hostId: op.hostId };
+		if (op.method === "SETTLE") {
+			await recover(bucket, w, journal);
+			return { status: 200, body: { settled: true } };
+		}
 		if (op.method === "PUT") return { status: 200, body: await writeWebFile(bucket, w, op.path, op.data ?? new Uint8Array(), clock, journal, op.keepNewest) };
 		const gone = await deleteWebFile(bucket, w, op.path, clock, journal);
 		return gone ? { status: 200, body: gone } : { status: 404, body: { error: "not_found", why: "the web host does not hold that file" } };
@@ -346,14 +353,89 @@ export async function runWebOp(env: CredsEnv, s3: FetchLike, op: WebOp, journal:
 	}
 }
 
-/** The web host in this isolate: one queue and journal per folder. WHY only for the tests and a local proof without a
+/** A Durable Object's storage, as the web host uses it: the journal under one key, and one alarm. */
+export interface ObjectStorage {
+	get<T>(key: string): Promise<T | undefined>;
+	put(key: string, value: unknown): Promise<void>;
+	delete(key: string): Promise<unknown>;
+	setAlarm(at: number): Promise<void>;
+	deleteAlarm(): Promise<void>;
+}
+
+/** How long a journalled change may stay unsettled before the folder's alarm settles it (and the retry after that). */
+const SETTLE_AFTER_MS = 30_000;
+
+/** One folder's web host: its queue, its journal in `storage`, and the alarm that settles a cut-off change with no
+ *  other request to do it (review r2 #2). The Durable Object (webhost-do.ts) is this over its own storage. */
+export class WebHostCore {
+	private readonly serial = new Serial();
+	private readonly env: CredsEnv;
+	private readonly s3: FetchLike;
+	private readonly storage: ObjectStorage;
+	private readonly clock: () => number;
+
+	constructor(env: CredsEnv, s3: FetchLike, storage: ObjectStorage, clock: () => number) {
+		this.env = env;
+		this.s3 = s3;
+		this.storage = storage;
+		this.clock = clock;
+	}
+
+	private journal(): Journal {
+		const { storage, clock } = this;
+		return {
+			get: async () => (await storage.get<Pending>("pending")) ?? null,
+			put: async (pending) => {
+				await storage.put("pending", pending);
+				await storage.setAlarm(clock() + SETTLE_AFTER_MS);
+			},
+			delete: async () => {
+				await storage.delete("pending");
+				await storage.deleteAlarm();
+			},
+		};
+	}
+
+	/** One write, delete or settle of this folder's web host, after every earlier one has finished. */
+	run(op: WebOp): Promise<WebAnswer> {
+		return this.serial.run("", () => runWebOp(this.env, this.s3, op, this.journal(), this.clock));
+	}
+
+	/** The alarm: settles a change a crash or a failed undo left journalled; tries again later while it cannot. */
+	alarm(): Promise<void> {
+		return this.serial.run("", async () => {
+			const journal = this.journal();
+			const pending = await journal.get();
+			if (!pending) return;
+			try {
+				const bucket = new S3Bucket(await mint(this.env, pending.where.root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
+				await settle(bucket, pending.where, journal);
+			} catch {
+				await this.storage.setAlarm(this.clock() + SETTLE_AFTER_MS);
+			}
+		});
+	}
+}
+
+/** A Durable Object's storage in memory (the tests' and localWebHost's): its alarm never fires by itself. */
+export function memoryStorage(): ObjectStorage {
+	const data = new Map<string, unknown>();
+	return {
+		get: async <T>(key: string) => data.get(key) as T | undefined,
+		put: async (key, value) => { data.set(key, structuredClone(value)); },
+		delete: async (key) => data.delete(key),
+		setAlarm: async () => undefined,
+		deleteAlarm: async () => undefined,
+	};
+}
+
+/** The web host in this isolate: one WebHostCore per folder. WHY only for the tests and a local proof without a
  *  Durable Object binding: in production two isolates would each have their own queue (auth.ts never uses it). */
 export function localWebHost(env: CredsEnv, s3: FetchLike, clock: () => number): (op: WebOp) => Promise<WebAnswer> {
-	const serial = new Serial();
-	const journals = new Map<string, Journal>();
+	const cores = new Map<string, WebHostCore>();
 	return (op) => {
 		const name = webHostName(op.owner, op.project);
-		if (!journals.has(name)) journals.set(name, memoryJournal());
-		return serial.run(name, () => runWebOp(env, s3, op, journals.get(name)!, clock));
+		if (!cores.has(name)) cores.set(name, new WebHostCore(env, s3, memoryStorage(), clock));
+		return cores.get(name)!.run(op);
 	};
 }

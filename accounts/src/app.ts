@@ -258,7 +258,16 @@ async function quotaRefusal(env: Env, deps: Deps, owner: string, addBytes = 0, a
 	return overQuota(usage, quota, addBytes, addObjects);
 }
 
+/** Before a read: the folder's web host settles any change a crash or a failed undo left journalled, so a reader
+ *  (a page, a machine's pull through /fs/) never waits for another write to see the file again (review r2 #2). Its
+ *  answer is not the read's: a folder still recovering is read as it is. */
+async function settledFirst(env: Env, deps: Deps, owner: string, project: string): Promise<void> {
+	const hostId = await deps.store.webHost(owner, project);
+	if (hostId) await webHostOf(env, deps)({ method: "SETTLE", owner, project, hostId, path: "" });
+}
+
 async function readProject(env: Env, deps: Deps, owner: string, project: string): Promise<Project> {
+	await settledFirst(env, deps, owner, project);
 	// WHY a read-only credential for exactly this folder: whatever a route below does with a path, R2 lets this
 	// request read users/<owner>/<project>/ and nothing else (a public folder's read too)
 	const bucket = await bucketFor(env, deps, folderPrefix(owner, project), "object-read-only", READ_TTL_S); // fs-mutation: the read scope

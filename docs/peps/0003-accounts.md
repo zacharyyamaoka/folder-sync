@@ -114,7 +114,9 @@ it like any peer, read-only, into `<folder>/hosts/<web-host-id>/`.
 in that folder's Durable Object (`WEB_HOST`, `src/webhost-do.ts`), one at a time, so no two interleave their file and
 manifest steps. A change journals what it is about to touch (in the object's storage); if its manifest PUT fails or it
 is cut off, the file goes back to the bytes the manifest lists (from the trash copy, or deleted when the path was new),
-at once or first thing in the folder's next write. So every object always matches its manifest's sha256. Each trash
+at once, or first thing in the folder's next write *or read* (every `GET` of the folder asks its object to settle
+first), or on the object's own alarm 30 s later, retried until it works (review r2 #2). An undo that fails stops the
+change with its journal intact, and the folder answers `503 recovering` until the undo succeeds (review r2 #3). So every object always matches its manifest's sha256. Each trash
 copy's stamp is the contract's UTC stamp plus the millisecond and a nonce, so two replacements in one second keep both.
 WHY a queue and not new bytes under a content-addressed key the manifest points at: every reader reads
 `hosts/<host>/<path>` and checks it against the manifest, and a second layout would change the contract for all of
