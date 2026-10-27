@@ -1154,3 +1154,53 @@ test("review r3 #1: the delete endpoint builds the next manifest itself: the rev
 	assert.deepEqual(answer.manifest, written, "the answer carries the manifest, for the machine to keep");
 	assert.ok((await store.usage(OWNER.userId))!.bytes < usedBefore, "and the usage went down");
 });
+
+const JOB = "6f9b2c1e-3d4a-4b5c-8d7e-9f0a1b2c3d4e";
+
+test("review r3 #2: a delete cut off after its manifest commits is finished later, once, by a replay of the same job", async () => {
+	const s3 = people();
+	const store = new MemoryStore();
+	const { deps } = fakeDeps(s3, store);
+	const base = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/`;
+	const old = JSON.parse(s3.text(`${base}manifest.json`)!);
+	const del = (body: unknown) => call(handle, env(), deps, `/fs/v1/folders/robotparts/hosts/${MACHINE}/delete`,
+		{ origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+	await call(handle, env(), deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } });
+	const request = { job: JOB, from_seq: old.seq, paths: ["cad/bracket.step"] };
+	s3.fail = (method, key) => method === "DELETE" && key === `${base}cad/bracket.step`;
+	const first = await del(request);
+	assert.equal(first.status, 200);
+	const one = await first.json();
+	assert.deepEqual([one.seq, one.deleted, one.pending], [old.seq + 1, [], ["cad/bracket.step"]], "committed, the cleanup still to do (the review saw deleted: [] and nothing pending)");
+	// the answer is lost, or the cleanup still fails: the same job again is the same answer, charged once
+	const again = await (await del(request)).json();
+	assert.deepEqual([again.seq, again.deleted, again.pending], [old.seq + 1, [], ["cad/bracket.step"]], "a replay of the job, not a 400 or 409");
+	s3.fail = null;
+	const done = await (await del(request)).json();
+	assert.deepEqual([done.seq, done.deleted, done.pending], [old.seq + 1, ["cad/bracket.step"], []]);
+	assert.deepEqual(done.manifest.files.map((f: { path: string }) => f.path), ["saved/a.json"]);
+	assert.equal(s3.objects.has(`${base}cad/bracket.step`), false);
+	const counted = await store.usage(OWNER.userId);
+	assert.deepEqual({ bytes: counted!.bytes, objects: counted!.objects }, stored(s3, OWNER), "the usage is what is stored: charged once");
+	assert.equal((await (await del(request)).json()).seq, old.seq + 1, "a done job still answers");
+	assert.equal((await del({ ...request, paths: ["saved/a.json"] })).status, 409, "the same job id with other paths is refused");
+});
+
+test("review r3 #2: the folder's Durable Object finishes a delete's cleanup on its own alarm", async () => {
+	const { WebHostCore } = (await import("../src/webhost.ts")) as Record<string, any>;
+	const s3 = people();
+	const store = new MemoryStore();
+	const storage = objectStorage();
+	const core = new WebHostCore(env(), s3.fetch, storage, () => Date.parse("2026-10-26T12:34:56Z"), store);
+	const base = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/`;
+	const old = JSON.parse(s3.text(`${base}manifest.json`)!);
+	s3.fail = (method, key) => method === "DELETE" && key === `${base}cad/bracket.step`;
+	const answer = await core.run({ method: "HOST_DELETE", owner: OWNER.userId, project: "robotparts", hostId: MACHINE, path: "", job: JOB, fromSeq: old.seq, paths: ["cad/bracket.step"] });
+	assert.equal(answer.status, 200);
+	assert.deepEqual(answer.body.pending, ["cad/bracket.step"]);
+	assert.ok(storage.alarm !== null, "an alarm is set to finish it");
+	s3.fail = null;
+	await core.alarm();
+	assert.equal(s3.objects.has(`${base}cad/bracket.step`), false, "finished with no request");
+	assert.equal(storage.alarm, null, "nothing left to do");
+});
