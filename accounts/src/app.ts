@@ -36,8 +36,9 @@ import { Measuring, overQuota, quotaOf, TooOld, usageOf, type QuotaEnv } from ".
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store, Visibility } from "./store.ts";
 import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhost.ts";
+import type { EmailEnv } from "./email.ts";
 
-export interface Env extends CredsEnv, QuotaEnv {
+export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
 	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
 	ENVIRONMENT?: string;
 	/** This Worker's own host (the CLI's server, the account pages). */
@@ -607,9 +608,16 @@ export const PAGE_POLICY = [
 	"object-src 'none'",
 ].join("; ");
 
-function signInMethod(env: Env): "google" | "email" | "none" {
+/** Whether this Worker sends sign-in codes by email: dev (to its mailbox), or production with Resend set up. */
+function emailCodes(env: Env): boolean {
+	return env.ENVIRONMENT === "dev" || (!!env.RESEND_API_KEY && !!env.EMAIL_FROM);
+}
+
+/** The ways in the sign-in page offers, space-separated: "google", "email", both, or "none". */
+function signInMethod(env: Env): string {
 	if (env.ENVIRONMENT === "dev") return "email";
-	return env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET ? "google" : "none";
+	const ways = [env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET ? "google" : "", emailCodes(env) ? "email" : ""].filter(Boolean);
+	return ways.join(" ") || "none";
 }
 
 function escapeAttr(text: string): string {
@@ -630,7 +638,7 @@ function page(env: Env, app: App, title: string, script: string, back: string, h
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeAttr(title)} · ${escapeAttr(app.name)}</title>
 <link rel="icon" href="data:,">
-<meta name="fs-signin" content="${signInMethod(env)}">
+<meta name="fs-signin" content="${signInMethod(env)}">${env.ENVIRONMENT === "dev" ? '\n<meta name="fs-local" content="1">' : ""}
 <meta name="fs-app" content="${escapeAttr(app.name)}">
 <meta name="fs-return" content="${escapeAttr(back)}">
 <link rel="stylesheet" href="/fs/site/account.css">
@@ -702,9 +710,9 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 	if (first === "api" && rest[0] === "auth") {
 		if (!app) return fail(404, "unknown_origin", "this origin is not a registered app: no sign-in here");
 		if (!deps) return fail(503, "not_configured", "sign-in is not set up on this Worker yet");
-		// WHY a second guard: the email-code plugin is only loaded in dev; a production request for it is a 404 here
-		// even if a config mistake loaded it
-		if (env.ENVIRONMENT !== "dev" && rest.some((p) => p.includes("email-otp"))) return fail(404, "not_found", "no email codes here");
+		// WHY a second guard: the email-code plugin is loaded in dev, or in production once Resend is set up (review r3
+		// #8); without it a request for it is a 404 here even if a config mistake loaded the plugin
+		if (!emailCodes(env) && rest.some((p) => p.includes("email-otp"))) return fail(404, "not_found", "no email codes here");
 		return deps.auth(request, app);
 	}
 	if (first === "dev" && rest[0] === "mailbox" && rest.length === 1) {

@@ -37,18 +37,21 @@
     const params = new URLSearchParams(location.search);
     if (!error && (params.get('signin') === 'refused' || params.get('error'))) error = REFUSED;
     back = (back || location.href).replace(/[?&]signin=refused/, '').replace(/[?&]error=[^&]*/, '');
-    let body;
-    if (method === 'google') {
-      body = '<button class="fs-primary" data-testid="fs-signin-google">Continue with Google</button>';
-    } else if (method === 'email') {
-      body = '<label class="fs-small" for="fs-signin-email">Email (local test sign-in)</label>'
+    // the ways in, space-separated (google, email, both, or none): production offers email codes once Resend is set up
+    const ways = method.split(/\s+/);
+    const local = meta('fs-local') === '1';
+    let body = '';
+    if (ways.includes('google')) {
+      body += '<button class="fs-primary" data-testid="fs-signin-google">Continue with Google</button>';
+    }
+    if (ways.includes('email')) {
+      body += `<label class="fs-small" for="fs-signin-email">${ways.includes('google') ? 'Or sign in with a code by email' : 'Email'}${local ? ' (local test sign-in)' : ''}</label>`
         + '<input id="fs-signin-email" data-testid="fs-signin-email" type="email" autocomplete="email">'
         + '<button class="fs-primary" data-testid="fs-signin-send">Send a code</button>'
         + '<div data-testid="fs-signin-code-step" hidden><input data-testid="fs-signin-code" inputmode="numeric" maxlength="6" placeholder="123456" autocomplete="one-time-code">'
         + '<button class="fs-primary" data-testid="fs-signin-verify">Sign in</button></div>';
-    } else {
-      body = '<p data-testid="fs-signin-closed">Sign-in isn\'t switched on here yet.</p>';
     }
+    if (!body) body = '<p data-testid="fs-signin-closed">Sign-in isn\'t switched on here yet.</p>';
     box.innerHTML = `<h1>${esc(app)}</h1><p>${lead}</p>${body}`
       + `<p class="fs-error" data-testid="fs-signin-error"${error ? '' : ' hidden'}>${esc(error || '')}</p>`
       + '<p class="fs-foot">One account for your folders, on every machine and online.</p>';

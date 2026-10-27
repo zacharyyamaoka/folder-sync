@@ -80,7 +80,7 @@ is refused, `409 wrong_user`, and the page reloads (review r1 #2).
 
 | Route | Who | Answer |
 |---|---|---|
-| `/fs/api/auth/*` | anyone | Better Auth (Google; `emailOTP` only when `ENVIRONMENT=dev`) |
+| `/fs/api/auth/*` | anyone | Better Auth: Google, and 6-digit codes by email (`emailOTP`): in dev to `/fs/dev/mailbox`, in production through **Resend** once `RESEND_API_KEY` (secret) and `EMAIL_FROM` (var) are both set (review r3 #8; `src/email.ts`). WHY Resend: one HTTPS call from a Worker; Cloudflare's `send_email` binding reaches only addresses verified in Email Routing, never a stranger signing up |
 | `GET /fs/signin?return=<same-origin path>` | browser | the sign-in page (Google button; dev: email + code); back to `return` signed in |
 | `GET /fs/device` | browser | approve a machine's code (RFC 8628 verification page) |
 | `GET /fs/dev/mailbox?email=` | loopback + dev only | `{ email, code }`, the last sign-in code |
@@ -184,6 +184,16 @@ read-only keys once a measurement sees the person over, and the read-write keys 
 until they are back under (their machines' deletes, through the Worker, free space at once) or the operator raises
 their quota. A tighter bound needs R2 itself to meter the prefix (an R2 bucket per person, or a
 Worker in the write path), not built.
+
+### 3.8 Go-live: production email codes
+
+Zach sets these himself; no value is ever in a file or a chat:
+
+1. In Resend, verify the sending domain (robotparts.dev) and create an API key with sending access only.
+2. `npx --prefix /home/bam/folder-sync/accounts wrangler secret put RESEND_API_KEY --config /home/bam/folder-sync/accounts/wrangler.toml`
+   (it asks for the key on the terminal).
+3. In `accounts/wrangler.toml`, `EMAIL_FROM = "Robot Parts <signin@robotparts.dev>"` (any address on the verified
+   domain), then deploy. Until both are set, production offers Google only, and an email-code request is a 404.
 
 ## 4. Vibe Tracks, to switch (not done here)
 

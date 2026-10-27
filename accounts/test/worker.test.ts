@@ -1314,7 +1314,7 @@ test("review r3 #8: production email codes, when delivery is configured: the rou
 	assert.match(body.text, /123456/);
 	assert.doesNotMatch(JSON.stringify(body), /re_test_fixture/, "the key never in the message");
 	const failing = emailSender(mail, async () => new Response('{"message":"invalid"}', { status: 422 }));
-	await assert.rejects(failing("person@example.com", "123456"), /could not send/);
+	await assert.rejects(failing("person@example.com", "123456"), /could not be sent/);
 	const auth = readFileSync(fileURLToPath(new URL("../src/auth.ts", import.meta.url)), "utf-8");
 	assert.match(auth, /emailSender\(env, \(request\) => fetch\(request\)\)/, "auth.ts sends production codes through it");
 });

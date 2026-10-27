@@ -18,6 +18,7 @@ import { APIError } from "better-auth/api";
 import { bearer, deviceAuthorization, emailOTP } from "better-auth/plugins";
 import type { App } from "./apps.ts";
 import type { Deps, Env, Person, Via } from "./app.ts";
+import { emailSender } from "./email.ts";
 import { signUpAllowed } from "./signup.ts";
 import { d1Store, type D1Like } from "./store.ts";
 import { webHostName } from "./webhost.ts";
@@ -31,6 +32,8 @@ const mailbox = new Map<string, string>();
 
 export function createAuth(env: Env, origin: string) {
 	const dev = env.ENVIRONMENT === "dev";
+	// production email codes through Resend (review r3 #8): null until RESEND_API_KEY and EMAIL_FROM are set
+	const mail = dev ? null : emailSender(env, (request) => fetch(request));
 	const google = env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET
 		? { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET, prompt: "select_account" as const }
 		: null;
@@ -81,12 +84,13 @@ export function createAuth(env: Env, origin: string) {
 				validateClient: (clientId: string) => clientId === CLIENT_ID,
 			}),
 			bearer(),
-			...(dev
+			...(dev || mail
 				? [emailOTP({
 					otpLength: 6,
 					expiresIn: 300,
 					sendVerificationOTP: async ({ email, otp }: { email: string; otp: string }) => {
-						mailbox.set(email.toLowerCase(), otp);
+						if (mail) await mail(email, otp);
+						else mailbox.set(email.toLowerCase(), otp);
 					},
 				})]
 				: []),
