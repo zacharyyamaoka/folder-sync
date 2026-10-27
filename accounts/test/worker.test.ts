@@ -1499,3 +1499,32 @@ test("the person's usage for a page: GET /fs/v1/usage says over or not, and why 
 	assert.match(tight.over, /bytes/, "over: the reason, as the keys' Reason says it");
 	assert.equal((await usage(env(), {})).status, 401, "signed out: nothing");
 });
+
+test("the device page: signin.js never sends a signed-in person away from it (the desktop lane's reload loop)", async () => {
+	const { runInNewContext } = await import("node:vm");
+	const script = readFileSync(fileURLToPath(new URL("../site/signin.js", import.meta.url)), "utf-8");
+	const replaced: string[] = [];
+	let parsed = false; // the parser reaches device.js's <script> tag only after signin.js has run
+	const listeners: Record<string, (() => void)[]> = {};
+	const document = {
+		readyState: "loading",
+		querySelector: (selector: string) => {
+			if (selector === 'script[src="/fs/site/device.js"]') return parsed ? {} : null;
+			if (selector.startsWith("meta[name=")) return { getAttribute: () => (selector.includes("fs-return") ? "/fs/device" : "google") };
+			if (selector.includes("fs-card")) return { innerHTML: "", querySelector: () => null };
+			return null;
+		},
+		addEventListener: (name: string, run: () => void) => { (listeners[name] ??= []).push(run); },
+	};
+	const window: Record<string, unknown> = {};
+	runInNewContext(script, {
+		window, document, URL, URLSearchParams,
+		location: { search: "?user_code=ABCDEFGH", origin: "https://robotparts.dev", href: "https://robotparts.dev/fs/device?user_code=ABCDEFGH", replace: (to: string) => replaced.push(to) },
+		fetch: async () => new Response(JSON.stringify({ user: { id: "u", email: "a@example.com" }, session: {} }), { status: 200 }),
+	});
+	parsed = true;
+	document.readyState = "interactive";
+	for (const run of listeners.DOMContentLoaded ?? []) run();
+	await new Promise((done) => setTimeout(done, 10));
+	assert.deepEqual(replaced, [], "signed in on the device page: it stays, with its code (the desktop lane saw a reload loop to /fs/device)");
+});
