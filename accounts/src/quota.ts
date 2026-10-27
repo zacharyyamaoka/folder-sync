@@ -2,9 +2,10 @@
 // is a prefix of the operator's bucket, so each person gets at most QUOTA_BYTES and QUOTA_OBJECTS under users/<id>/.
 //
 // WHY enforced where it is: a machine writes to R2 directly with its temporary credential, and R2's credentials scope
-// a prefix, never a size; so the Worker refuses new credentials (and web writes) once the person is over, measured by
-// listing their root at most once every QUOTA_RECHECK_S and cached in D1. The bound is honest, not exact: past the
-// line a machine keeps the keys it holds until they expire (SYNC_CREDENTIAL_TTL_S, 300 s by default), and the
+// a prefix, never a size; so once the person is over, the Worker issues read-only keys (deletes then go through it,
+// app.ts machineDelete) and refuses web writes, measured by listing their root at most once every QUOTA_RECHECK_S and
+// cached in D1. The bound is honest, not exact: past the line a machine keeps the read-write keys it holds until they
+// expire (SYNC_CREDENTIAL_TTL_S, 300 s by default), and the
 // measurement can be QUOTA_RECHECK_S old, so one person can go over by what they upload in about ten minutes.
 
 import type { Store } from "./store.ts";

@@ -171,12 +171,12 @@ which still counts, and charges only the manifest's change) (review r2 #6). Two 
 objects, so writes to two folders at once can still be admitted against the same figure, by at most one write each.
 
 **The bound is honest, not exact.** A machine writes to R2 directly with its temporary credential, and R2 scopes a
-credential to a prefix, never a size, so nothing stops a write the moment the line is crossed. What stops it: no new
-keys once a measurement sees the person over, and the keys a machine holds expire within `SYNC_CREDENTIAL_TTL_S`
+credential to a prefix, never a size, so nothing stops a write the moment the line is crossed. What stops it: only
+read-only keys once a measurement sees the person over, and the read-write keys a machine holds expire within `SYNC_CREDENTIAL_TTL_S`
 (now 5 min, was 15). So a person can go over by what they upload in at most `QUOTA_RECHECK_S` + `SYNC_CREDENTIAL_TTL_S`
-(10 min by default) — at 100 Mbit/s about 7.5 GB, at 1 Gbit/s about 75 GB — once, after which they are stopped until
-they are back under (deletes move files to `_trash/`, which counts until the bucket's 30-day lifecycle rule expires it)
-or the operator raises their quota. A tighter bound needs R2 itself to meter the prefix (an R2 bucket per person, or a
+(10 min by default) — at 100 Mbit/s about 7.5 GB, at 1 Gbit/s about 75 GB — once, after which their uploads wait
+until they are back under (their machines' deletes, through the Worker, free space at once) or the operator raises
+their quota. A tighter bound needs R2 itself to meter the prefix (an R2 bucket per person, or a
 Worker in the write path), not built.
 
 ## 4. Vibe Tracks, to switch (not done here)
