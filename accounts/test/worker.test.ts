@@ -1606,3 +1606,45 @@ test("review r5 #2: a deletion credit that lands after a complete measurement ne
 	const after = (await store.usage(OWNER.userId))!;
 	assert.deepEqual({ bytes: after.bytes, objects: after.objects }, stored(s3, OWNER), "measured again: the figure is what is stored");
 });
+
+test("review r6 #1: a delete cut off after its manifest commits keeps its cleanup when a later change moves the seq on", async () => {
+	const s3 = people();
+	const { core, storage, store, op, put } = await folderObject(s3);
+	const base = `users/${OWNER.userId}/robotparts/hosts/${WEB}/`;
+	const big = "x".repeat(10_000);
+	assert.equal((await put("saved/x.json", big)).status, 200);
+	assert.equal((await put("saved/y.json", big)).status, 200);
+	// X's delete is cut off right after its manifest commits: saving committed: true never happens
+	const realPut = storage.put;
+	storage.put = async (key: string, value: unknown) => {
+		if (key.startsWith("job:") && (value as { committed: boolean }).committed) throw new Error("the object restarted");
+		return realPut(key, value);
+	};
+	await assert.rejects(op("DELETE", "saved/x.json", { permanent: true }));
+	storage.put = realPut;
+	// before the alarm, Y is deleted for good too: the manifest moves past X's job's seq
+	assert.equal((await op("DELETE", "saved/y.json", { permanent: true })).status, 200);
+	await core.alarm();
+	assert.deepEqual(JSON.parse(s3.text(`${base}manifest.json`)!).files, [], "neither listed");
+	assert.equal(s3.objects.has(`${base}saved/x.json`), false, "X's cleanup still ran (the review saw X stored, counted, and its job gone)");
+	assert.equal(s3.objects.has(`${base}saved/y.json`), false);
+	assert.equal(storage.alarm, null, "nothing left to do");
+	assert.deepEqual(mismatched(s3), []);
+	await staleUpperBound(store, s3);
+});
+
+test("review r6 #1: a delete job that never wrote its manifest is dropped when the seq moves on, and deletes nothing", async () => {
+	const s3 = people();
+	const { core, storage, op, put } = await folderObject(s3);
+	const base = `users/${OWNER.userId}/robotparts/hosts/${WEB}/`;
+	assert.equal((await put("saved/x.json", "x\n")).status, 200);
+	// cut off before its manifest write: the bucket refuses the manifest PUT, and the object restarts there
+	s3.fail = (method, key) => method === "PUT" && key === `${base}manifest.json`;
+	await op("DELETE", "saved/x.json", { permanent: true }).catch(() => undefined);
+	s3.fail = null;
+	assert.equal((await put("saved/z.json", "z\n")).status, 200, "a later write moves the seq on");
+	await core.alarm();
+	assert.deepEqual(JSON.parse(s3.text(`${base}manifest.json`)!).files.map((f: { path: string }) => f.path), ["saved/x.json", "saved/z.json"]);
+	assert.equal(s3.text(`${base}saved/x.json`), "x\n", "a file still listed is never deleted");
+	assert.equal(storage.alarm, null);
+});
