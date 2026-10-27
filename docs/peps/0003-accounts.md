@@ -49,7 +49,7 @@ One Cloudflare Worker, `folder-sync-accounts`, with:
     shared; no row = private.
   - `folder_reader(owner_id, project, reader_email, created_at)` — who else may read a private folder.
   - `web_host(owner_id, project, host_id, created_at)` — the folder's web writer (§3.4).
-  - `usage(owner_id, bytes, objects, measured_at)` (`0002_usage.sql`) — each person's storage as last measured (§3.7).
+  - `usage(owner_id, bytes, objects, measured_at)` (`0002_usage.sql`, `0003_usage_claim.sql`) — each person's storage as last measured (§3.7).
 - **A Durable Object per folder's web host** (`WEB_HOST`): its one writer (§3.4).
 - **No R2 binding.** It reads and writes through R2 temporary credentials it signs for exactly one prefix per request
   (vibetracks `worker/src/creds.ts`, moved here unchanged in spirit: HS256 JWT, `prefixPaths`, secret = sha256(jwt),
