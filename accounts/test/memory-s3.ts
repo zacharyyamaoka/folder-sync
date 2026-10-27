@@ -82,7 +82,7 @@ export class MemoryS3 {
 				if (cut >= 0) common.add(prefix + after.slice(0, cut + 1));
 				else contents.push(name);
 			}
-			const xml = `<ListBucketResult><IsTruncated>false</IsTruncated>${contents.map((k) => `<Contents><Key>${k}</Key></Contents>`).join("")}${[...common].sort().map((p) => `<CommonPrefixes><Prefix>${p}</Prefix></CommonPrefixes>`).join("")}</ListBucketResult>`;
+			const xml = `<ListBucketResult><IsTruncated>false</IsTruncated>${contents.map((k) => `<Contents><Key>${k}</Key><Size>${this.objects.get(k)!.byteLength}</Size></Contents>`).join("")}${[...common].sort().map((p) => `<CommonPrefixes><Prefix>${p}</Prefix></CommonPrefixes>`).join("")}</ListBucketResult>`;
 			return new Response(xml, { status: 200, headers: { "Content-Type": "application/xml" } });
 		}
 		if (!this.inScope(claims, key)) return deny(key);

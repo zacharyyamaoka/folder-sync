@@ -767,3 +767,43 @@ test("review r1 #2: a cookie write names the user its page shows (X-Folder-Sync-
 	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/a.json", { method: "PUT", headers: { ...unnamed, "X-Folder-Sync-User": SISTER.userId }, body: "{}" })).status, 200);
 	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts", { origin: OWN, method: "PATCH", headers: { Authorization: "Bearer token-sister-laptop", "Content-Type": "application/json" }, body: '{"visibility":"private"}' })).status, 200);
 });
+
+test("review r1 #7: over the per-person quota, no new storage keys and no web writes; deletes still work", async () => {
+	const s3 = people();
+	let now = Date.parse("2026-10-26T12:34:56Z");
+	const { deps } = fakeDeps(s3, new MemoryStore(), { now: () => now });
+	const bytesUnder = (root: string) => [...s3.objects].filter(([k]) => k.startsWith(root)).reduce((sum, [, v]) => sum + v.byteLength, 0);
+	const keys = (token: string, e: Env) => call(handle, e, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: `Bearer ${token}` } });
+	// a web file to delete later, written while the owner is well under the default quota
+	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/w.json", { method: "PUT", headers: page(OWNER), body: "{}\n" })).status, 200);
+	const owner = bytesUnder(`users/${OWNER.userId}/`);
+	const sister = bytesUnder(`users/${SISTER.userId}/`);
+	assert.ok(sister + 10 < owner, `the fixture: the owner holds more (${owner}) than the sister (${sister})`);
+	const tight = env({ QUOTA_BYTES: String(sister + 10), QUOTA_OBJECTS: "100000" });
+	const refused = await keys("token-owner-laptop", tight);
+	assert.equal(refused.status, 403, "over the byte quota: no new keys");
+	const body = await refused.json();
+	assert.equal(body.error, "over_quota");
+	assert.match(body.why, /bytes/);
+	assert.equal((await keys("token-sister-laptop", tight)).status, 200, "under it: keys as before");
+	const put = await call(handle, tight, deps, "/fs/v1/folders/robotparts/web/saved/more.json", { method: "PUT", headers: page(OWNER), body: "{}\n" });
+	assert.equal(put.status, 403, "over the quota: no web write");
+	assert.equal((await put.json()).error, "over_quota");
+	assert.ok(![...s3.objects.keys()].some((k) => k.endsWith("saved/more.json")));
+	assert.equal((await call(handle, tight, deps, "/fs/v1/folders/robotparts/web/saved/w.json", { method: "DELETE", headers: page(OWNER) })).status, 200, "a delete is always allowed");
+	// the object count counts too
+	const few = env({ QUOTA_OBJECTS: "2" });
+	assert.equal((await keys("token-sister-laptop", few)).status, 403, "over the object quota");
+	// measured by listing the root, cached: no second listing until QUOTA_RECHECK_S has passed
+	const lists = () => s3.calls.filter((c) => c.method === "LIST" && c.prefix === `users/${SISTER.userId}/`).length;
+	const listed = lists();
+	assert.ok(listed >= 1, "the root was listed to measure it");
+	await keys("token-sister-laptop", tight);
+	assert.equal(lists(), listed, "cached");
+	now += 301_000;
+	await keys("token-sister-laptop", tight);
+	assert.equal(lists(), listed + 1, "measured again after QUOTA_RECHECK_S (300 s by default)");
+	// a short credential lifetime bounds how far past the quota one window can go
+	assert.equal(ttlOf({}), 300);
+	assert.equal(new Date((await (await keys("token-sister-laptop", env())).json()).Expiration).getTime() - Math.floor(now / 1000) * 1000, 300_000);
+});
