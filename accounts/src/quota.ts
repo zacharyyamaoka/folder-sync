@@ -78,7 +78,12 @@ export async function usageOf(store: Store, owner: string, quota: Quota, now: nu
 		if (usage) throw new TooOld(`this account's storage was last measured ${Math.round((now - Date.parse(usage.measured_at)) / 60_000)} min ago and ${why}: reads and deletes go on, writes wait`);
 		throw new Measuring(`this account's storage ${why}; try again in a minute`);
 	};
-	const fallback = (why: string): Usage => judged(known, why);
+	// WHY read again, not `known` (review r7 #1): writes charged while this measurement was claimed or ran are in the
+	// stored figure only; the one read before it could renew write access after the excess was confirmed
+	const fallback = async (why: string): Promise<Usage> => {
+		const latest = await store.usage(owner);
+		return judged(latest && latest.measured_at ? latest : known, why);
+	};
 	const token = crypto.randomUUID();
 	if (!(await store.claimMeasurement(owner, now, now + CLAIM_MS, token))) return fallback("is being measured (or could not be, just now)");
 	let counted: { bytes: number; objects: number; complete?: boolean };

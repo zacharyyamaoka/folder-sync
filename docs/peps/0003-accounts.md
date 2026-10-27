@@ -167,7 +167,8 @@ person back under. WHY a Worker endpoint: an R2 temporary credential has no dele
 1000 files; above ~45 000 files that needs Workers Paid's subrequest limit) when keys or a web write are asked for and
 the last measurement, cached in D1 (`usage`), is older than `QUOTA_RECHECK_S` (300 s). One request at a time measures
 a person: it claims the measurement in D1 for a minute first, so a burst of refreshes costs one listing, and a listing
-that fails is not repeated within that minute; meanwhile the last measurement serves, or, with none yet, the request
+that fails is not repeated within that minute; meanwhile the stored figure serves, read again at that moment so it holds
+what writes charged since (review r7 #1), or, with none yet, the request
 answers `503 measuring` to try again (review r2 #8). A measurement's claim carries a token, and only that claim's
 listing may write its result, so one that outlives its minute cannot overwrite a newer one; and a measurement older than
 `QUOTA_MAX_AGE_S` (an hour) admits no new writes when no newer one can be taken: read-only keys, web writes `503
@@ -206,6 +207,30 @@ Zach sets these himself; no value is ever in a file or a chat:
    (it asks for the key on the terminal).
 3. In `accounts/wrangler.toml`, `EMAIL_FROM = "Robot Parts <signin@robotparts.dev>"` (any address on the verified
    domain), then deploy. Until both are set, production offers Google only, and an email-code request is a 404.
+
+### 3.9 Disclosed beta limits
+
+Known, measured, and accepted for the beta (review r7); each is a bound inside one person's own storage, never a way
+into anyone else's:
+
+1. **Credential TTL overshoot.** Read-write keys a machine already holds keep working until they expire, so a person
+   can go over their quota by what they upload in `QUOTA_RECHECK_S` + `SYNC_CREDENTIAL_TTL_S` (10 min by default), once
+   (§3.7, "The bound is honest, not exact").
+2. **Cross-folder admission overlap.** Each folder's web host admits its writes one at a time, but two folders are two
+   Durable Objects, so writes to two folders at once can each be admitted against the same figure: at most one write
+   per folder past the line (§3.7).
+3. **Conservative overcounting.** A deletion marks the figure stale rather than subtracting (review r5 #2), and charges
+   made while a measurement lists are stored on top of it (review r6 #2), so a write the listing already saw is counted
+   twice. The figure reads high, never low, until the next measurement; a person near the line can be refused a write
+   they had room for, never the reverse.
+4. **Size-based cleanup identity.** A delete job's cleanup that runs late deletes an object only if the current manifest
+   does not list its path and it still has the size the job recorded (review r4 #1). Size is not version identity: a
+   replacement of the same size written outside the manifest (a machine's upload in flight, which its own manifest has
+   not yet published) could be taken for the old copy. Web-host writes are serialized and always listed, so the web
+   host is not exposed; a machine's own keys can already rewrite its prefix (item 5).
+5. **One writer per host is a convention, not a fence** (PEP 0002 §6, review r2 #10). A machine's keys are scoped to
+   its person's root, so a buggy or hostile client on one of their machines can overwrite that person's own other hosts,
+   the web host included; never another person's root.
 
 ## 4. Vibe Tracks, to switch (not done here)
 
