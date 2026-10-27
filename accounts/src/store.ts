@@ -1,4 +1,5 @@
-// folder-sync's own rows in D1 (migrations/0001_accounts.sql): who may read a folder, and each folder's web host.
+// folder-sync's own rows in D1 (migrations/0001_accounts.sql, 0002_usage.sql): who may read a folder, each folder's web
+// host, and each person's measured storage.
 // The routes (app.ts) see only the Store interface, so the unit tests run it in memory (test/memory-store.ts) and
 // the proof runs this file against wrangler dev's local D1.
 
@@ -27,6 +28,11 @@ export interface Store {
 	webHost(owner: string, project: string): Promise<string | null>;
 	/** The folder's web host id: `candidate` if this call made the row, else the one already there. */
 	ensureWebHost(owner: string, project: string, candidate: string, now: string): Promise<string>;
+	/** The person's storage as last measured (quota.ts), or null before the first measurement. */
+	usage(owner: string): Promise<{ bytes: number; objects: number; measured_at: string } | null>;
+	setUsage(owner: string, bytes: number, objects: number, measuredAt: string): Promise<void>;
+	/** Adds what the web host just wrote to the last measurement (none yet: nothing to add to). */
+	addUsage(owner: string, bytes: number, objects: number): Promise<void>;
 }
 
 /** The subset of Cloudflare's D1Database binding used here. */
@@ -80,6 +86,16 @@ export function d1Store(db: D1Like): Store {
 			const id = await store.webHost(owner, project);
 			if (!id) throw new Error("the web host row did not stick");
 			return id;
+		},
+		usage: (owner) => one<{ bytes: number; objects: number; measured_at: string }>('SELECT bytes, objects, measured_at FROM "usage" WHERE owner_id = ?', owner),
+		async setUsage(owner, bytes, objects, measuredAt) {
+			await run(
+				'INSERT INTO "usage" (owner_id, bytes, objects, measured_at) VALUES (?, ?, ?, ?) ON CONFLICT (owner_id) DO UPDATE SET bytes = excluded.bytes, objects = excluded.objects, measured_at = excluded.measured_at',
+				owner, bytes, objects, measuredAt,
+			);
+		},
+		async addUsage(owner, bytes, objects) {
+			await run('UPDATE "usage" SET bytes = bytes + ?, objects = objects + ? WHERE owner_id = ?', bytes, objects, owner);
 		},
 	};
 	return store;

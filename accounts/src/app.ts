@@ -15,7 +15,7 @@
 //   PATCH /fs/v1/folders/:project {visibility}    public or private
 //   POST /fs/v1/folders/:project/readers {email}, DELETE …/readers/:email
 //   GET  /fs/v1/access?project=&owner=            for an app's own server
-//   POST /fs/v1/credentials                       a machine's bearer session -> R2 keys for users/<id>/ (15 min)
+//   POST /fs/v1/credentials                       a machine's bearer session -> R2 keys for users/<id>/ (5 min)
 //
 // The table in PEP 0003 §3.3 is the contract (another app builds against it); errors are
 // { "error": "<code>", "why": "<sentence>" }.
@@ -30,11 +30,12 @@
 import { appFor, apps, OWN_APP, type App } from "./apps.ts";
 import { folderPrefix, mint, NotConfigured, PROJECT, ttlOf, USER_ID, userRoot, type CredsEnv } from "./creds.ts";
 import { checkPath, ContractError, Project } from "../../readers/worker/src/folder-sync-read.ts";
+import { overQuota, quotaOf, usageOf, type QuotaEnv } from "./quota.ts";
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store, Visibility } from "./store.ts";
 import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhost.ts";
 
-export interface Env extends CredsEnv {
+export interface Env extends CredsEnv, QuotaEnv {
 	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
 	ENVIRONMENT?: string;
 	/** This Worker's own host (the CLI's server, the account pages). */
@@ -247,6 +248,16 @@ async function decide(deps: Deps, person: Person | null, project: string, ownerP
 	return person ? fail(404, "not_found", "no such folder, or it is not shared with you") : fail(401, "signed_out", "sign in to read this folder"); // fs-mutation: private stays private
 }
 
+/** Why the person may not add `addBytes` / `addObjects` now (§3.7, review r1 #7), or null. Measured by listing their
+ *  root with a read-only credential when the cached measurement is stale. */
+async function quotaRefusal(env: Env, deps: Deps, owner: string, addBytes = 0, addObjects = 0): Promise<string | null> {
+	const quota = quotaOf(env);
+	const root = userRoot(owner);
+	const usage = await usageOf(deps.store, owner, quota, deps.now(), async () =>
+		(await bucketFor(env, deps, root, "object-read-only", READ_TTL_S)).measure(root, { bytes: quota.bytes, objects: quota.objects }));
+	return overQuota(usage, quota, addBytes, addObjects);
+}
+
 async function readProject(env: Env, deps: Deps, owner: string, project: string): Promise<Project> {
 	// WHY a read-only credential for exactly this folder: whatever a route below does with a path, R2 lets this
 	// request read users/<owner>/<project>/ and nothing else (a public folder's read too)
@@ -281,6 +292,10 @@ async function credentials(request: Request, env: Env, deps: Deps, app: App | nu
 	if (!/^bearer\s+\S/i.test(request.headers.get("Authorization") || "")) return fail(401, "signed_out", "a machine signs in with folder-sync login");
 	const person = await deps.person(request, "bearer", app); // fs-mutation: the bearer session
 	if (!person) return fail(401, "signed_out", "this machine is signed out (signed out or revoked): run folder-sync login");
+	// WHY here: a machine writes to R2 directly and R2 scopes a prefix, never a size, so an account over its quota
+	// gets no new keys (review r1 #7); the ones it holds run out within SYNC_CREDENTIAL_TTL_S
+	const over = await quotaRefusal(env, deps, person.userId);
+	if (over) return fail(403, "over_quota", over);
 	const minted = await mint(env, userRoot(person.userId), "object-read-write", ttlOf(env), deps.now()); // fs-mutation: the session's root
 	return json(200, minted);
 }
@@ -435,6 +450,9 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 		if (data.byteLength > WEB_FILE_MAX) return fail(413, "too_large", `the web host takes files up to ${WEB_FILE_MAX >> 20} MiB`);
 		const keepNewest = request.headers.get("X-Folder-Sync-Keep-Newest") || undefined;
 		if (keepNewest !== undefined && !NEWEST_FIELD.test(keepNewest)) return fail(400, "bad_header", "X-Folder-Sync-Keep-Newest names one JSON field, like at");
+		// a replaced file's old bytes go to _trash/ and still count, so a write adds its size and up to two objects
+		const over = await quotaRefusal(env, deps, owner, data.byteLength, 2);
+		if (over) return fail(403, "over_quota", over);
 		const hostId = await deps.store.ensureWebHost(owner, project, deps.uuid(), new Date(deps.now()).toISOString());
 		op = { method: "PUT", owner, project, hostId, path, data, keepNewest };
 	} else {
@@ -445,6 +463,8 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 	// WHY through the folder's queue: one writer per web host, so no two writes interleave their file and manifest
 	// steps (review r1 #3)
 	const answer = await webHostOf(env, deps)(op);
+	// WHY counted at once: a browser could otherwise write far past the quota between two measurements
+	if (op.method === "PUT" && answer.status === 200) await deps.store.addUsage(owner, op.data!.byteLength, 1);
 	return json(answer.status, answer.body, answer.headers ?? {});
 }
 

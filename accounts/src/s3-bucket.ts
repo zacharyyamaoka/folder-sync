@@ -109,6 +109,32 @@ export class S3Bucket implements R2BucketLike {
 		return { delimitedPrefixes: prefixes, truncated, ...(truncated && cursor ? { cursor } : {}) };
 	}
 
+	/** Bytes and objects under `prefix` (ListObjectsV2, no delimiter, 1000 a page), counting stopped once either
+	 *  passes `stop` (then the answer only says "over"): what a person's quota is measured with. */
+	async measure(prefix: string, stop: { bytes: number; objects: number }): Promise<{ bytes: number; objects: number }> {
+		let bytes = 0;
+		let objects = 0;
+		let cursor: string | undefined;
+		do {
+			this.calls.push(`LIST ${prefix}`);
+			const query = new URLSearchParams({ "list-type": "2", prefix, "max-keys": "1000" });
+			if (cursor) query.set("continuation-token", cursor);
+			const answer = await this.call(`${this.base}?${query}`);
+			if (!answer.ok) {
+				await answer.body?.cancel();
+				throw new Error(`the storage answered ${answer.status} for a listing`);
+			}
+			const xml = await answer.text();
+			for (const match of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
+				objects += 1;
+				bytes += Number(tagValues(match[1], "Size")[0] || 0);
+			}
+			const truncated = /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml);
+			cursor = truncated ? tagValues(xml, "NextContinuationToken")[0] : undefined;
+		} while (cursor && bytes <= stop.bytes && objects <= stop.objects);
+		return { bytes, objects };
+	}
+
 	/** PUT an object. `ifMatch` / `ifNoneMatch` make it conditional; a 412 comes back as `{ ok: false, status: 412 }`. */
 	async put(key: string, body: Uint8Array, options: { ifMatch?: string; ifNoneMatch?: "*"; contentType?: string } = {}): Promise<{ ok: boolean; status: number; etag: string }> {
 		this.calls.push(`PUT ${key}`);

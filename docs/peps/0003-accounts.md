@@ -49,6 +49,7 @@ One Cloudflare Worker, `folder-sync-accounts`, with:
     shared; no row = private.
   - `folder_reader(owner_id, project, reader_email, created_at)` — who else may read a private folder.
   - `web_host(owner_id, project, host_id, created_at)` — the folder's web writer (§3.4).
+  - `usage(owner_id, bytes, objects, measured_at)` (`0002_usage.sql`) — each person's storage as last measured (§3.7).
 - **A Durable Object per folder's web host** (`WEB_HOST`): its one writer (§3.4).
 - **No R2 binding.** It reads and writes through R2 temporary credentials it signs for exactly one prefix per request
   (vibetracks `worker/src/creds.ts`, moved here unchanged in spirit: HS256 JWT, `prefixPaths`, secret = sha256(jwt),
@@ -94,7 +95,7 @@ is refused, `409 wrong_user`, and the page reloads (review r1 #2).
 | `PATCH /fs/v1/folders/:project` `{visibility}` | owner | `"public"` or `"private"` → the folder row |
 | `POST /fs/v1/folders/:project/readers` `{email}` / `DELETE …/readers/:email` | owner | grants / revokes read |
 | `GET /fs/v1/access?project=&owner=` | session | `{ allowed, role: "owner"\|"reader"\|"public"\|null, root }` — for an app's own server |
-| `POST /fs/v1/credentials` | **bearer only** | AWS `credential_process` JSON + `Endpoint`, `Bucket`, `Prefix: "users/<id>/"`, read-write, 15 min (a browser cookie never gets storage keys) |
+| `POST /fs/v1/credentials` | **bearer only** | AWS `credential_process` JSON + `Endpoint`, `Bucket`, `Prefix: "users/<id>/"`, read-write, 5 min (a browser cookie never gets storage keys); `403 over_quota` past the person's quota (§3.7) |
 
 `:project` matches the contract's `^[a-z0-9][a-z0-9._-]{0,62}$`; `<path>` follows the contract's path rules; anything
 else is 400. The root is always the session's (`users/<id>/`), never a URL's, body's or header's. A public folder's
@@ -143,6 +144,25 @@ the sync engine and keeps every rule.
 4. Its users run `folder-sync login --server https://<app>` and `folder-sync init --project <project>` to get the same
    folder on disk; their agents edit plain files there.
 
+### 3.7 Each person's storage quota
+
+Anyone may sign up (`SIGN_UP_EMAILS=*`), and an account is a prefix of the operator's bucket, so each person gets at
+most `QUOTA_BYTES` (default 1 GiB) and `QUOTA_OBJECTS` (default 100 000) under `users/<id>/`, `_trash/` included
+(`wrangler.toml` vars; `src/quota.ts`; review r1 #7). Over either, `POST /fs/v1/credentials` and web `PUT`s answer
+`403 over_quota` with the figures; web `DELETE` still works. Usage is measured by listing the root (one subrequest per
+1000 files; above ~45 000 files that needs Workers Paid's subrequest limit) when keys or a web write are asked for and
+the last measurement, cached in D1 (`usage`), is older than `QUOTA_RECHECK_S` (300 s); each web write adds its size at
+once.
+
+**The bound is honest, not exact.** A machine writes to R2 directly with its temporary credential, and R2 scopes a
+credential to a prefix, never a size, so nothing stops a write the moment the line is crossed. What stops it: no new
+keys once a measurement sees the person over, and the keys a machine holds expire within `SYNC_CREDENTIAL_TTL_S`
+(now 5 min, was 15). So a person can go over by what they upload in at most `QUOTA_RECHECK_S` + `SYNC_CREDENTIAL_TTL_S`
+(10 min by default) — at 100 Mbit/s about 7.5 GB, at 1 Gbit/s about 75 GB — once, after which they are stopped until
+they are back under (deletes move files to `_trash/`, which counts until the bucket's 30-day lifecycle rule expires it)
+or the operator raises their quota. A tighter bound needs R2 itself to meter the prefix (an R2 bucket per person, or a
+Worker in the write path), not built.
+
 ## 4. Vibe Tracks, to switch (not done here)
 
 - Replace `worker/src/auth.ts` and `creds.ts` with the `/fs/*` forwarder; register `vibetracks` in `apps.json`.
@@ -161,6 +181,7 @@ The bucket layout, the manifest, the credential-process shape (0002), the stand-
 
 - **Who may sign up.** Default: `SIGN_UP_EMAILS` like Vibe Tracks (unset = nobody new, `*` = anyone). Recommended `*`
   for robotparts.dev once Zach is happy with the public sign-in; until he sets it, only listed emails get accounts.
+  With `*`, each account's storage is capped by §3.7's quota.
 - **Organisations** (robotparts' "only for our organisation"): v1 here is per-person readers (`folder_reader`). An org
   is a later `orgs/<id>/` root with members; not built.
 

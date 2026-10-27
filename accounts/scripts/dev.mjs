@@ -138,7 +138,7 @@ export function devVars(p, k, env = process.env) {
 		R2_ACCOUNT_ID: k.accountId,
 		R2_ENDPOINT: `http://127.0.0.1:${p.standin}`,
 		SYNC_BUCKET: BUCKET,
-		SYNC_CREDENTIAL_TTL_S: env.SYNC_CREDENTIAL_TTL_S || "900",
+		SYNC_CREDENTIAL_TTL_S: env.SYNC_CREDENTIAL_TTL_S || "300",
 		R2_PARENT_ACCESS_KEY_ID: k.parentKeyId,
 		R2_PARENT_SECRET_ACCESS_KEY: k.parentSecret,
 		SIGN_UP_EMAILS: env.SIGN_UP_EMAILS || "*",

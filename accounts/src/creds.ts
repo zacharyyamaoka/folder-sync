@@ -69,12 +69,13 @@ export function endpointOf(env: CredsEnv): string {
 	return `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
 }
 
-/** The lifetime of a sync credential: SYNC_CREDENTIAL_TTL_S, 900 s by default, kept between 30 s and one hour. */
+/** The lifetime of a sync credential: SYNC_CREDENTIAL_TTL_S, 300 s by default, kept between 30 s and one hour. */
 export function ttlOf(env: CredsEnv): number {
-	const asked = Number(env.SYNC_CREDENTIAL_TTL_S || 900);
-	// WHY at most an hour: a revoked machine keeps the credential it holds until it expires, so the lifetime is
-	// how long a revocation can take; 15 minutes by default (a refresh every ~10 minutes, a few Worker calls an hour)
-	return Math.min(3600, Math.max(30, Number.isFinite(asked) ? Math.floor(asked) : 900));
+	const asked = Number(env.SYNC_CREDENTIAL_TTL_S || 300);
+	// WHY at most an hour: a revoked machine (or one over its quota, quota.ts) keeps the credential it holds until it
+	// expires, so the lifetime is how long a revocation takes. WHY 5 minutes by default (it was 15): it also bounds how
+	// far past the quota one person can upload (review r1 #7), at a refresh every ~3 minutes, ~20 Worker calls an hour
+	return Math.min(3600, Math.max(30, Number.isFinite(asked) ? Math.floor(asked) : 300));
 }
 
 const enc = new TextEncoder();

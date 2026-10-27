@@ -51,8 +51,15 @@ R2_ACCOUNT_ID = "0123456789abcdef0123456789abcdef"
 SYNC_BUCKET = "folder-sync"
 # Empty: https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com (a local stand-in in the proof)
 R2_ENDPOINT = ""
-# How long a machine's storage keys live: a revoked machine stops within this (and refreshes a third before it ends)
-SYNC_CREDENTIAL_TTL_S = "900"
+# How long a machine's storage keys live: a revoked (or over-quota) machine stops within this (and refreshes a third
+# before it ends). 5 minutes: it also bounds how far past its quota one person can go (src/quota.ts).
+SYNC_CREDENTIAL_TTL_S = "300"
+# Each person's storage ceiling under users/<id>/, _trash/ included (PEP 0003 §3.7): 1 GiB and 100 000 files. Over it,
+# no new storage keys and no web writes. Measured by listing the root at most every QUOTA_RECHECK_S seconds, which
+# takes one subrequest per 1000 files: QUOTA_OBJECTS above ~45 000 needs the Workers Paid plan's subrequest limit.
+QUOTA_BYTES = "1073741824"
+QUOTA_OBJECTS = "100000"
+QUOTA_RECHECK_S = "300"
 # Secrets, set once by the operator (never in this file): BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
 # R2_PARENT_ACCESS_KEY_ID, R2_PARENT_SECRET_ACCESS_KEY, and SIGN_UP_EMAILS (who may create an account, comma-separated;
 # unset means nobody new, "*" anyone; it holds real emails, so it is a secret). Until they are set, sign-in answers 503

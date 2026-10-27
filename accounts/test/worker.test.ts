@@ -225,7 +225,7 @@ test("a root is users/<id>/ for a well-formed id only, always with its trailing 
 	const minted = await mint(env(), "users/ownerABC123/robotparts/", "object-read-only", 60, Date.parse("2026-10-26T00:00:00Z"));
 	assert.deepEqual((claimsOf(minted.SessionToken).paths as { prefixPaths: string[] }).prefixPaths, ["users/ownerABC123/robotparts/"]);
 	assert.equal(minted.Expiration, "2026-10-26T00:01:00.000Z");
-	assert.equal(ttlOf({}), 900);
+	assert.equal(ttlOf({}), 300, "5 minutes by default since review r1 #7 (it was 15)");
 	assert.equal(ttlOf({ SYNC_CREDENTIAL_TTL_S: "5" }), 30);
 	assert.equal(ttlOf({ SYNC_CREDENTIAL_TTL_S: "99999" }), 3600);
 });
@@ -791,8 +791,8 @@ test("review r1 #7: over the per-person quota, no new storage keys and no web wr
 	assert.equal((await put.json()).error, "over_quota");
 	assert.ok(![...s3.objects.keys()].some((k) => k.endsWith("saved/more.json")));
 	assert.equal((await call(handle, tight, deps, "/fs/v1/folders/robotparts/web/saved/w.json", { method: "DELETE", headers: page(OWNER) })).status, 200, "a delete is always allowed");
-	// the object count counts too
-	const few = env({ QUOTA_OBJECTS: "2" });
+	// the object count counts too (the sister holds two: her manifest and saved/a.json)
+	const few = env({ QUOTA_OBJECTS: "1" });
 	assert.equal((await keys("token-sister-laptop", few)).status, 403, "over the object quota");
 	// measured by listing the root, cached: no second listing until QUOTA_RECHECK_S has passed
 	const lists = () => s3.calls.filter((c) => c.method === "LIST" && c.prefix === `users/${SISTER.userId}/`).length;
