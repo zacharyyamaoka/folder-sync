@@ -1,7 +1,7 @@
 # 0004 · Push sync: a hub that says "this folder changed", so nothing waits for a poll
 
 - **Date:** 2026-10-26
-- **Status:** proposed, prototyped on branch `lane/fast-sync` (cut from `lane/accounts`). Final when Zach merges it.
+- **Status:** proposed, prototyped and measured on branch `lane/fast-sync` (cut from `lane/accounts`; §4b). Final when Zach merges it.
 - **Source:** Zach, 2026-10-26: "Obsidian Sync works really quick. Perhaps we can copy its model? … I think the key
   idea is switching from polling to more of an interrupt/push system." And: "make sure it works whether you are just
   online, or online + local, and even on multiple computers."
@@ -93,6 +93,27 @@ fallback poll.
 (b) keeps (c) as an optional safety net later (a write that bypassed folder-sync would still announce itself), and
 (d) as an optimisation once the timers are gone: a native S3 GET/PUT instead of an rclone process saves ~50 ms per
 step and the idle scan's process.
+
+## 4b. Measured: the prototype against the same build polling (2026-10-26)
+
+Same code on both sides, local stack, 2 machines + a page, 10 trials each way at random phases
+(`tools/sync_bench.py` in robotparts lane/fast-sync). "Polling" is `sync --watch --no-push` (2 s) and the page without
+WebSocket (10 s re-read): exactly the pre-PEP behaviour.
+
+| Path (mean) | Polling | Push | |
+|---|---|---|---|
+| page write → laptop disk | 1.01 s | **0.28 s** | 3.6x |
+| page write → desktop disk | 1.09 s | **0.29 s** | 3.8x |
+| laptop disk → served at `/fs/` | 1.21 s | **0.60 s** | 2x |
+| laptop disk → the open page | 6.20 s | **0.75 s** | 8x |
+| laptop disk → desktop disk | 2.80 s | **0.63 s** | 4.4x |
+| a new machine joins → laptop has its file | 144 s | **0.16 s** | 900x |
+| browser → browser, no machine running | ~5 s (10 s poll) | **0.92 s** | |
+| idle, per machine, 60 s | 29 rounds, 29 rclone runs, 3.3 % of a core | **1 round, 1 rclone run, 0.1 %** | 33x |
+
+What is left in the push numbers is work, not waiting: the 100 ms debounce, a round's three rclone processes
+(~55 ms each), the web host's PUT (~130 ms, its Durable Object), and the page's bundle read (~190 ms) + render
+(~120 ms). The next cut is (d): native S3 calls instead of rclone processes, and pulling only the named host.
 
 ## 5. Revisit when
 
