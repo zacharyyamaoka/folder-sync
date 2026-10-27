@@ -1402,3 +1402,24 @@ test("review r4 #2: a purge never destroys a backup a cut-off change still needs
 	assert.ok(storage.data.get("pending"), "the journal stays: a COPY from nothing is a failure (the review saw it cleared)");
 	assert.equal((await op("SETTLE", "")).status, 503);
 });
+
+test("review r4 #3: a delete job has its alarm before its first bucket write, so a restart mid-job still finishes it", async () => {
+	const s3 = people();
+	const { core, storage, store } = await folderObject(s3);
+	const base = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/`;
+	const old = JSON.parse(s3.text(`${base}manifest.json`)!);
+	// the object is cut off right after the manifest commits: saving committed: true never happens
+	const realPut = storage.put;
+	storage.put = async (key: string, value: unknown) => {
+		if (key.startsWith("job:") && (value as { committed: boolean }).committed) throw new Error("the object restarted");
+		return realPut(key, value);
+	};
+	await assert.rejects(core.run({ method: "HOST_DELETE", owner: OWNER.userId, project: "robotparts", hostId: MACHINE, path: "", job: JOB, fromSeq: old.seq, paths: ["cad/bracket.step"] }));
+	assert.equal(JSON.parse(s3.text(`${base}manifest.json`)!).seq, old.seq + 1, "the manifest committed");
+	assert.ok(storage.alarm !== null, "and an alarm is set to finish the job (the review saw none)");
+	storage.put = realPut;
+	await core.alarm();
+	assert.equal(s3.objects.has(`${base}cad/bracket.step`), false, "the alarm finished it");
+	assert.equal(storage.alarm, null);
+	void store;
+});
