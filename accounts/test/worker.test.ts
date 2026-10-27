@@ -20,7 +20,8 @@ import { appFor, apps } from "../src/apps.ts";
 import { handle, rawPath, returnPath, segments, type Deps, type Env, type Person } from "../src/app.ts";
 import { claimsOf, mint, ttlOf, userRoot } from "../src/creds.ts";
 import { signUpAllowed } from "../src/signup.ts";
-import { checkWebPath, stamp } from "../src/webhost.ts";
+import { checkWebPath, deleteWebFile, stamp, writeWebFile } from "../src/webhost.ts";
+import { S3Bucket } from "../src/s3-bucket.ts";
 import { MemoryS3 } from "./memory-s3.ts";
 import { MemoryStore } from "./memory-store.ts";
 
@@ -613,4 +614,106 @@ test("review r1 #8: two replacements in the same second keep two trash objects",
 	for (const key of [...s3.objects.keys()].filter((k) => k.startsWith(trash))) {
 		assert.match(key.slice(trash.length), /^20261026T123456Z[^/]*\/saved\/x\.json$/, "the trash stamp still starts with the contract's UTC stamp");
 	}
+});
+
+/** Every file the owner's web host's manifest lists, against its object: the paths whose bytes do not match. */
+function mismatched(s3: MemoryS3, project = "robotparts", host = WEB): string[] {
+	const base = `users/${OWNER.userId}/${project}/hosts/${host}/`;
+	const text = s3.text(`${base}manifest.json`);
+	if (!text) return [];
+	const listed: { path: string; sha256: string }[] = JSON.parse(text).files;
+	const out = listed.filter((e) => {
+		const data = s3.objects.get(base + e.path);
+		return !data || createHash("sha256").update(data).digest("hex") !== e.sha256;
+	}).map((e) => e.path);
+	// an object under the host that no manifest lists is an upload in flight: none may be left behind either
+	const strays = [...s3.objects.keys()].filter((k) => k.startsWith(base) && k !== `${base}manifest.json` && !listed.some((e) => base + e.path === k)).map((k) => `stray ${k.slice(base.length)}`);
+	return [...out, ...strays];
+}
+
+/** The reviewer's interleaving: before each of this request's manifest CASes, another writer lands a whole write to
+ *  another path (its bytes and a newer manifest), six times in a row, so every attempt gets a 412. */
+function sixWriters(s3: MemoryS3, project = "robotparts", host = WEB) {
+	const base = `users/${OWNER.userId}/${project}/hosts/${host}/`;
+	let n = 0;
+	s3.beforeConditional = {
+		key: `${base}manifest.json`,
+		again: 5,
+		run: () => {
+			const theirs = JSON.parse(s3.text(`${base}manifest.json`)!);
+			const path = `saved/other-${++n}.json`;
+			const body = `{"n": ${n}}\n`;
+			theirs.seq += 1;
+			theirs.files.push({ path, size: body.length, mtime: "2026-10-26T12:00:00Z", sha256: createHash("sha256").update(body).digest("hex"), written_at: "2026-10-26T12:00:00Z" });
+			theirs.files.sort((a: { path: string }, b: { path: string }) => (a.path < b.path ? -1 : 1));
+			s3.put(base + path, body);
+			s3.put(`${base}manifest.json`, JSON.stringify(theirs));
+		},
+	};
+}
+
+async function ownerBucket(s3: MemoryS3) {
+	return new S3Bucket(await mint(env(), `users/${OWNER.userId}/`, "object-read-write", 300, Date.parse("2026-10-26T12:34:56Z")), s3.fetch);
+}
+
+test("review r1 #3: a write that loses every manifest CAS leaves the file's bytes matching its manifest", async () => {
+	const s3 = people();
+	const { deps } = fakeDeps(s3);
+	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/x.json", { method: "PUT", headers: page(OWNER), body: "old\n" })).status, 200);
+	sixWriters(s3);
+	const where = { root: `users/${OWNER.userId}/`, project: "robotparts", hostId: WEB };
+	await assert.rejects(writeWebFile(await ownerBucket(s3), where, "saved/x.json", new TextEncoder().encode("new\n"), deps.now), /kept changing/);
+	assert.equal(s3.beforeConditional, null, "all six writers ran");
+	assert.deepEqual(mismatched(s3), [], "every object matches its manifest's sha256 (the review saw saved/x.json hold new bytes, the manifest the old sha)");
+	assert.equal(s3.text(`users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/x.json`), "old\n");
+});
+
+test("review r1 #3: a delete that loses every manifest CAS leaves the file in place, matching its manifest", async () => {
+	const s3 = people();
+	const { deps } = fakeDeps(s3);
+	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/x.json", { method: "PUT", headers: page(OWNER), body: "kept\n" })).status, 200);
+	sixWriters(s3);
+	const where = { root: `users/${OWNER.userId}/`, project: "robotparts", hostId: WEB };
+	await assert.rejects(deleteWebFile(await ownerBucket(s3), where, "saved/x.json", deps.now), /kept changing/);
+	assert.deepEqual(mismatched(s3), [], "the manifest still lists saved/x.json, so its object is still there");
+	assert.equal(s3.text(`users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/x.json`), "kept\n");
+});
+
+test("review r1 #3: concurrent web writes and deletes, same path and others, all land and match the manifest", async () => {
+	const s3 = people();
+	const { deps } = fakeDeps(s3);
+	const at = (path: string, method: string, body?: string) => call(handle, env(), deps, `/fs/v1/folders/robotparts/web/${path}`, { method, headers: page(OWNER), body });
+	assert.equal((await at("saved/x.json", "PUT", "v0\n")).status, 200);
+	assert.equal((await at("saved/gone.json", "PUT", "bye\n")).status, 200);
+	let seed = 7;
+	s3.jitter = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) % 4);
+	const answers = await Promise.all([
+		at("saved/x.json", "PUT", "v1\n"), at("saved/x.json", "PUT", "v2\n"), at("saved/gone.json", "DELETE"),
+		...[1, 2, 3, 4, 5, 6].map((n) => at(`saved/p${n}.json`, "PUT", `{"n": ${n}}\n`)),
+	]);
+	s3.jitter = null;
+	assert.deepEqual(answers.map((a) => a.status), [200, 200, 200, 200, 200, 200, 200, 200, 200], "no write is turned away as busy: one writer per web host");
+	assert.deepEqual(mismatched(s3), []);
+	const listed = JSON.parse(s3.text(`users/${OWNER.userId}/robotparts/hosts/${WEB}/manifest.json`)!).files.map((e: { path: string }) => e.path);
+	assert.deepEqual(listed, ["saved/p1.json", "saved/p2.json", "saved/p3.json", "saved/p4.json", "saved/p5.json", "saved/p6.json", "saved/x.json"]);
+});
+
+test("review r1 #3: a write cut off between its bytes and its manifest is undone, at once or by the next write", async () => {
+	const s3 = people();
+	const { deps } = fakeDeps(s3);
+	const at = (path: string, body: string) => call(handle, env(), deps, `/fs/v1/folders/robotparts/web/${path}`, { method: "PUT", headers: page(OWNER), body });
+	assert.equal((await at("saved/x.json", "one\n")).status, 200);
+	const manifestKey = `users/${OWNER.userId}/robotparts/hosts/${WEB}/manifest.json`;
+	// the manifest PUT fails: the bytes go back at once
+	s3.fail = (method, key) => method === "PUT" && key === manifestKey;
+	await assert.rejects(at("saved/x.json", "two\n"));
+	s3.fail = null;
+	assert.deepEqual(mismatched(s3), [], "rolled back at once");
+	// the manifest PUT and the roll-back both fail (the storage is down): the next write puts it right first
+	s3.fail = (method, key) => (method === "PUT" && key === manifestKey) || method === "COPY" || method === "DELETE";
+	await assert.rejects(at("saved/x.json", "three\n"));
+	s3.fail = null;
+	assert.equal((await at("saved/y.json", "why\n")).status, 200);
+	assert.deepEqual(mismatched(s3), [], "the next write settled the cut-off one first");
+	assert.equal(s3.text(`users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/x.json`), "one\n");
 });

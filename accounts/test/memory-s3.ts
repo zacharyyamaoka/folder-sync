@@ -10,8 +10,13 @@ import { createHash } from "node:crypto";
 export class MemoryS3 {
 	readonly objects = new Map<string, Uint8Array>();
 	readonly calls: { method: string; key: string; prefix?: string; allowed: boolean; scoped: string[] | null; scope?: string }[] = [];
-	/** Runs once before the next conditional PUT of `key` (a concurrent writer, for the 412 test). */
-	beforeConditional: { key: string; run: () => void } | null = null;
+	/** Runs once before the next conditional PUT of `key` (a concurrent writer, for the 412 test). `again` re-arms it
+	 *  that many more times (the review's six writers in a row). */
+	beforeConditional: { key: string; run: () => void; again?: number } | null = null;
+	/** Delays every request by this many ms (seeded, so concurrent requests interleave the same way each run). */
+	jitter: (() => number) | null = null;
+	/** Answers 500 to a request it returns true for (the storage failing mid-write). */
+	fail: ((method: string, key: string) => boolean) | null = null;
 
 	readonly endpoint: string;
 	readonly bucket: string;
@@ -49,6 +54,7 @@ export class MemoryS3 {
 	}
 
 	readonly fetch = async (request: Request): Promise<Response> => {
+		if (this.jitter) await new Promise((done) => setTimeout(done, this.jitter!()));
 		const url = new URL(request.url);
 		if (`${url.origin}` !== this.endpoint) return new Response("wrong endpoint", { status: 400 });
 		const path = decodeURIComponent(url.pathname.slice(1));
@@ -89,6 +95,7 @@ export class MemoryS3 {
 			if (!this.inScope(claims, from)) return deny(`COPY ${from}`);
 		}
 		this.calls.push({ method: source ? "COPY" : request.method, key, allowed: true, scoped, scope });
+		if (this.fail?.(source ? "COPY" : request.method, key)) return new Response("<Error><Code>InternalError</Code></Error>", { status: 500 });
 		if (request.method === "PUT" && from !== null) {
 			const data = this.objects.get(from);
 			if (!data) return new Response("<Error><Code>NoSuchKey</Code></Error>", { status: 404 });
@@ -100,7 +107,7 @@ export class MemoryS3 {
 			const ifNoneMatch = request.headers.get("If-None-Match");
 			if ((ifMatch || ifNoneMatch) && this.beforeConditional?.key === key) {
 				const hook = this.beforeConditional;
-				this.beforeConditional = null;
+				this.beforeConditional = hook.again ? { ...hook, again: hook.again - 1 } : null;
 				hook.run();
 			}
 			const current = this.objects.get(key);
