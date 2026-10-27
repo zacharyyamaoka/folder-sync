@@ -1528,3 +1528,16 @@ test("the device page: signin.js never sends a signed-in person away from it (th
 	await new Promise((done) => setTimeout(done, 10));
 	assert.deepEqual(replaced, [], "signed in on the device page: it stays, with its code (the desktop lane saw a reload loop to /fs/device)");
 });
+
+// ------------------------------------------------------------------------------------------------ round-5 review
+
+test("review r5 #6: the fresh-cache shortcut honours QUOTA_MAX_AGE_S too", async () => {
+	const s3 = people();
+	const store = new MemoryStore();
+	const now = Date.parse("2026-10-27T12:00:00Z");
+	const { deps } = fakeDeps(s3, store, { now: () => now });
+	await store.setUsage(OWNER.userId, 0, 0, new Date(now - 200_000).toISOString()); // a 200 s old zero
+	const e = env({ QUOTA_BYTES: "100", QUOTA_RECHECK_S: "300", QUOTA_MAX_AGE_S: "60" });
+	const keys = await (await call(handle, e, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } })).json();
+	assert.equal(keys.ReadOnly, true, "older than the max age: measured again, and over (the review saw read-write keys on the cached zero)");
+});
