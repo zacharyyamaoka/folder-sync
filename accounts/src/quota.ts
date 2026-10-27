@@ -63,7 +63,9 @@ export async function usageOf(store: Store, owner: string, quota: Quota, now: nu
 	const cached = await store.usage(owner);
 	const known = cached && cached.measured_at ? cached : null;
 	// WHY a partial one is never fresh (review r4 #5): only a complete measurement may say the person is back under
-	if (known && !known.partial && now - Date.parse(known.measured_at) < quota.recheckS * 1000) return known;
+	// WHY both ages (review r5 #6): a recheck interval longer than the max age must not keep a too-old figure "fresh"
+	const age = known ? now - Date.parse(known.measured_at) : Infinity;
+	if (known && !known.partial && age < quota.recheckS * 1000 && age <= quota.maxAgeS * 1000) return known;
 	// WHY a bound (review r3 #7): without one, a listing that keeps failing would admit writes on a figure of any age
 	// WHY every return path goes through this (review r4 #6): a figure older than QUOTA_MAX_AGE_S never admits writes
 	const judged = (usage: Usage | null, why: string): Usage => {
