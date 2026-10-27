@@ -198,7 +198,7 @@ details summary {{ cursor:pointer; color:var(--muted) }}
 <h1>folder-sync desktop app</h1>
 <p class="muted">PEP 0005 prototype · lane <code>lane/desktop</code> (folder-sync), not merged · 2026-10-27 · proved against the local accounts stack only, never production</p>
 <div class="verdict"><b>Sign in, click Create folder, and the folder syncs. Across {len(run_rows)} full runs, a file dropped in it showed on the robotparts page in a median of {agg_med} ms ({agg_under} of {len(app_all)} under 1 s); the CLI, measured at the same moments, {cli_agg_med} ms ({cli_agg_under} of {len(cli_all)}).</b>
-The 1 s target holds for the median, not for every file: this machine ran at load {min(l for _, l, _, _ in run_rows):.0f}–{max(l for _, l, _, _ in run_rows):.0f} on 24 cores during the runs. The app adds no time of its own; it runs the same engine path the CLI does.
+The 1 s target holds for the median, not for every file: this machine ran at load {min(l for _, l, _, _ in run_rows):.0f}–{max(l for _, l, _, _ in run_rows):.0f} on 24 cores during the runs. Run by run the app's median was below the CLI's in {sum(1 for _, _, a, c in run_rows if a and c and statistics.median(a) < statistics.median(c))} of {len(run_rows)} runs: the gap is noise in both directions, not app overhead, since the app runs the same engine path the CLI does.
 The token lives only in the OS keychain. Linux .deb and AppImage are built locally. macOS and Windows are written down, not built. There is no download link yet (needs a build host).</div>
 
 <div class="hero">
@@ -213,7 +213,7 @@ The token lives only in the OS keychain. Linux .deb and AppImage are built local
 <div class="cols" style="margin-top:14px">
 <table><tr><th>File written to <code>~/robotparts/saved/</code></th><th>until the row shows on /saved/</th></tr>{trial_rows}
 <tr><th colspan="2">The same moment, through the demo's CLI machine</th></tr>{cli_rows}</table>
-<div><p class="muted">Measured by the proof driver: the time the file is written, to a MutationObserver on the signed-in page seeing <code>[data-saved-part]</code> for it (the same probe as robotparts' <code>tools/sync_bench.py</code>). The path: fsnotify (100 ms debounce) → the engine's round uploads → hub announce → the page refetches. The app adds nothing to that path. It runs the same engine with push on.</p></div>
+<div><p class="muted">Measured by the proof driver (this run): the time the file is written, to a MutationObserver on the signed-in page seeing <code>[data-saved-part]</code> for it (the same probe as robotparts' <code>tools/sync_bench.py</code>). The path: fsnotify (100 ms debounce) → the engine's round uploads → hub announce → the page refetches. The app adds nothing to that path. It runs the same engine with push on.</p></div>
 </div>
 
 <h3>Every full run</h3>
@@ -313,7 +313,7 @@ The token lives only in the OS keychain. Linux .deb and AppImage are built local
 <div class="cols"><div>
 <h3>Done and proved</h3><ul>
 <li>Sign-in with no code typed: the browser device page, then the token goes into the keychain.</li>
-<li>The app makes <code>~/robotparts</code> and syncs it with push on. Disk to page in under 1 s (above).</li>
+<li>The app makes <code>~/robotparts</code> and syncs it with push on. Disk to page: median {agg_med} ms over {len(run_rows)} runs, {agg_under} of {len(app_all)} files under 1 s, level with the CLI (above).</li>
 <li>Tray states (synced, syncing, paused, offline, over quota with the reason, signed out), Pause, Sign out, Quit and Start at login.</li>
 <li>Linux .deb and AppImage, each with a <code>.desktop</code> entry. Engine and robotparts tests are green.</li>
 </ul>
