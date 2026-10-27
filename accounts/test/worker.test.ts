@@ -1209,3 +1209,32 @@ test("review r3 #2: the folder's Durable Object finishes a delete's cleanup on i
 	assert.equal(s3.objects.has(`${base}cad/bracket.step`), false, "finished with no request");
 	assert.equal(storage.alarm, null, "nothing left to do");
 });
+
+test("review r3 #3: a web-only person deletes their way under quota: a permanent web delete and a purge of the web host's trash", async () => {
+	const s3 = people();
+	const store = new MemoryStore();
+	const { deps } = fakeDeps(s3, store);
+	const web = (path: string, init: RequestInit) => call(handle, env(), deps, `/fs/v1/folders/robotparts/${path}`, init);
+	const big = "x".repeat(10_000);
+	assert.equal((await web("web/saved/big.json", { method: "PUT", headers: page(OWNER), body: big })).status, 200);
+	assert.equal((await web("web/saved/old.json", { method: "PUT", headers: page(OWNER), body: big })).status, 200);
+	assert.equal((await web("web/saved/old.json", { method: "DELETE", headers: page(OWNER) })).status, 200, "an ordinary delete: into the trash");
+	const counted = async () => { const u = (await store.usage(OWNER.userId))!; return { bytes: u.bytes, objects: u.objects }; };
+	const before = await counted();
+	// over quota now (read-only keys), and the person has only a browser
+	const tight = env({ QUOTA_BYTES: String(before.bytes - 1) });
+	assert.equal((await (await call(handle, tight, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } })).json()).ReadOnly, true);
+	const gone = await call(handle, tight, deps, "/fs/v1/folders/robotparts/web/saved/big.json?permanent=1", { method: "DELETE", headers: page(OWNER) });
+	assert.equal(gone.status, 200, "a permanent web delete (the review saw only the manifest shrink)");
+	assert.equal(s3.objects.has(`users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/big.json`), false);
+	assert.ok(![...s3.objects].some(([k, v]) => k.includes("/_trash/") && k.endsWith("saved/big.json") && v.byteLength === 10_000), "no trash copy of it");
+	const purge = await call(handle, tight, deps, "/fs/v1/folders/robotparts/web-trash/purge", { method: "POST", headers: page(OWNER) });
+	assert.equal(purge.status, 200, "the web host's trash, purged");
+	assert.ok(![...s3.objects.keys()].some((k) => k.startsWith(`users/${OWNER.userId}/_trash/robotparts/${WEB}/`)));
+	const after = await counted();
+	assert.deepEqual(after, stored(s3, OWNER), "the usage is what is stored");
+	assert.ok(after.bytes < before.bytes - 20_000 && after.objects < before.objects, `bytes and objects really dropped: ${JSON.stringify([before, after])}`);
+	assert.equal((await (await call(handle, tight, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } })).json()).ReadOnly, undefined, "back under: read-write keys");
+	// a cookie purge needs the page's own headers, like any write
+	assert.equal((await call(handle, tight, deps, "/fs/v1/folders/robotparts/web-trash/purge", { method: "POST", headers: cookie(OWNER) })).status, 403);
+});
