@@ -20,7 +20,7 @@ import { appFor, apps } from "../src/apps.ts";
 import { handle, rawPath, returnPath, segments, type Deps, type Env, type Person } from "../src/app.ts";
 import { claimsOf, mint, ttlOf, userRoot } from "../src/creds.ts";
 import { signUpAllowed } from "../src/signup.ts";
-import { quotaOf, usageOf } from "../src/quota.ts";
+import { Measuring, quotaOf, usageOf } from "../src/quota.ts";
 import { checkWebPath, deleteWebFile, memoryJournal, settle, stamp, writeWebFile } from "../src/webhost.ts";
 import { S3Bucket } from "../src/s3-bucket.ts";
 import { MemoryS3 } from "./memory-s3.ts";
@@ -1468,4 +1468,19 @@ test("review r4 #5: a measurement that stopped early is a lower bound: deletion 
 		now = Date.parse("2026-10-26T12:34:56Z") + later;
 		assert.equal((await keys()).ReadOnly, true, `at +${later / 1000} s: still read-only (the review saw read-write keys on a negative usage)`);
 	}
+});
+
+test("review r4 #6: a measurement that loses its claim never admits writes on a figure past QUOTA_MAX_AGE_S", async () => {
+	const store = new MemoryStore();
+	const quota = quotaOf({});
+	const t0 = Date.parse("2026-10-27T12:00:00Z");
+	await store.setUsage(OWNER.userId, 0, 0, "2026-10-26T12:00:00.000Z"); // a day old
+	let finishA!: (value: { bytes: number; objects: number; complete: boolean }) => void;
+	const a = usageOf(store, OWNER.userId, quota, t0, () => new Promise((done) => { finishA = done; }));
+	await new Promise((done) => setTimeout(done, 0));
+	// B claims once A's claim has run out, and is still listing
+	void usageOf(store, OWNER.userId, quota, t0 + 61_000, () => new Promise(() => undefined));
+	await new Promise((done) => setTimeout(done, 0));
+	finishA({ bytes: 0, objects: 0, complete: true });
+	await assert.rejects(a, Measuring, "A lost its claim: no figure young enough, so no write access (the review saw the day-old zero admitted)");
 });
