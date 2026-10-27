@@ -1288,3 +1288,33 @@ test("review r3 #7: a measurement too old to trust gives read-only keys and refu
 	s3.fail = null;
 	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts/bundle?prefix=saved/", { headers: cookie(OWNER) })).status, 200, "reads still work");
 });
+
+test("review r3 #8: production email codes, when delivery is configured: the routes, the page, and the sender", async () => {
+	const { deps, authCalls } = fakeDeps(people());
+	const mail = env({ RESEND_API_KEY: "re_test_fixture_not_a_key", EMAIL_FROM: "Robot Parts <signin@example.test>", GOOGLE_CLIENT_ID: "id", GOOGLE_CLIENT_SECRET: "secret" });
+	for (const path of ["/fs/api/auth/email-otp/send-verification-otp", "/fs/api/auth/sign-in/email-otp"]) {
+		assert.notEqual((await call(handle, mail, deps, path, { method: "POST", body: "{}" })).status, 404, `${path} (the review saw 404 "no email codes here")`);
+	}
+	assert.deepEqual(authCalls, ["/fs/api/auth/email-otp/send-verification-otp", "/fs/api/auth/sign-in/email-otp"]);
+	const html = await (await call(handle, mail, null, "/fs/signin")).text();
+	assert.match(html, /<meta name="fs-signin" content="google email">/, "both ways in");
+	// unconfigured production still offers none
+	assert.equal((await call(handle, env(), deps, "/fs/api/auth/email-otp/send-verification-otp", { method: "POST", body: "{}" })).status, 404);
+	// the sender: Resend's API, the key only in its Authorization header
+	const { emailSender } = (await import("../src/email.ts")) as Record<string, any>;
+	assert.equal(emailSender(env(), async () => new Response()), null, "no key, no sender");
+	const sent: Request[] = [];
+	const send = emailSender(mail, async (request: Request) => { sent.push(request); return new Response('{"id":"x"}', { status: 200 }); });
+	await send("person@example.com", "123456");
+	assert.equal(sent.length, 1);
+	assert.equal(sent[0].url, "https://api.resend.com/emails");
+	assert.equal(sent[0].headers.get("Authorization"), "Bearer re_test_fixture_not_a_key");
+	const body = await sent[0].json();
+	assert.deepEqual([body.from, body.to], ["Robot Parts <signin@example.test>", ["person@example.com"]]);
+	assert.match(body.text, /123456/);
+	assert.doesNotMatch(JSON.stringify(body), /re_test_fixture/, "the key never in the message");
+	const failing = emailSender(mail, async () => new Response('{"message":"invalid"}', { status: 422 }));
+	await assert.rejects(failing("person@example.com", "123456"), /could not send/);
+	const auth = readFileSync(fileURLToPath(new URL("../src/auth.ts", import.meta.url)), "utf-8");
+	assert.match(auth, /emailSender\(env, \(request\) => fetch\(request\)\)/, "auth.ts sends production codes through it");
+});
