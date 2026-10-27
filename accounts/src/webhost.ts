@@ -20,7 +20,7 @@
 
 import { checkPath, ContractError, SCHEMA, validateManifest, type Manifest, type ManifestEntry, type R2BucketLike } from "../../readers/worker/src/folder-sync-read.ts";
 import { mint, NotConfigured, userRoot, type CredsEnv } from "./creds.ts";
-import { overQuota, quotaOf, usageOf, type QuotaEnv } from "./quota.ts";
+import { Measuring, overQuota, quotaOf, usageOf, type QuotaEnv } from "./quota.ts";
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store } from "./store.ts";
 
@@ -404,6 +404,7 @@ export async function runWebOp(env: CredsEnv & QuotaEnv, s3: FetchLike, op: WebO
 		if (error instanceof BadPath) return { status: 400, body: { error: "bad_path", why: error.message } };
 		if (error instanceof Busy) return { status: 503, body: { error: "busy", why: error.message }, headers: { "Retry-After": "1" } };
 		if (error instanceof Stale) return { status: 409, body: { error: "stale", why: error.message } };
+		if (error instanceof Measuring) return { status: 503, body: { error: "measuring", why: error.message }, headers: { "Retry-After": "60" } };
 		if (error instanceof OverQuota) return { status: 403, body: { error: "over_quota", why: error.message } };
 		if (error instanceof Recovering) return { status: 503, body: { error: "recovering", why: error.message }, headers: { "Retry-After": "5" } };
 		if (error instanceof BadBody) return { status: 400, body: { error: "bad_body", why: error.message } };
