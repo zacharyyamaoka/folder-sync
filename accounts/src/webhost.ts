@@ -215,6 +215,9 @@ export async function settle(bucket: WritableBucket, w: Where, journal: Journal)
 	if (!committed) {
 		if (!entry) await bucket.delete(hostKey(w, pending.path));
 		else if (pending.restore && entry.sha256 === pending.restoreSha256) await bucket.copy(pending.restore, hostKey(w, pending.path));
+		// WHY (review r3 #6): the trash copy was taken for this change alone; undone, it is a second copy of what is
+		// live, which the quota never charged. A delete that fails leaves it, until the next measurement counts it
+		if (pending.restore) await bucket.delete(pending.restore).catch(() => undefined);
 	}
 	await journal.delete();
 }
