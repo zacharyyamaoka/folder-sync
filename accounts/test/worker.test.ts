@@ -1067,6 +1067,11 @@ test("the store's SQL runs against the migrations applied in order on SQLite, D1
 	await store.addUsage(OWNER.userId, -1, 0); // a deletion while claim-c lists
 	assert.equal(await store.setUsage(OWNER.userId, 100, 2, "2026-10-26T12:02:00.000Z", "claim-c"), true);
 	assert.equal((await store.usage(OWNER.userId))!.stale, true, "a measurement a deletion crossed is stored stale");
+	assert.equal(await store.claimMeasurement(OWNER.userId, 300_000, 360_000, "claim-d"), true);
+	await store.addUsage(OWNER.userId, 50, 1); // a write charged while claim-d lists
+	assert.equal(await store.setUsage(OWNER.userId, 100, 2, "2026-10-26T12:03:00.000Z", "claim-d"), true);
+	const crossed = (await store.usage(OWNER.userId))!;
+	assert.deepEqual([crossed.bytes, crossed.objects], [150, 3], "a measurement a charge crossed keeps the charge (review r6 #2)");
 	await store.setUsage(OWNER.userId, 1000, 1000, "2026-10-26T12:01:00.000Z", undefined, true);
 	assert.equal((await store.usage(OWNER.userId))!.partial, true, "a lower bound reads back as one (review r4 #5)");
 	assert.equal(await store.ensureWebHost(OWNER.userId, "robotparts", WEB, "2026-10-26"), WEB);
@@ -1647,4 +1652,62 @@ test("review r6 #1: a delete job that never wrote its manifest is dropped when t
 	assert.deepEqual(JSON.parse(s3.text(`${base}manifest.json`)!).files.map((f: { path: string }) => f.path), ["saved/x.json", "saved/z.json"]);
 	assert.equal(s3.text(`${base}saved/x.json`), "x\n", "a file still listed is never deleted");
 	assert.equal(storage.alarm, null);
+});
+
+test("review r6 #2: a measurement crossed by a write's charge keeps the charge, and its caller answers with the figure stored", async () => {
+	const s3 = people();
+	const store = new MemoryStore();
+	let now = Date.parse("2026-10-27T12:00:00Z");
+	const { deps } = fakeDeps(s3, store, { now: () => now });
+	const usage = async () => (await call(handle, env(), deps, "/fs/v1/usage", { headers: cookie(OWNER) })).json();
+	assert.equal((await usage()).used.bytes, stored(s3, OWNER).bytes, "measured once");
+	now += 301_000; // past QUOTA_RECHECK_S: the next request measures again
+	// that measurement has listed the root; before it stores its figure, a web write is admitted and charged
+	const real = store.setUsage.bind(store);
+	let release!: () => void;
+	const gate = new Promise<void>((done) => { release = done; });
+	let reached!: () => void;
+	const listed = new Promise<void>((done) => { reached = done; });
+	store.setUsage = async (...args: Parameters<MemoryStore["setUsage"]>) => {
+		if (args[4] !== undefined) { reached(); await gate; }
+		return real(...args);
+	};
+	const measuring = usage();
+	await listed;
+	const put = await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/late.json", { method: "PUT", headers: page(OWNER), body: "l".repeat(14_000) });
+	assert.equal(put.status, 200);
+	release();
+	const answered = await measuring;
+	const actual = stored(s3, OWNER);
+	const cached = (await store.usage(OWNER.userId))!;
+	assert.ok(cached.bytes >= actual.bytes && cached.objects >= actual.objects, `the review saw the charge erased: cached ${JSON.stringify(cached)}, stored ${JSON.stringify(actual)}`);
+	assert.ok(answered.used.bytes >= actual.bytes, `the measuring request answers with the figure it stored, not its own listing: ${answered.used.bytes} < ${actual.bytes}`);
+	// and so the quota holds: a quota between the listing and the truth gives read-only keys
+	const tight = env({ QUOTA_BYTES: String(actual.bytes - 1) });
+	assert.equal((await (await call(handle, tight, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } })).json()).ReadOnly, true);
+});
+
+test("review r6 #3: an unchanged partial measurement is not taken again at once; a deletion asks for one sooner", async () => {
+	const s3 = people();
+	for (let n = 0; n < 2001; n++) s3.put(`users/${OWNER.userId}/a-bulk/${String(n).padStart(4, "0")}`, "x");
+	const root = `users/${OWNER.userId}/`;
+	const lists = () => s3.calls.filter((c) => c.method === "LIST" && c.prefix === root).length;
+	const store = new MemoryStore();
+	const now = Date.parse("2026-10-27T12:00:00Z");
+	const { deps } = fakeDeps(s3, store, { now: () => now });
+	const tight = env({ QUOTA_OBJECTS: "1000" });
+	const keys = async () => (await call(handle, tight, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } })).json();
+	assert.equal((await keys()).ReadOnly, true);
+	const once = lists();
+	for (let n = 0; n < 9; n++) assert.equal((await keys()).ReadOnly, true);
+	assert.equal(lists(), once, `ten requests, one measurement (the review saw twenty LISTs): ${lists()} LISTs`);
+	// a deletion (here a machine's, through the Worker) asks for a measurement before the backoff is up
+	const base = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/`;
+	const m = JSON.parse(s3.text(`${base}manifest.json`)!);
+	const del = await call(handle, tight, deps, `/fs/v1/folders/robotparts/hosts/${MACHINE}/delete`, { origin: OWN, method: "POST",
+		headers: { Authorization: "Bearer token-owner-laptop", "Content-Type": "application/json" }, body: JSON.stringify({ job: JOB, from_seq: m.seq, paths: ["cad/bracket.step"] }) });
+	assert.equal(del.status, 200);
+	const before = lists();
+	assert.equal((await keys()).ReadOnly, true);
+	assert.ok(lists() > before, "measured again after the deletion");
 });
