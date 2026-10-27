@@ -263,15 +263,18 @@ async function quotaRefusal(env: Env, deps: Deps, owner: string, addBytes = 0, a
 }
 
 /** Before a read: the folder's web host settles any change a crash or a failed undo left journalled, so a reader
- *  (a page, a machine's pull through /fs/) never waits for another write to see the file again (review r2 #2). Its
- *  answer is not the read's: a folder still recovering is read as it is. */
-async function settledFirst(env: Env, deps: Deps, owner: string, project: string): Promise<void> {
+ *  (a page, a machine's pull through /fs/) never waits for another write to see the file again (review r2 #2). A
+ *  folder that cannot be settled yet is a 503 recovering, never a snapshot with the file missing (review r3 #4). */
+async function settledFirst(env: Env, deps: Deps, owner: string, project: string): Promise<Response | null> {
 	const hostId = await deps.store.webHost(owner, project);
-	if (hostId) await webHostOf(env, deps)({ method: "SETTLE", owner, project, hostId, path: "" });
+	if (!hostId) return null;
+	const answer = await webHostOf(env, deps)({ method: "SETTLE", owner, project, hostId, path: "" });
+	return answer.status === 200 ? null : json(answer.status, answer.body, answer.headers ?? {});
 }
 
-async function readProject(env: Env, deps: Deps, owner: string, project: string): Promise<Project> {
-	await settledFirst(env, deps, owner, project);
+async function readProject(env: Env, deps: Deps, owner: string, project: string): Promise<Project | Response> {
+	const unsettled = await settledFirst(env, deps, owner, project);
+	if (unsettled) return unsettled;
 	// WHY a read-only credential for exactly this folder: whatever a route below does with a path, R2 lets this
 	// request read users/<owner>/<project>/ and nothing else (a public folder's read too)
 	const bucket = await bucketFor(env, deps, folderPrefix(owner, project), "object-read-only", READ_TTL_S); // fs-mutation: the read scope
@@ -360,6 +363,7 @@ async function folderView(request: Request, env: Env, deps: Deps, app: App | nul
 	const decided = await decide(deps, who?.person ?? null, project, new URL(request.url).searchParams.get("owner"));
 	if (decided instanceof Response) return decided;
 	const reader = await readProject(env, deps, decided.owner, project);
+	if (reader instanceof Response) return reader;
 	const web = await deps.store.webHost(decided.owner, project);
 	const hosts = [];
 	const files = [];
@@ -386,7 +390,9 @@ async function bundle(request: Request, env: Env, deps: Deps, app: App | null, p
 	const decided = await decide(deps, who?.person ?? null, project, query.get("owner"));
 	if (decided instanceof Response) return decided;
 	const reader = await readProject(env, deps, decided.owner, project);
+	if (reader instanceof Response) return reader;
 	const out = [];
+	const skipped: { host: string; path: string }[] = [];
 	let total = 0;
 	const utf8 = new TextDecoder("utf-8", { fatal: true });
 	for (const f of await reader.files()) {
@@ -395,7 +401,11 @@ async function bundle(request: Request, env: Env, deps: Deps, app: App | null, p
 		try {
 			data = await reader.read(f.hostId, f.path); // sha256-checked against the manifest, re-read once on a race
 		} catch (error) {
-			if (error instanceof ContractError) continue; // deleted since the manifest was read
+			// changed or deleted since the manifest was read (a machine's upload in flight): named, never silently dropped
+			if (error instanceof ContractError) {
+				skipped.push({ host: f.hostId, path: f.path });
+				continue;
+			}
 			throw error;
 		}
 		let text: string;
@@ -409,7 +419,7 @@ async function bundle(request: Request, env: Env, deps: Deps, app: App | null, p
 	}
 	// WHY the owner (review r2 #1): one browser has one cookie, so a page's read can come back for another person
 	// who signed in meanwhile; the page drops any answer whose owner is not the person it shows
-	return json(200, { owner: decided.owner, files: out }, cacheFor(decided.visibility));
+	return json(200, { owner: decided.owner, files: out, skipped }, cacheFor(decided.visibility));
 }
 
 async function file(request: Request, env: Env, deps: Deps, app: App | null, project: string, host: string, rest: string[], head: boolean): Promise<Response> {
@@ -419,6 +429,7 @@ async function file(request: Request, env: Env, deps: Deps, app: App | null, pro
 	const decided = await decide(deps, who?.person ?? null, project, new URL(request.url).searchParams.get("owner"));
 	if (decided instanceof Response) return decided;
 	const reader = await readProject(env, deps, decided.owner, project);
+	if (reader instanceof Response) return reader;
 	const entry = (await reader.manifest(host))?.files.find((e) => e.path === path); // exact: never a prefix, never a trashed version
 	if (!entry) return fail(404, "not_found", "that host does not publish that file");
 	const name = path.slice(path.lastIndexOf("/") + 1);
