@@ -181,8 +181,10 @@ export interface Pending {
 	path: string;
 	/** The trash copy of the bytes the manifest lists for `path`, or null when it lists none (a new path). */
 	restore: string | null;
-	/** Their sha256, so a copy is only put back over the bytes it was taken from. */
+	/** Their sha256, so a copy is only put back over the bytes it was taken from, and their size (what the copy costs
+	 *  while it stays). */
 	restoreSha256: string | null;
+	restoreSize?: number | null;
 	/** What the manifest lists once the change commits: the new bytes' sha256, or null for a delete. */
 	sha256: string | null;
 }
@@ -192,6 +194,8 @@ export interface Journal {
 	get(): Promise<Pending | null>;
 	put(pending: Pending): Promise<void>;
 	delete(): Promise<void>;
+	/** A backup an undo could not remove (review r4 #7): charged to `root`'s person and removed later, durably. */
+	stray(root: string, key: string, size: number): Promise<void>;
 }
 
 export function memoryJournal(): Journal {
@@ -200,7 +204,13 @@ export function memoryJournal(): Journal {
 		get: async () => pending,
 		put: async (p) => { pending = p; },
 		delete: async () => { pending = null; },
+		stray: async () => undefined,
 	};
+}
+
+/** The account id of a root, users/<id>/. */
+function ownerOf(root: string): string {
+	return root.slice("users/".length, -1);
 }
 
 /** Puts a cut-off write or delete right: when the manifest did not take it, the file goes back to the bytes the
@@ -223,8 +233,15 @@ export async function settle(bucket: WritableBucket, w: Where, journal: Journal)
 			if (!(await holds(bucket, hostKey(w, pending.path), entry.sha256))) throw new Error(`${JSON.stringify(pending.path)} does not match its manifest after the restore`);
 		}
 		// WHY (review r3 #6): the trash copy was taken for this change alone; undone, it is a second copy of what is
-		// live, which the quota never charged. A delete that fails leaves it, until the next measurement counts it
-		if (pending.restore) await bucket.delete(pending.restore).catch(() => undefined);
+		// live, which the quota never charged. WHY a stray when its delete fails (review r4 #7): it is charged until the
+		// folder's alarm removes it, so the usage never counts less than what is stored
+		if (pending.restore) {
+			try {
+				await bucket.delete(pending.restore);
+			} catch {
+				await journal.stray(w.root, pending.restore, pending.restoreSize ?? 0);
+			}
+		}
 	}
 	await journal.delete();
 }
@@ -305,8 +322,10 @@ export async function writeWebFile(bucket: WritableBucket, w: Where, path: strin
 		const cost = { bytes: data.byteLength + manifestBytes(updated).byteLength - size, objects: 1 + (etag ? 0 : 1) };
 		await ledger?.admit(cost.bytes, cost.objects);
 		const restore = old ? trashKey(w, path, now) : null;
-		if (restore) await bucket.copy(hostKey(w, path), restore);
-		const committed = await change(bucket, w, journal, { where: w, path, restore, restoreSha256: old?.sha256 ?? null, sha256 }, async () => {
+		// WHY the backup inside the change (review r4 #7): it is journalled before it is made, so a backup left by a
+		// cut-off change is always one the journal names, and is removed or charged
+		const committed = await change(bucket, w, journal, { where: w, path, restore, restoreSha256: old?.sha256 ?? null, restoreSize: old?.size ?? null, sha256 }, async () => {
+			if (restore && !(await bucket.copy(hostKey(w, path), restore))) throw new Error(`${JSON.stringify(path)} could not be copied to the trash`);
 			await bucket.put(hostKey(w, path), data);
 			return writeManifest(bucket, w, updated, etag);
 		});
@@ -329,11 +348,11 @@ export async function deleteWebFile(bucket: WritableBucket, w: Where, path: stri
 		const old = manifest.files.find((e) => e.path === path);
 		if (!old) return null;
 		const restore = trashKey(w, path, now);
-		await bucket.copy(hostKey(w, path), restore);
 		const updated = next(manifest, manifest.files.filter((e) => e.path !== path), now);
 		// the file moves to _trash/ (still counted): only the manifest shrinks
 		const cost = { bytes: manifestBytes(updated).byteLength - size, objects: 0 };
-		const committed = await change(bucket, w, journal, { where: w, path, restore, restoreSha256: old.sha256, sha256: null }, async () => {
+		const committed = await change(bucket, w, journal, { where: w, path, restore, restoreSha256: old.sha256, restoreSize: old.size, sha256: null }, async () => {
+			if (!(await bucket.copy(hostKey(w, path), restore))) throw new Error(`${JSON.stringify(path)} could not be copied to the trash`);
 			await bucket.delete(hostKey(w, path));
 			return writeManifest(bucket, w, updated, etag);
 		});
@@ -551,7 +570,8 @@ export class WebHostCore {
 
 	/** Sets the alarm while anything is left to do (a journalled change, a delete job with files left), else clears it. */
 	private async rearm(): Promise<void> {
-		const busy = !!(await this.storage.get("pending")) || [...(await this.storage.list<DeleteJob>({ prefix: "job:" })).values()].some((j) => !j.committed || j.remaining.length);
+		const busy = !!(await this.storage.get("pending")) || [...(await this.storage.list<DeleteJob>({ prefix: "job:" })).values()].some((j) => !j.committed || j.remaining.length)
+			|| (await this.storage.list({ prefix: "stray:" })).size > 0;
 		if (busy) await this.storage.setAlarm(this.clock() + SETTLE_AFTER_MS);
 		else await this.storage.deleteAlarm();
 	}
@@ -568,6 +588,11 @@ export class WebHostCore {
 			delete: async () => {
 				await storage.delete("pending");
 				await this.rearm();
+			},
+			// charged first, then recorded: a restart between them over-counts until the next measurement, never under
+			stray: async (root, key, size) => {
+				await this.store.addUsage(ownerOf(root), size, 1);
+				await Promise.all([storage.put(`stray:${key}`, { root, key, size }), storage.setAlarm(this.clock() + SETTLE_AFTER_MS)]);
 			},
 		};
 	}
@@ -665,6 +690,8 @@ export class WebHostCore {
 			} catch {
 				continue;
 			}
+			// a stray backup purged here is credited here, once (its record goes with it)
+			await this.storage.delete(`stray:${key}`);
 			purged += 1;
 			bytes += size;
 			await this.store.addUsage(op.owner, -size, -1);
@@ -685,6 +712,17 @@ export class WebHostCore {
 				} catch {
 					// still pending: rearm() below keeps the alarm
 				}
+			}
+			// backups an undo could not remove (review r4 #7): removed now, and credited once removed
+			for (const [record, stray] of await this.storage.list<{ root: string; key: string; size: number }>({ prefix: "stray:" })) {
+				try {
+					const bucket = new S3Bucket(await mint(this.env, stray.root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
+					await bucket.delete(stray.key);
+				} catch {
+					continue;
+				}
+				await this.storage.delete(record);
+				await this.store.addUsage(ownerOf(stray.root), -stray.size, -1);
 			}
 			for (const [key, job] of await this.storage.list<DeleteJob>({ prefix: "job:" })) {
 				if (job.committed && !job.remaining.length) {
