@@ -432,17 +432,18 @@ async function file(request: Request, env: Env, deps: Deps, app: App | null, pro
 	return new Response(head ? null : data, { status: 200, headers: headers({ ...base, "Content-Length": String(data.byteLength) }) });
 }
 
-/** This isolate's web-host queue for deps without one (the unit tests): one per Deps, so tests never share it. */
-const localHosts = new WeakMap<Deps, (op: WebOp) => Promise<WebAnswer>>();
+/** This isolate's web-host queue for deps without one (the unit tests): one per Deps, so tests never share it; each
+ *  operation runs with its own request's Env (a test's quota). */
+const localHosts = new WeakMap<Deps, (op: WebOp, env: Env) => Promise<WebAnswer>>();
 
 function webHostOf(env: Env, deps: Deps): (op: WebOp) => Promise<WebAnswer> {
 	if (deps.webHost) return (op) => deps.webHost!(op);
 	let local = localHosts.get(deps);
 	if (!local) {
-		local = localWebHost(env, deps.s3, () => deps.now());
+		local = localWebHost(deps.s3, () => deps.now(), deps.store);
 		localHosts.set(deps, local);
 	}
-	return local;
+	return (op) => local!(op, env);
 }
 
 async function web(request: Request, env: Env, deps: Deps, app: App | null, project: string, rest: string[], method: string): Promise<Response> {
@@ -461,9 +462,6 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 		if (keepNewest !== undefined && !NEWEST_FIELD.test(keepNewest)) return fail(400, "bad_header", "X-Folder-Sync-Keep-Newest names one JSON field, like at");
 		const tiePrefers = request.headers.get("X-Folder-Sync-Tie-Prefers") || undefined;
 		if (tiePrefers !== undefined && !NEWEST_FIELD.test(tiePrefers)) return fail(400, "bad_header", "X-Folder-Sync-Tie-Prefers names one JSON field, like saved");
-		// a replaced file's old bytes go to _trash/ and still count, so a write adds its size and up to two objects
-		const over = await quotaRefusal(env, deps, owner, data.byteLength, 2);
-		if (over) return fail(403, "over_quota", over);
 		const hostId = await deps.store.ensureWebHost(owner, project, deps.uuid(), new Date(deps.now()).toISOString());
 		op = { method: "PUT", owner, project, hostId, path, data, keepNewest, tiePrefers };
 	} else {
@@ -473,9 +471,8 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 	}
 	// WHY through the folder's queue: one writer per web host, so no two writes interleave their file and manifest
 	// steps (review r1 #3)
+	// WHY the quota is admitted and charged in there too: one at a time, by what the change really adds (review r2 #6)
 	const answer = await webHostOf(env, deps)(op);
-	// WHY counted at once: a browser could otherwise write far past the quota between two measurements
-	if (op.method === "PUT" && answer.status === 200) await deps.store.addUsage(owner, op.data!.byteLength, 1);
 	return json(answer.status, answer.body, answer.headers ?? {});
 }
 

@@ -20,7 +20,9 @@
 
 import { checkPath, ContractError, SCHEMA, validateManifest, type Manifest, type ManifestEntry, type R2BucketLike } from "../../readers/worker/src/folder-sync-read.ts";
 import { mint, NotConfigured, userRoot, type CredsEnv } from "./creds.ts";
+import { overQuota, quotaOf, usageOf, type QuotaEnv } from "./quota.ts";
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
+import type { Store } from "./store.ts";
 
 export const WEB_HOST_NAME = "web";
 /** How many times a manifest write starts over after a 412 before giving up. */
@@ -42,6 +44,15 @@ export class Stale extends Error {}
 export class BadBody extends Error {}
 /** A cut-off change could not be undone yet; nothing new runs until it is (answered 503: try again). */
 export class Recovering extends Error {}
+/** The write would take the person past their quota (quota.ts; answered 403). */
+export class OverQuota extends Error {}
+
+/** A change's cost to the person's quota: admitted before any byte moves, charged once the manifest takes it. Both
+ *  run in the folder's queue (review r2 #6), so two writes are never admitted against the same figure. */
+export interface Ledger {
+	admit(bytes: number, objects: number): Promise<void>;
+	charge(bytes: number, objects: number): Promise<void>;
+}
 
 /** A JSON field name a write may ask the web host to keep the newest of (X-Folder-Sync-Keep-Newest). */
 export const NEWEST_FIELD = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
@@ -126,19 +137,25 @@ function trashKey(w: Where, path: string, now: number): string {
 	return `${w.root}_trash/${w.project}/${w.hostId}/${trashStamp(now)}/${path}`;
 }
 
-/** The web host's manifest and the ETag it was read with; an empty seq-0 manifest before the first write. */
-async function readManifest(bucket: WritableBucket, w: Where): Promise<{ manifest: Manifest; etag: string | null }> {
+/** The web host's manifest, the ETag it was read with and its size in bytes; an empty seq-0 manifest (size 0) before
+ *  the first write. */
+async function readManifest(bucket: WritableBucket, w: Where): Promise<{ manifest: Manifest; etag: string | null; size: number }> {
 	const object = await bucket.get(hostKey(w, "manifest.json"));
 	if (!object) {
-		return { manifest: { schema: SCHEMA, project: w.project, host_id: w.hostId, host_name: WEB_HOST_NAME, seq: 0, generated_at: "", files: [] }, etag: null };
+		return { manifest: { schema: SCHEMA, project: w.project, host_id: w.hostId, host_name: WEB_HOST_NAME, seq: 0, generated_at: "", files: [] }, etag: null, size: 0 };
 	}
 	if (!("arrayBuffer" in object)) throw new ContractError("the web host's manifest came back without a body");
-	const manifest = validateManifest(JSON.parse(new TextDecoder().decode(await object.arrayBuffer())) as Manifest, w.project, w.hostId);
-	return { manifest, etag: object.etag };
+	const data = await object.arrayBuffer();
+	const manifest = validateManifest(JSON.parse(new TextDecoder().decode(data)) as Manifest, w.project, w.hostId);
+	return { manifest, etag: object.etag, size: data.byteLength };
+}
+
+function manifestBytes(manifest: Manifest): Uint8Array {
+	return new TextEncoder().encode(`${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 async function writeManifest(bucket: WritableBucket, w: Where, manifest: Manifest, etag: string | null): Promise<boolean> {
-	const body = new TextEncoder().encode(`${JSON.stringify(manifest, null, 2)}\n`);
+	const body = manifestBytes(manifest);
 	const answer = await bucket.put(hostKey(w, "manifest.json"), body, etag ? { ifMatch: etag, contentType: "application/json" } : { ifNoneMatch: "*", contentType: "application/json" });
 	return answer.ok;
 }
@@ -238,7 +255,8 @@ async function change(bucket: WritableBucket, w: Where, journal: Journal, pendin
  *  (Stale), so two tabs' writes arriving out of order keep the newest (review r1 #4: newest heart wins). An exact tie
  *  is settled the same in either order (review r2 #5): the body whose `tiePrefers` field is true wins (robotparts' "a
  *  heart wins a tie"), else the larger sha256. */
-export async function writeWebFile(bucket: WritableBucket, w: Where, path: string, data: Uint8Array, clock: () => number, journal: Journal = memoryJournal(), keepNewest?: string, tiePrefers?: string): Promise<{ host: string; path: string; sha256: string; seq: number }> {
+export async function writeWebFile(bucket: WritableBucket, w: Where, path: string, data: Uint8Array, clock: () => number, journal: Journal = memoryJournal(),
+	{ keepNewest, tiePrefers, ledger }: { keepNewest?: string; tiePrefers?: string; ledger?: Ledger } = {}): Promise<{ host: string; path: string; sha256: string; seq: number }> {
 	checkWebPath(path);
 	const sha256 = await sha256Hex(data);
 	const mine = keepNewest ? instantOf(data, keepNewest) : null;
@@ -246,7 +264,7 @@ export async function writeWebFile(bucket: WritableBucket, w: Where, path: strin
 	await recover(bucket, w, journal);
 	for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
 		const now = clock();
-		const { manifest, etag } = await readManifest(bucket, w);
+		const { manifest, etag, size } = await readManifest(bucket, w);
 		const old = manifest.files.find((e) => e.path === path);
 		if (old && old.sha256 === sha256 && old.size === data.byteLength) return { host: w.hostId, path, sha256, seq: manifest.seq };
 		const twin = manifest.files.find((e) => e.path !== path && e.path.toLowerCase() === path.toLowerCase());
@@ -263,38 +281,50 @@ export async function writeWebFile(bucket: WritableBucket, w: Where, path: strin
 				if (kept !== ours ? kept : old.sha256 > sha256) throw new Stale(`the web host already holds a version of ${JSON.stringify(path)} with the same ${keepNewest} that wins the tie`);
 			}
 		}
-		const restore = old ? trashKey(w, path, now) : null;
-		if (restore) await bucket.copy(hostKey(w, path), restore);
 		const iso = new Date(now).toISOString();
 		const entry: ManifestEntry = { path, size: data.byteLength, mtime: iso, sha256, written_at: iso };
 		const updated = next(manifest, [...manifest.files.filter((e) => e.path !== path), entry], now);
+		// the net cost: the new bytes (the old ones move to _trash/ and still count), one object (the file, or the trash
+		// copy of the old one), and the manifest's change (one object more on the first write)
+		const cost = { bytes: data.byteLength + manifestBytes(updated).byteLength - size, objects: 1 + (etag ? 0 : 1) };
+		await ledger?.admit(cost.bytes, cost.objects);
+		const restore = old ? trashKey(w, path, now) : null;
+		if (restore) await bucket.copy(hostKey(w, path), restore);
 		const committed = await change(bucket, w, journal, { where: w, path, restore, restoreSha256: old?.sha256 ?? null, sha256 }, async () => {
 			await bucket.put(hostKey(w, path), data);
 			return writeManifest(bucket, w, updated, etag);
 		});
-		if (committed) return { host: w.hostId, path, sha256, seq: updated.seq };
+		if (committed) {
+			await ledger?.charge(cost.bytes, cost.objects);
+			return { host: w.hostId, path, sha256, seq: updated.seq };
+		}
 		// 412: another write moved the manifest since our read; the file is back as it was, start over from a fresh read
 	}
 	throw new Busy("the web host's manifest kept changing; try again");
 }
 
 /** Removes `path` from the web host (moved to _trash/); null when the web host does not hold it. */
-export async function deleteWebFile(bucket: WritableBucket, w: Where, path: string, clock: () => number, journal: Journal = memoryJournal()): Promise<{ host: string; path: string; seq: number } | null> {
+export async function deleteWebFile(bucket: WritableBucket, w: Where, path: string, clock: () => number, journal: Journal = memoryJournal(), ledger?: Ledger): Promise<{ host: string; path: string; seq: number } | null> {
 	checkWebPath(path);
 	await recover(bucket, w, journal);
 	for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
 		const now = clock();
-		const { manifest, etag } = await readManifest(bucket, w);
+		const { manifest, etag, size } = await readManifest(bucket, w);
 		const old = manifest.files.find((e) => e.path === path);
 		if (!old) return null;
 		const restore = trashKey(w, path, now);
 		await bucket.copy(hostKey(w, path), restore);
 		const updated = next(manifest, manifest.files.filter((e) => e.path !== path), now);
+		// the file moves to _trash/ (still counted): only the manifest shrinks
+		const cost = { bytes: manifestBytes(updated).byteLength - size, objects: 0 };
 		const committed = await change(bucket, w, journal, { where: w, path, restore, restoreSha256: old.sha256, sha256: null }, async () => {
 			await bucket.delete(hostKey(w, path));
 			return writeManifest(bucket, w, updated, etag);
 		});
-		if (committed) return { host: w.hostId, path, seq: updated.seq };
+		if (committed) {
+			await ledger?.charge(cost.bytes, cost.objects);
+			return { host: w.hostId, path, seq: updated.seq };
+		}
 	}
 	throw new Busy("the web host's manifest kept changing; try again");
 }
@@ -348,22 +378,33 @@ const WRITE_TTL_S = 300;
 
 /** Runs one web-host operation in the caller's queue: signs a read-write credential for the owner's root, settles any
  *  cut-off change first, then writes or deletes. Errors the person can act on come back as answers. */
-export async function runWebOp(env: CredsEnv, s3: FetchLike, op: WebOp, journal: Journal, clock: () => number): Promise<WebAnswer> {
+export async function runWebOp(env: CredsEnv & QuotaEnv, s3: FetchLike, op: WebOp, journal: Journal, clock: () => number, store: Store): Promise<WebAnswer> {
 	try {
 		const root = userRoot(op.owner);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, clock()), s3);
 		const w = { root, project: op.project, hostId: op.hostId };
+		const quota = quotaOf(env);
+		const ledger: Ledger = {
+			async admit(bytes, objects) {
+				if (bytes <= 0 && objects <= 0) return;
+				const usage = await usageOf(store, op.owner, quota, clock(), () => bucket.measure(root, { bytes: quota.bytes, objects: quota.objects }));
+				const over = overQuota(usage, quota, bytes, objects);
+				if (over) throw new OverQuota(over);
+			},
+			charge: (bytes, objects) => store.addUsage(op.owner, bytes, objects),
+		};
 		if (op.method === "SETTLE") {
 			await recover(bucket, w, journal);
 			return { status: 200, body: { settled: true } };
 		}
-		if (op.method === "PUT") return { status: 200, body: await writeWebFile(bucket, w, op.path, op.data ?? new Uint8Array(), clock, journal, op.keepNewest, op.tiePrefers) };
-		const gone = await deleteWebFile(bucket, w, op.path, clock, journal);
+		if (op.method === "PUT") return { status: 200, body: await writeWebFile(bucket, w, op.path, op.data ?? new Uint8Array(), clock, journal, { keepNewest: op.keepNewest, tiePrefers: op.tiePrefers, ledger }) };
+		const gone = await deleteWebFile(bucket, w, op.path, clock, journal, ledger);
 		return gone ? { status: 200, body: gone } : { status: 404, body: { error: "not_found", why: "the web host does not hold that file" } };
 	} catch (error) {
 		if (error instanceof BadPath) return { status: 400, body: { error: "bad_path", why: error.message } };
 		if (error instanceof Busy) return { status: 503, body: { error: "busy", why: error.message }, headers: { "Retry-After": "1" } };
 		if (error instanceof Stale) return { status: 409, body: { error: "stale", why: error.message } };
+		if (error instanceof OverQuota) return { status: 403, body: { error: "over_quota", why: error.message } };
 		if (error instanceof Recovering) return { status: 503, body: { error: "recovering", why: error.message }, headers: { "Retry-After": "5" } };
 		if (error instanceof BadBody) return { status: 400, body: { error: "bad_body", why: error.message } };
 		if (error instanceof NotConfigured) return { status: 503, body: { error: "not_configured", why: "folder storage is not set up on this Worker yet" } };
@@ -389,16 +430,18 @@ const SETTLE_AFTER_MS = 30_000;
  *  other request to do it (review r2 #2). The Durable Object (webhost-do.ts) is this over its own storage. */
 export class WebHostCore {
 	private readonly serial = new Serial();
-	private readonly env: CredsEnv;
+	private readonly env: CredsEnv & QuotaEnv;
 	private readonly s3: FetchLike;
 	private readonly storage: ObjectStorage;
 	private readonly clock: () => number;
+	private readonly store: Store;
 
-	constructor(env: CredsEnv, s3: FetchLike, storage: ObjectStorage, clock: () => number) {
+	constructor(env: CredsEnv & QuotaEnv, s3: FetchLike, storage: ObjectStorage, clock: () => number, store: Store) {
 		this.env = env;
 		this.s3 = s3;
 		this.storage = storage;
 		this.clock = clock;
+		this.store = store;
 	}
 
 	private journal(): Journal {
@@ -416,9 +459,10 @@ export class WebHostCore {
 		};
 	}
 
-	/** One write, delete or settle of this folder's web host, after every earlier one has finished. */
-	run(op: WebOp): Promise<WebAnswer> {
-		return this.serial.run("", () => runWebOp(this.env, this.s3, op, this.journal(), this.clock));
+	/** One write, delete or settle of this folder's web host, after every earlier one has finished (`env`: the vars
+	 *  to run it with, the object's own unless a test's request brings others). */
+	run(op: WebOp, env: CredsEnv & QuotaEnv = this.env): Promise<WebAnswer> {
+		return this.serial.run("", () => runWebOp(env, this.s3, op, this.journal(), this.clock, this.store));
 	}
 
 	/** The alarm: settles a change a crash or a failed undo left journalled; tries again later while it cannot. */
@@ -451,11 +495,11 @@ export function memoryStorage(): ObjectStorage {
 
 /** The web host in this isolate: one WebHostCore per folder. WHY only for the tests and a local proof without a
  *  Durable Object binding: in production two isolates would each have their own queue (auth.ts never uses it). */
-export function localWebHost(env: CredsEnv, s3: FetchLike, clock: () => number): (op: WebOp) => Promise<WebAnswer> {
+export function localWebHost(s3: FetchLike, clock: () => number, store: Store): (op: WebOp, env: CredsEnv & QuotaEnv) => Promise<WebAnswer> {
 	const cores = new Map<string, WebHostCore>();
-	return (op) => {
+	return (op, env) => {
 		const name = webHostName(op.owner, op.project);
-		if (!cores.has(name)) cores.set(name, new WebHostCore(env, s3, memoryStorage(), clock));
-		return cores.get(name)!.run(op);
+		if (!cores.has(name)) cores.set(name, new WebHostCore(env, s3, memoryStorage(), clock, store));
+		return cores.get(name)!.run(op, env);
 	};
 }

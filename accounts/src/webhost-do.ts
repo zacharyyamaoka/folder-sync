@@ -9,6 +9,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./app.ts";
+import { d1Store, type D1Like } from "./store.ts";
 import { WebHostCore, type WebAnswer, type WebOp } from "./webhost.ts";
 
 export class WebHostObject extends DurableObject<Env> {
@@ -16,7 +17,7 @@ export class WebHostObject extends DurableObject<Env> {
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
-		this.core = new WebHostCore(env, (request) => fetch(request), ctx.storage, () => Date.now());
+		this.core = new WebHostCore(env, (request) => fetch(request), ctx.storage, () => Date.now(), d1Store(env.DB as D1Like));
 	}
 
 	/** One write, delete or settle of this folder's web host, after every earlier one has finished. */

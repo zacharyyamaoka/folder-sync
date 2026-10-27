@@ -155,8 +155,11 @@ most `QUOTA_BYTES` (default 1 GiB) and `QUOTA_OBJECTS` (default 100 000) under `
 (`wrangler.toml` vars; `src/quota.ts`; review r1 #7). Over either, `POST /fs/v1/credentials` and web `PUT`s answer
 `403 over_quota` with the figures; web `DELETE` still works. Usage is measured by listing the root (one subrequest per
 1000 files; above ~45 000 files that needs Workers Paid's subrequest limit) when keys or a web write are asked for and
-the last measurement, cached in D1 (`usage`), is older than `QUOTA_RECHECK_S` (300 s); each web write adds its size at
-once.
+the last measurement, cached in D1 (`usage`), is older than `QUOTA_RECHECK_S` (300 s). A web write is admitted and
+charged inside the folder's Durable Object, one at a time, by its net change to what is stored: the new bytes, one
+object, and the manifest's growth (a write that changes nothing costs nothing; a delete moves the file to `_trash/`,
+which still counts, and charges only the manifest's change) (review r2 #6). Two folders of one person have two
+objects, so writes to two folders at once can still be admitted against the same figure, by at most one write each.
 
 **The bound is honest, not exact.** A machine writes to R2 directly with its temporary credential, and R2 scopes a
 credential to a prefix, never a size, so nothing stops a write the moment the line is crossed. What stops it: no new
