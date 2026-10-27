@@ -217,6 +217,11 @@ async function writer(request: Request, deps: Deps, app: App | null): Promise<{ 
 	const who = await session(request, deps, app);
 	if (!who) return fail(401, "signed_out", "sign in first");
 	if (who.via === "cookie" && !csrfOk(request, app)) return fail(403, "csrf", "a browser's write must carry X-Folder-Sync: 1 from this site's own pages");
+	// WHY (review r1 #2): one browser has one cookie, so a tab opened as A writes with B's session once B signs in
+	// elsewhere; the page names the user it shows, and a write for anyone else is refused, never put in B's folder
+	if (who.via === "cookie" && request.headers.get("X-Folder-Sync-User") !== who.person.userId) {
+		return fail(409, "wrong_user", "this page is signed in as someone else (or does not say who): reload it");
+	}
 	return who;
 }
 
@@ -587,7 +592,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 		if (!allowed["Access-Control-Allow-Origin"]) return fail(403, "cors", "this origin is not a registered app");
 		return new Response(null, {
 			status: 204,
-			headers: headers({ ...allowed, "Access-Control-Allow-Methods": "GET, HEAD, PUT, PATCH, POST, DELETE", "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Folder-Sync, X-Folder-Sync-Keep-Newest", "Access-Control-Max-Age": "600" }),
+			headers: headers({ ...allowed, "Access-Control-Allow-Methods": "GET, HEAD, PUT, PATCH, POST, DELETE", "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Folder-Sync, X-Folder-Sync-User, X-Folder-Sync-Keep-Newest", "Access-Control-Max-Age": "600" }),
 		});
 	}
 	if (first === "api" && rest[0] === "auth") {

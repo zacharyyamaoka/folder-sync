@@ -125,8 +125,8 @@ function call(h: Handle, e: Env, deps: Deps | null, path: string, init: RequestI
 }
 
 const cookie = (who: Person) => ({ Cookie: `s=${who.sessionId}` });
-/** A write from the app's own page: its cookie, its Origin and the CSRF header. */
-const page = (who: Person, extra: Record<string, string> = {}) => ({ ...cookie(who), Origin: SITE, "X-Folder-Sync": "1", ...extra });
+/** A write from the app's own page: its cookie, its Origin, the CSRF header and the user it shows. */
+const page = (who: Person, extra: Record<string, string> = {}) => ({ ...cookie(who), Origin: SITE, "X-Folder-Sync": "1", "X-Folder-Sync-User": who.userId, ...extra });
 
 // ------------------------------------------------------------------------------------------------ the boundary
 
@@ -198,9 +198,10 @@ async function boundary(h: Handle): Promise<string[]> {
 	if (planted.length) failures.push(`the owner's web PUT wrote into the sister's root: ${planted.join(", ")}`);
 	if (![...s3.objects.keys()].some((k) => k.startsWith(`users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/b.json`))) failures.push("the owner's web PUT is not in the owner's web host");
 	for (const [what, headers] of [
-		["no X-Folder-Sync", { ...cookie(OWNER), Origin: SITE }],
-		["another site's Origin", { ...cookie(OWNER), Origin: "https://evil.example", "X-Folder-Sync": "1" }],
-		["no Origin", { ...cookie(OWNER), "X-Folder-Sync": "1" }],
+		// each lacks only what it names (X-Folder-Sync-User is the page's own: review r1 #2)
+		["no X-Folder-Sync", { ...cookie(OWNER), Origin: SITE, "X-Folder-Sync-User": OWNER.userId }],
+		["another site's Origin", { ...cookie(OWNER), Origin: "https://evil.example", "X-Folder-Sync": "1", "X-Folder-Sync-User": OWNER.userId }],
+		["no Origin", { ...cookie(OWNER), "X-Folder-Sync": "1", "X-Folder-Sync-User": OWNER.userId }],
 	] as const) {
 		const before = s3.objects.size;
 		const answer = await go(h, e, deps, "/fs/v1/folders/robotparts/web/saved/csrf.json", { method: "PUT", headers, body: "{}" });

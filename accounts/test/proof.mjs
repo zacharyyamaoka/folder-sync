@@ -90,9 +90,10 @@ class Browser {
 		return answer;
 	}
 
-	/** A write from this site's own page: its Origin and the CSRF header. */
+	/** A write from this site's own page: its Origin, the CSRF header and, once signed in, the user it shows. */
 	write(path, init = {}) {
-		return this.fetch(path, { ...init, headers: { Origin: this.site, "X-Folder-Sync": "1", ...(init.headers || {}) } });
+		const user = this.userId ? { "X-Folder-Sync-User": this.userId } : {};
+		return this.fetch(path, { ...init, headers: { Origin: this.site, "X-Folder-Sync": "1", ...user, ...(init.headers || {}) } });
 	}
 }
 
@@ -103,6 +104,7 @@ async function signIn(site, email) {
 	const { code } = await (await fetch(`${site}/fs/dev/mailbox?email=${encodeURIComponent(email)}`)).json();
 	const signed = await browser.write("/fs/api/auth/sign-in/email-otp", { method: "POST", body: { email, otp: code } });
 	if (!signed.ok) throw new Error(`sign in ${email}: ${signed.status} ${await signed.text()}`);
+	browser.userId = (await (await browser.fetch("/fs/v1/me")).json()).user?.id;
 	return browser;
 }
 

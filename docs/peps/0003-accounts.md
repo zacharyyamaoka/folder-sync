@@ -73,7 +73,9 @@ account page.
 
 Sessions: a browser sends its cookie; a machine or an app server sends `Authorization: Bearer <session token>`.
 **A cookie-authenticated write must carry `X-Folder-Sync: 1` and a same-origin `Origin`** (CSRF: a cross-site form
-cannot set a header).
+cannot set a header), **and `X-Folder-Sync-User: <the user id the page shows>`**: one browser has one cookie, so a tab
+opened as A would otherwise write with B's session after B signs in elsewhere; a write naming anyone else (or no one)
+is refused, `409 wrong_user`, and the page reloads (review r1 #2).
 
 | Route | Who | Answer |
 |---|---|---|
