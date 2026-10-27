@@ -717,3 +717,29 @@ test("review r1 #3: a write cut off between its bytes and its manifest is undone
 	assert.deepEqual(mismatched(s3), [], "the next write settled the cut-off one first");
 	assert.equal(s3.text(`users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/x.json`), "one\n");
 });
+
+test("review r1 #4: with X-Folder-Sync-Keep-Newest: at, an older heart arriving after a newer un-heart leaves the un-heart", async () => {
+	const s3 = people();
+	const { deps } = fakeDeps(s3);
+	const key = `users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/gim.json`;
+	const heart = (saved: boolean, at: string, extra: Record<string, string> = { "X-Folder-Sync-Keep-Newest": "at" }) =>
+		call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/gim.json", { method: "PUT", headers: page(OWNER, { "Content-Type": "application/json", ...extra }), body: `${JSON.stringify({ part: "gim", saved, at })}\n` });
+	// two tabs: the newer un-heart (12:00:05) reaches the server first, the older, delayed heart (12:00:00) after it
+	assert.equal((await heart(false, "2026-10-26T12:00:05Z")).status, 200);
+	const late = await heart(true, "2026-10-26T12:00:00Z");
+	assert.equal(late.status, 409, "the older write is refused with a clear status");
+	assert.equal((await late.json()).error, "stale");
+	assert.equal(JSON.parse(s3.text(key)!).saved, false, "the un-heart stays");
+	// instants, not text: 13:00:06+01:00 is 12:00:06Z, newer, so it is taken
+	assert.equal((await heart(true, "2026-10-26T13:00:06+01:00")).status, 200);
+	assert.equal(JSON.parse(s3.text(key)!).saved, true);
+	// a body without the field it names is refused (400), nothing written
+	const before = s3.text(key);
+	const bare = await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/gim.json", { method: "PUT", headers: page(OWNER, { "X-Folder-Sync-Keep-Newest": "at" }), body: '{"saved": true}' });
+	assert.equal(bare.status, 400);
+	assert.equal(s3.text(key), before);
+	// without the header the web host stays a plain file host: the last write wins, as before
+	assert.equal((await heart(false, "2000-01-01T00:00:00Z", {})).status, 200);
+	assert.equal(JSON.parse(s3.text(key)!).at, "2000-01-01T00:00:00Z");
+	assert.deepEqual(mismatched(s3), []);
+});
