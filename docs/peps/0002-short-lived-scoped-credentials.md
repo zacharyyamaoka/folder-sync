@@ -37,6 +37,17 @@
    source must lie inside the scope), in front of `rclone serve s3`. `e2e/scoped_test.go` syncs two people on three
    machines through it; its own suite has ten mutations of its rules, each red.
 
+6. **One writer per host is a convention inside one person's root, not a fence** (review r2 finding 10, kept as is).
+   A machine's keys are scoped to its own person's root, `users/<id>/`, read-write, so they also reach that person's
+   other hosts' prefixes, the folder's web host (`hosts/<web-host-id>/`, PEP 0003 §3.4) included. A buggy or hostile
+   client on one of a person's machines can therefore overwrite or break that person's own other hosts; it cannot reach
+   anyone else's root. The gap stays inside one person's own machines, never across people. WHY not fenced now: an R2
+   temporary credential carries one scope for all its `prefixPaths` (read-write or read-only, no deny), so "read the
+   whole root, write only my own host" takes two keys. **Future option:** the credential process prints two key sets,
+   read-only for the root and read-write for the machine's own `<project>/hosts/<host>/` and `_trash/<project>/<host>/`
+   per project, and the engine pushes with the second; the accounts Worker then needs the host id and the projects.
+   That changes this contract, so it waits for a need.
+
 ## What does not change
 
 - v0's single bucket key (`FOLDER_SYNC_ACCESS_KEY_ID` … or `credentials.json`) and its keys: an empty root, the same
