@@ -16,6 +16,8 @@
 // - a cookie write without X-Folder-Sync: 1 is refused, a cookie never gets storage keys;
 // - the web host's delete goes to _trash/ and leaves every machine; every request the stand-in let through used a
 //   short-lived key inside its own root;
+// - over quota (the stack restarted with QUOTA_BYTES=1): read-only keys that say why; a round holds its upload, deletes
+//   through the Worker (permanently: no trash copy, the usage goes down) and still pulls; back under, the upload goes;
 // - `folder-sync logout`, then `credentials` exits 3; signing the browser out makes /fs/v1/me 401.
 
 import { spawn, spawnSync } from "node:child_process";
@@ -34,6 +36,20 @@ const PROJECT = "robotparts";
 const PEOPLE = { A: "maker@example.com", B: "stranger@example.com" };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// WHY: step 9b restarts the stack, and Node's fetch keeps sockets to the old server in its pool; a request sent on one
+// dies at once with UND_ERR_SOCKET ("other side closed": it never reached a server) and the socket is dropped. Such a
+// request is sent again, up to five times; any other failure is the proof's to report.
+const firstFetch = globalThis.fetch;
+globalThis.fetch = async (input, init) => {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			return await firstFetch(input, init);
+		} catch (error) {
+			if (error?.cause?.code !== "UND_ERR_SOCKET" || attempt === 5) throw error;
+		}
+	}
+};
+
 const checks = [];
 function check(name, ok, detail = "") {
 	const text = typeof detail === "string" ? detail : JSON.stringify(detail);
@@ -44,8 +60,8 @@ function check(name, ok, detail = "") {
 
 // ------------------------------------------------------------------------------------------------ the stack
 
-function dev(verb) {
-	const done = spawnSync(process.execPath, [join(ACCOUNTS, "scripts", "dev.mjs"), verb, "--state-dir", STATE], { encoding: "utf8", env: { ...process.env, RCLONE, GO } });
+function dev(verb, vars = {}) {
+	const done = spawnSync(process.execPath, [join(ACCOUNTS, "scripts", "dev.mjs"), verb, "--state-dir", STATE], { encoding: "utf8", env: { ...process.env, RCLONE, GO, ...vars } });
 	const last = (done.stdout || "").trim().split("\n").pop() || "";
 	if (done.status !== 0) throw new Error(`dev.mjs ${verb} exited ${done.status}: ${done.stderr}`);
 	return JSON.parse(last);
@@ -285,6 +301,44 @@ async function run(stack, cli) {
 	check("DELETE …/web/saved/x.json moves it to _trash/<project>/<web host>/<stamp>/ (seq 2)", del.status === 200 && delBody?.seq === 2 && trash.length === 1 && readFileSync(trash[0], "utf8") === xText, { status: del.status, trash: trash.map((p) => p.slice(p.indexOf("_trash"))) });
 	const after = fsync(cli, homeA, site, ["sync", "--once", "--dir", folderA]);
 	check("after a sync, the deleted web file is gone from the machine", after.code === 0 && !existsSync(landed));
+
+	// 9b. over quota (review r2 #7): the same stack, restarted with a one-byte quota. A's machine gets read-only keys
+	// that say why; its round holds a new file, deletes y.json through the Worker (permanently, the usage goes down)
+	// and still pulls a web file it had not seen; back under, the held file goes.
+	const wText = `{"part": "web, while over quota"}\n`;
+	const wPut = await a.write(`/fs/v1/folders/${PROJECT}/web/saved/w.json`, { method: "PUT", body: wText, raw: true, headers: { "Content-Type": "application/json" } });
+	dev("down");
+	dev("up", { QUOTA_BYTES: "1" });
+	// the machine's cached read-write keys would run out within their lifetime (5 min); the proof drops them instead
+	rmSync(join(homeA, ".folder-sync", "session.json"), { force: true });
+	const ro = fsync(cli, homeA, site, ["credentials"]);
+	let roKeys = null;
+	try { roKeys = JSON.parse(ro.out); } catch { /* checked below */ }
+	check("over quota, folder-sync credentials prints read-only keys that say why", wPut.status === 200 && ro.code === 0 && roKeys?.ReadOnly === true && /bytes/.test(roKeys?.Reason || ""), roKeys ? { ReadOnly: roKeys.ReadOnly, Reason: roKeys.Reason } : ro.err);
+	const usage = () => {
+		const q = spawnSync(process.execPath, [join(ACCOUNTS, "node_modules", "wrangler", "bin", "wrangler.js"), "d1", "execute", "DB", "--local", "--persist-to", join(STATE, "d1"),
+			"--config", join(ACCOUNTS, "wrangler.toml"), "--json", "--command", `SELECT bytes, objects FROM usage WHERE owner_id = '${meA.user.id}'`], { cwd: ACCOUNTS, encoding: "utf8", env: { ...process.env, CI: "1", WRANGLER_SEND_METRICS: "false" } });
+		try { return JSON.parse(q.stdout)[0].results[0] ?? null; } catch { return null; }
+	};
+	const usedBefore = usage();
+	const machineKey = (path) => join(STATE, "s3", stack.bucket, root, PROJECT, "hosts", hostA, ...path.split("/"));
+	const trashOf = () => walk(join(STATE, "s3", stack.bucket, root, "_trash", PROJECT, hostA)).filter((f) => f.endsWith(join("saved", "y.json")));
+	const trashBefore = trashOf().length;
+	writeFileSync(join(folderA, "saved", "held.json"), "{\"held\": true}\n");
+	rmSync(join(folderA, "saved", "y.json"));
+	const overRound = fsync(cli, homeA, site, ["sync", "--once", "--dir", folderA]);
+	const overText = overRound.out + overRound.err;
+	check("a round over quota fails naming the quota and its held upload", overRound.code !== 0 && /over its storage quota/.test(overText) && /held/.test(overText), overText.trim().split("\n").slice(-2).join(" · "));
+	check("y.json is deleted through the Worker, permanently: gone from the bucket, no trash copy", !existsSync(machineKey("saved/y.json")) && trashOf().length === trashBefore);
+	check("held.json was not uploaded with read-only keys", !existsSync(machineKey("saved/held.json")));
+	const usedAfter = usage();
+	check("the usage went down by at least y.json", !!usedBefore && !!usedAfter && usedAfter.bytes <= usedBefore.bytes - Buffer.byteLength(yText) && usedAfter.objects === usedBefore.objects - 1, { before: usedBefore, after: usedAfter });
+	check("over quota the round still pulls: the web file it had not seen is on disk", existsSync(join(folderA, "hosts", webHost || "none", "saved", "w.json")) && readFileSync(join(folderA, "hosts", webHost || "none", "saved", "w.json"), "utf8") === wText);
+	dev("down");
+	dev("up");
+	rmSync(join(homeA, ".folder-sync", "session.json"), { force: true }); // likewise its read-only ones
+	const backUnder = fsync(cli, homeA, site, ["sync", "--once", "--dir", folderA]);
+	check("back under the quota, the held file goes", backUnder.code === 0 && existsSync(machineKey("saved/held.json")), (backUnder.out + backUnder.err).trim().split("\n").slice(-1)[0]);
 
 	// 10. the stand-in: every request it let through used a short-lived key inside its own root
 	const gate = readFileSync(join(STATE, "gate.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
