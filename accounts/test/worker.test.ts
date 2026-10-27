@@ -597,3 +597,18 @@ test("mutation: a public read signed for the owner's whole root instead of the o
 	], (m) => boundary(m.handle));
 	red(failures, /^a public read was not signed for users\/<owner>\/pub\/ only/, "the read scope");
 });
+
+// ------------------------------------------------------------------------------------------------ round-1 review
+
+test("review r1 #8: two replacements in the same second keep two trash objects", async () => {
+	const s3 = people();
+	const { deps } = fakeDeps(s3); // WHY a fixed clock: every write lands in the same millisecond, the worst case
+	const put = (body: string) => call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/x.json", { method: "PUT", headers: page(OWNER), body });
+	for (const body of ["one\n", "two\n", "three\n"]) assert.equal((await put(body)).status, 200, body);
+	const trash = `users/${OWNER.userId}/_trash/robotparts/${WEB}/`;
+	const kept = [...s3.objects.keys()].filter((k) => k.startsWith(trash) && k.endsWith("/saved/x.json")).map((k) => s3.text(k)).sort();
+	assert.deepEqual(kept, ["one\n", "two\n"], "both replaced versions are in _trash/, neither overwrote the other");
+	for (const key of [...s3.objects.keys()].filter((k) => k.startsWith(trash))) {
+		assert.match(key.slice(trash.length), /^20261026T123456Z[^/]*\/saved\/x\.json$/, "the trash stamp still starts with the contract's UTC stamp");
+	}
+});
