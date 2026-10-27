@@ -852,6 +852,7 @@ function objectStorage() {
 		get: async <T>(key: string) => data.get(key) as T | undefined,
 		put: async (key: string, value: unknown) => { data.set(key, structuredClone(value)); },
 		delete: async (key: string) => data.delete(key),
+		list: async <T>({ prefix }: { prefix: string }) => new Map([...data].filter(([k]) => k.startsWith(prefix)).map(([k, v]) => [k, structuredClone(v) as T])),
 		setAlarm: async (at: number) => { storage.alarm = at; },
 		deleteAlarm: async () => { storage.alarm = null; },
 	};
@@ -1067,7 +1068,7 @@ test("review r2 #7: over quota, a machine still gets keys: read-only, saying why
 });
 
 test("review r2 #7: a machine deletes through the Worker: exactly its manifest minus those paths, permanently, usage down", async () => {
-	// since review r3 #1 the request is { from_seq, paths } and the server builds the manifest
+	// since review r3 #1-2 the request is { job, from_seq, paths } and the server builds the manifest
 	const s3 = people();
 	const store = new MemoryStore();
 	const { deps } = fakeDeps(s3, store);
@@ -1078,18 +1079,19 @@ test("review r2 #7: a machine deletes through the Worker: exactly its manifest m
 		call(handle, env(), deps, `/fs/v1/folders/robotparts/hosts/${host}/delete`, { origin: OWN, method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
 	const before = new Map(s3.objects);
 	for (const [what, answer, status] of [
-		["a browser's cookie", del({ from_seq: old.seq, paths: ["cad/bracket.step"] }, page(OWNER)), 401],
-		["a path the manifest does not list", del({ from_seq: old.seq, paths: ["nope.md"] }), 400],
-		["a from_seq that is not the stored one", del({ from_seq: old.seq - 1, paths: ["cad/bracket.step"] }), 409],
-		["the web host (its deletes are DELETE …/web/<path>)", del({ from_seq: 1, paths: ["saved/w.json"] }, undefined, WEB), 400],
-		["a host this person does not have", del({ from_seq: 1, paths: ["saved/a.json"] }, undefined, SISTER_MACHINE), 404],
+		["a browser's cookie", del({ job: JOB, from_seq: old.seq, paths: ["cad/bracket.step"] }, page(OWNER)), 401],
+		["a path the manifest does not list", del({ job: JOB, from_seq: old.seq, paths: ["nope.md"] }), 400],
+		["a from_seq that is not the stored one", del({ job: JOB, from_seq: old.seq - 1, paths: ["cad/bracket.step"] }), 409],
+		["the web host (its deletes are DELETE …/web/<path>)", del({ job: JOB, from_seq: 1, paths: ["saved/w.json"] }, undefined, WEB), 400],
+		["a host this person does not have", del({ job: JOB, from_seq: 1, paths: ["saved/a.json"] }, undefined, SISTER_MACHINE), 404],
+		["no job id", del({ from_seq: old.seq, paths: ["cad/bracket.step"] }), 400],
 	] as const) {
 		assert.equal((await answer).status, status, what);
 		assert.deepEqual([...s3.objects.keys()].sort(), [...before.keys()].sort(), `${what}: nothing changed`);
 	}
 	// measured first (a machine's keys measure the person), then the delete
 	await call(handle, env(), deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } });
-	const ok = await del({ from_seq: old.seq, paths: ["cad/bracket.step"] });
+	const ok = await del({ job: JOB, from_seq: old.seq, paths: ["cad/bracket.step"] });
 	assert.equal(ok.status, 200);
 	const answer = await ok.json();
 	assert.equal(answer.seq, old.seq + 1);
@@ -1122,6 +1124,9 @@ test("review r3 #4: a read whose folder cannot be settled answers 503 recovering
 	assert.ok((await bundle.json()).files.some((f: { host: string; text: string }) => f.host === WEB && f.text === '{"v": "one"}\n'));
 });
 
+/** A delete job's id, as a machine mints and keeps one until it has the answer (review r3 #2). */
+const JOB = "6f9b2c1e-3d4a-4b5c-8d7e-9f0a1b2c3d4e";
+
 test("review r3 #1: the delete endpoint builds the next manifest itself: the review's 1 MiB padding is no upload channel", async () => {
 	const s3 = people();
 	const store = new MemoryStore();
@@ -1135,15 +1140,16 @@ test("review r3 #1: the delete endpoint builds the next manifest itself: the rev
 	const before = new Map(s3.objects);
 	// the review: a one-byte quota, a delete carrying a manifest with a 1 MiB padding field
 	const padded = { ...old, seq: old.seq + 1, files: old.files.filter((f: { path: string }) => f.path !== "cad/bracket.step"), padding: "x".repeat(1 << 20) };
-	const exploit = await del({ from_seq: old.seq, paths: ["cad/bracket.step"], manifest: padded });
+	const exploit = await del({ job: JOB, from_seq: old.seq, paths: ["cad/bracket.step"], manifest: padded });
 	assert.equal(exploit.status, 413, "a body over the cap is refused before it is read (the review saw 200)");
 	// a small body with anything but from_seq and paths is refused too: the server builds the manifest
-	assert.equal((await del({ from_seq: old.seq, paths: ["cad/bracket.step"], manifest: { padding: "x" } })).status, 400);
-	assert.equal((await del({ from_seq: old.seq, paths: ["cad/bracket.step"], note: "x" })).status, 400);
+	assert.equal((await del({ job: JOB, from_seq: old.seq, paths: ["cad/bracket.step"], manifest: { padding: "x" } })).status, 400);
+	assert.equal((await del({ job: JOB, from_seq: old.seq, paths: ["cad/bracket.step"], note: "x" })).status, 400);
 	assert.deepEqual([...s3.objects.keys()].sort(), [...before.keys()].sort(), "nothing changed");
 	assert.equal((await store.usage(OWNER.userId))!.bytes, usedBefore);
 	// the real delete: from_seq and paths only; the stored manifest is the server's own build
-	const ok = await del({ from_seq: old.seq, paths: ["cad/bracket.step"] });
+	// since review r3 #2 a delete is a job, with its id
+	const ok = await del({ job: JOB, from_seq: old.seq, paths: ["cad/bracket.step"] });
 	assert.equal(ok.status, 200);
 	const answer = await ok.json();
 	const written = JSON.parse(s3.text(`${base}manifest.json`)!);
@@ -1155,7 +1161,6 @@ test("review r3 #1: the delete endpoint builds the next manifest itself: the rev
 	assert.ok((await store.usage(OWNER.userId))!.bytes < usedBefore, "and the usage went down");
 });
 
-const JOB = "6f9b2c1e-3d4a-4b5c-8d7e-9f0a1b2c3d4e";
 
 test("review r3 #2: a delete cut off after its manifest commits is finished later, once, by a replay of the same job", async () => {
 	const s3 = people();

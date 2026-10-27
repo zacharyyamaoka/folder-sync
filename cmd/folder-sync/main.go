@@ -391,8 +391,12 @@ func openProject(dir string, out io.Writer) (*syncer.Project, error) {
 	}
 	// signed in: the accounts server takes this machine's deletes while its keys are read-only (over quota, PEP 0003 §3.7)
 	if a, client, err := signedIn(l); err == nil {
-		p.RemoteDelete = func(ctx context.Context, fromSeq int64, paths []string) (syncer.DeleteAnswer, error) {
-			data, err := client.DeleteFiles(ctx, a.Token, p.Config.Project, p.Host.ID, fromSeq, paths)
+		p.RemoteDelete = func(ctx context.Context, job string, fromSeq int64, paths []string) (syncer.DeleteAnswer, error) {
+			data, err := client.DeleteFiles(ctx, a.Token, p.Config.Project, p.Host.ID, job, fromSeq, paths)
+			var refused *account.ServerError
+			if errors.As(err, &refused) && refused.Code == "manifest_changed" {
+				return syncer.DeleteAnswer{}, fmt.Errorf("%w: %v", syncer.ErrManifestChanged, err)
+			}
 			if err != nil {
 				return syncer.DeleteAnswer{}, err
 			}

@@ -117,6 +117,11 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 			last.LastReconcile = p.Now().UTC().Format(time.RFC3339Nano)
 			last.LastDiscover = last.LastReconcile
 		} else if reconcile || opts.ForceDiscover || due(last.LastDiscover, DiscoverEvery, started) {
+			if reconcile && p.Creds.ReadOnly {
+				if err := p.ReconcileReadOnly(); err != nil {
+					return fmt.Errorf("reconcile (read-only): %w", err)
+				}
+			}
 			if err := p.Discover(ctx); err != nil {
 				return fmt.Errorf("discover peers: %w", err)
 			}

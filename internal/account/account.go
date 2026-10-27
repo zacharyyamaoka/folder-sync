@@ -412,11 +412,12 @@ type Folder struct {
 // SetVisibility makes a project "public" or "private" (PATCH /fs/v1/folders/<project>).
 // DeleteFiles deletes a host's files through the server while this machine's storage keys are read-only (its account
 // is over its quota, docs/peps/0003 §3.7): POST /fs/v1/folders/<project>/hosts/<host>/delete with the seq of the
-// manifest the host last published and the paths it drops. The server builds the next manifest itself, deletes the
-// files permanently and lowers the usage; the answer (seq, deleted, manifest) is returned as it came.
-func (c *Client) DeleteFiles(ctx context.Context, token, project, host string, fromSeq int64, paths []string) ([]byte, error) {
+// manifest the host last published and the paths it drops, as job (an id the caller keeps until it has the answer: the
+// same id is the same delete). The server builds the next manifest itself, deletes the files permanently and lowers
+// the usage; the answer (seq, deleted, pending, manifest) is returned as it came.
+func (c *Client) DeleteFiles(ctx context.Context, token, project, host, job string, fromSeq int64, paths []string) ([]byte, error) {
 	status, data, err := c.call(ctx, http.MethodPost, "/fs/v1/folders/"+url.PathEscape(project)+"/hosts/"+url.PathEscape(host)+"/delete",
-		map[string]any{"from_seq": fromSeq, "paths": paths}, token)
+		map[string]any{"job": job, "from_seq": fromSeq, "paths": paths}, token)
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +425,7 @@ func (c *Client) DeleteFiles(ctx context.Context, token, project, host string, f
 		return nil, ErrSignedOut
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("%s did not delete them: %v", c.Server, serverError(status, data))
+		return nil, fmt.Errorf("%s did not delete them: %w", c.Server, serverError(status, data))
 	}
 	return data, nil
 }

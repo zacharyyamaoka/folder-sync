@@ -348,8 +348,9 @@ export class Serial {
 
 /** One web-host operation, as the route hands it to the folder's queue (plain data: it crosses into a Durable Object). */
 export interface WebOp {
-	/** SETTLE only puts a cut-off change right (a read asks for it first: review r2 #2). */
-	method: "PUT" | "DELETE" | "SETTLE";
+	/** SETTLE only puts a cut-off change right (a read asks for it first: review r2 #2). HOST_DELETE is a machine
+	 *  host's delete through the Worker while its keys are read-only (over quota: review r2 #7, r3 #1-2). */
+	method: "PUT" | "DELETE" | "SETTLE" | "HOST_DELETE";
 	owner: string;
 	project: string;
 	hostId: string;
@@ -359,6 +360,11 @@ export interface WebOp {
 	keepNewest?: string;
 	/** X-Folder-Sync-Tie-Prefers: on an exact tie of keepNewest, the body whose field is true wins. */
 	tiePrefers?: string;
+	/** HOST_DELETE: the caller's job id (a UUID it keeps until it has the answer), the seq of the manifest it last
+	 *  published, and the paths it drops. */
+	job?: string;
+	fromSeq?: number;
+	paths?: string[];
 }
 
 /** The answer to send: a status, a JSON body (an error is { error, why }) and extra headers. */
@@ -420,8 +426,83 @@ export interface ObjectStorage {
 	get<T>(key: string): Promise<T | undefined>;
 	put(key: string, value: unknown): Promise<void>;
 	delete(key: string): Promise<unknown>;
+	list<T>(options: { prefix: string }): Promise<Map<string, T>>;
 	setAlarm(at: number): Promise<void>;
 	deleteAlarm(): Promise<void>;
+}
+
+/** A host's delete through the Worker (review r3 #2), kept in the folder's object until its files are gone, so the
+ *  manifest commit, the cleanup and the usage are each done once: by the request, a replay of the same job id, or the
+ *  alarm. The next manifest is rebuilt from the stored one each time it is needed (it can be large). */
+export interface DeleteJob {
+	id: string;
+	owner: string;
+	where: Where;
+	fromSeq: number;
+	toSeq: number;
+	generatedAt: string;
+	paths: string[];
+	sizes: Record<string, number>;
+	remaining: string[];
+	committed: boolean;
+	at: number;
+}
+
+/** How long a finished job is kept, so a replay after a lost answer still gets it. */
+const JOB_KEEP_MS = 7 * 24 * 3600 * 1000;
+
+/** The next manifest of a delete: the stored one with the job's paths removed, the job's seq and time. */
+function jobManifest(job: DeleteJob, stored: Manifest): Manifest {
+	const dropped = new Set(job.paths);
+	return { schema: SCHEMA, project: job.where.project, host_id: job.where.hostId, host_name: stored.host_name, seq: job.toSeq, generated_at: job.generatedAt, files: stored.files.filter((e) => !dropped.has(e.path)) };
+}
+
+/** Advances a job as far as it goes: commits its manifest (If-Match on the stored one at fromSeq), then deletes each
+ *  remaining file and lowers the usage by it, saving after each step. Returns the stored manifest once committed, or
+ *  null when the host's manifest moved past it some other way (the job is then dropped). */
+async function advance(bucket: WritableBucket, job: DeleteJob, save: (job: DeleteJob) => Promise<void>, drop: () => Promise<void>, store: Store): Promise<Manifest | null> {
+	const w = job.where;
+	const object = await bucket.get(hostKey(w, "manifest.json"));
+	if (!object || !("arrayBuffer" in object)) {
+		await drop();
+		return null;
+	}
+	const bytes = await object.arrayBuffer();
+	const stored = validateManifest(JSON.parse(new TextDecoder().decode(bytes)) as Manifest, w.project, w.hostId);
+	let current: Manifest = stored;
+	if (!job.committed) {
+		if (stored.seq === job.fromSeq) {
+			const next = jobManifest(job, stored);
+			const body = manifestBytes(next);
+			if (!(await writeManifest(bucket, w, next, object.etag))) {
+				await drop();
+				return null;
+			}
+			job.committed = true;
+			await save(job);
+			// WHY saved before charged: a crash between loses this credit (the usage reads high until it is measured
+			// again), never charges it twice
+			await store.addUsage(job.owner, body.byteLength - bytes.byteLength, 0);
+			current = next;
+		} else if (stored.seq === job.toSeq) {
+			job.committed = true; // committed before a restart cut the job off
+			await save(job);
+		} else {
+			await drop();
+			return null;
+		}
+	}
+	for (const path of [...job.remaining]) {
+		try {
+			await bucket.delete(hostKey(w, path));
+		} catch {
+			continue; // still there: the next replay or the alarm tries again
+		}
+		job.remaining = job.remaining.filter((p) => p !== path);
+		await save(job);
+		await store.addUsage(job.owner, -job.sizes[path], -1);
+	}
+	return current.seq === job.toSeq ? current : null;
 }
 
 /** How long a journalled change may stay unsettled before the folder's alarm settles it (and the retry after that). */
@@ -445,39 +526,105 @@ export class WebHostCore {
 		this.store = store;
 	}
 
+	/** Sets the alarm while anything is left to do (a journalled change, a delete job with files left), else clears it. */
+	private async rearm(): Promise<void> {
+		const busy = !!(await this.storage.get("pending")) || [...(await this.storage.list<DeleteJob>({ prefix: "job:" })).values()].some((j) => !j.committed || j.remaining.length);
+		if (busy) await this.storage.setAlarm(this.clock() + SETTLE_AFTER_MS);
+		else await this.storage.deleteAlarm();
+	}
+
 	private journal(): Journal {
-		const { storage, clock } = this;
+		const { storage } = this;
 		return {
 			get: async () => (await storage.get<Pending>("pending")) ?? null,
 			put: async (pending) => {
 				await storage.put("pending", pending);
-				await storage.setAlarm(clock() + SETTLE_AFTER_MS);
+				await this.rearm();
 			},
 			delete: async () => {
 				await storage.delete("pending");
-				await storage.deleteAlarm();
+				await this.rearm();
 			},
 		};
 	}
 
-	/** One write, delete or settle of this folder's web host, after every earlier one has finished (`env`: the vars
-	 *  to run it with, the object's own unless a test's request brings others). */
+	/** One write, delete or settle of this folder's web host, or a machine host's delete, after every earlier one has
+	 *  finished (`env`: the vars to run it with, the object's own unless a test's request brings others). */
 	run(op: WebOp, env: CredsEnv & QuotaEnv = this.env): Promise<WebAnswer> {
+		if (op.method === "HOST_DELETE") return this.serial.run("", () => this.hostDelete(env, op));
 		return this.serial.run("", () => runWebOp(env, this.s3, op, this.journal(), this.clock, this.store));
 	}
 
-	/** The alarm: settles a change a crash or a failed undo left journalled; tries again later while it cannot. */
+	private async job(env: CredsEnv, job: DeleteJob): Promise<Manifest | null> {
+		const bucket = new S3Bucket(await mint(env, job.where.root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
+		const key = `job:${job.id}`;
+		const result = await advance(bucket, job, (j) => this.storage.put(key, j), () => this.storage.delete(key).then(() => undefined), this.store);
+		await this.rearm();
+		return result;
+	}
+
+	/** HOST_DELETE (review r2 #7, r3 #1-2): a new job is checked against the stored manifest and saved before anything
+	 *  is written; a job id seen before is the same job, resumed. */
+	private async hostDelete(env: CredsEnv & QuotaEnv, op: WebOp): Promise<WebAnswer> {
+		const refuse = (status: number, error: string, why: string): WebAnswer => ({ status, body: { error, why } });
+		try {
+			const root = userRoot(op.owner);
+			const where = { root, project: op.project, hostId: op.hostId };
+			const paths = op.paths ?? [];
+			let job = await this.storage.get<DeleteJob>(`job:${op.job}`);
+			if (job && (job.where.hostId !== op.hostId || job.owner !== op.owner || job.fromSeq !== op.fromSeq || JSON.stringify(job.paths) !== JSON.stringify(paths))) {
+				return refuse(409, "job_mismatch", "this job id was used for another delete");
+			}
+			if (!job) {
+				const bucket = new S3Bucket(await mint(env, root, "object-read-only", WRITE_TTL_S, this.clock()), this.s3);
+				const object = await bucket.get(hostKey(where, "manifest.json"));
+				if (!object || !("arrayBuffer" in object)) return refuse(404, "not_found", "this person has no such host in this folder");
+				const stored = validateManifest(JSON.parse(new TextDecoder().decode(await object.arrayBuffer())) as Manifest, op.project, op.hostId);
+				if (stored.seq !== op.fromSeq) return refuse(409, "manifest_changed", `this host's manifest is at seq ${stored.seq}, not ${op.fromSeq}: sync again`);
+				const listed = new Map(stored.files.map((e) => [e.path, e]));
+				const missing = paths.filter((p) => !listed.has(p));
+				if (missing.length) return refuse(400, "bad_paths", `the manifest does not list ${JSON.stringify(missing.slice(0, 3))}`);
+				job = { id: op.job!, owner: op.owner, where, fromSeq: stored.seq, toSeq: stored.seq + 1, generatedAt: new Date(this.clock()).toISOString(), paths,
+					sizes: Object.fromEntries(paths.map((p) => [p, listed.get(p)!.size])), remaining: [...paths], committed: false, at: this.clock() };
+				await this.storage.put(`job:${job.id}`, job);
+			}
+			const manifest = await this.job(env, job);
+			if (!manifest) return refuse(409, "manifest_changed", "this host's manifest moved on: sync again");
+			const pending = job.remaining;
+			return { status: 200, body: { seq: job.toSeq, deleted: job.paths.filter((p) => !pending.includes(p)), pending, manifest } };
+		} catch (error) {
+			if (error instanceof NotConfigured) return refuse(503, "not_configured", "folder storage is not set up on this Worker yet");
+			if (error instanceof ContractError) return refuse(502, "bad_manifest", "a host's manifest breaks the contract");
+			throw error;
+		}
+	}
+
+	/** The alarm: settles a change a crash or a failed undo left journalled, finishes delete jobs, drops old finished
+	 *  ones; tries again later while anything is left. */
 	alarm(): Promise<void> {
 		return this.serial.run("", async () => {
 			const journal = this.journal();
 			const pending = await journal.get();
-			if (!pending) return;
-			try {
-				const bucket = new S3Bucket(await mint(this.env, pending.where.root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
-				await settle(bucket, pending.where, journal);
-			} catch {
-				await this.storage.setAlarm(this.clock() + SETTLE_AFTER_MS);
+			if (pending) {
+				try {
+					const bucket = new S3Bucket(await mint(this.env, pending.where.root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
+					await settle(bucket, pending.where, journal);
+				} catch {
+					// still pending: rearm() below keeps the alarm
+				}
 			}
+			for (const [key, job] of await this.storage.list<DeleteJob>({ prefix: "job:" })) {
+				if (job.committed && !job.remaining.length) {
+					if (this.clock() - job.at > JOB_KEEP_MS) await this.storage.delete(key);
+					continue;
+				}
+				try {
+					await this.job(this.env, job);
+				} catch {
+					// the next alarm tries again
+				}
+			}
+			await this.rearm();
 		});
 	}
 }
@@ -486,9 +633,10 @@ export class WebHostCore {
 export function memoryStorage(): ObjectStorage {
 	const data = new Map<string, unknown>();
 	return {
-		get: async <T>(key: string) => data.get(key) as T | undefined,
+		get: async <T>(key: string) => structuredClone(data.get(key)) as T | undefined,
 		put: async (key, value) => { data.set(key, structuredClone(value)); },
 		delete: async (key) => data.delete(key),
+		list: async <T>({ prefix }: { prefix: string }) => new Map([...data].filter(([k]) => k.startsWith(prefix)).map(([k, v]) => [k, structuredClone(v) as T])),
 		setAlarm: async () => undefined,
 		deleteAlarm: async () => undefined,
 	};

@@ -497,11 +497,12 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 /** The largest body POST …/hosts/<host>/delete takes: a list of paths, nothing else. */
 const DELETE_BODY_MAX = 256 * 1024;
 
-/** A machine's deletes while its keys are read-only (over quota, §3.7, review r2 #7). The machine sends only the seq of
- *  the manifest it last published and the paths it drops; the server builds the next manifest itself from the stored
- *  one: those entries removed, seq + 1, the server's time (review r3 #1: a manifest from the caller would be an upload
- *  channel past the quota). It writes it (If-Match), then deletes the files permanently, with no trash copy, and
- *  lowers the person's usage. WHY permanent: the trash still counts. WHY bearer only: a machine's own host. */
+/** A machine's deletes while its keys are read-only (over quota, §3.7, review r2 #7). The machine sends a job id, the
+ *  seq of the manifest it last published and the paths it drops, and nothing else (review r3 #1: a manifest from the
+ *  caller would be an upload channel past the quota). The folder's Durable Object runs it as a job (webhost.ts
+ *  WebHostCore.hostDelete, review r3 #2): it builds the next manifest from the stored one, commits it (If-Match),
+ *  deletes the files permanently (no trash copy: the trash still counts) and lowers the usage, each step once, and
+ *  finishes a cleanup that failed on a replay of the same job id or on its alarm. WHY bearer only: a machine's host. */
 async function machineDelete(request: Request, env: Env, deps: Deps, app: App | null, project: string, host: string): Promise<Response> {
 	if (!/^bearer\s+\S/i.test(request.headers.get("Authorization") || "")) return fail(401, "signed_out", "a machine deletes with its own session (folder-sync login)");
 	const person = await deps.person(request, "bearer", app);
@@ -517,55 +518,18 @@ async function machineDelete(request: Request, env: Env, deps: Deps, app: App | 
 	} catch {
 		return fail(400, "bad_request", "the body is not JSON");
 	}
-	if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((k) => k !== "from_seq" && k !== "paths")) {
-		return fail(400, "bad_request", "the body is { from_seq, paths } and nothing else: the server builds the manifest");
+	if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((k) => k !== "job" && k !== "from_seq" && k !== "paths")) {
+		return fail(400, "bad_request", "the body is { job, from_seq, paths } and nothing else: the server builds the manifest");
 	}
 	const paths = body.paths;
-	if (!Array.isArray(paths) || !paths.length || paths.length > 10_000 || paths.some((p) => typeof p !== "string") || new Set(paths).size !== paths.length) {
-		return fail(400, "bad_paths", "paths is a list of one or more distinct file paths");
+	if (!Array.isArray(paths) || !paths.length || paths.length > 1000 || paths.some((p) => typeof p !== "string") || new Set(paths).size !== paths.length) {
+		return fail(400, "bad_paths", "paths is a list of 1 to 1000 distinct file paths");
 	}
 	if (!Number.isSafeInteger(body.from_seq)) return fail(400, "bad_seq", "from_seq is the seq of the manifest this machine last published");
-	const owner = person.userId; // WHY: the session's root, never the request's
-	const root = userRoot(owner);
-	const bucket = await bucketFor(env, deps, folderPrefix(owner, project), "object-read-write", READ_TTL_S);
-	const key = (path: string) => `${root}${project}/hosts/${host}/${path}`;
-	const stored = await bucket.get(key("manifest.json"));
-	if (!stored || !("arrayBuffer" in stored)) return fail(404, "not_found", "this person has no such host in this folder");
-	const storedBytes = await stored.arrayBuffer();
-	const old = validateManifest(JSON.parse(new TextDecoder().decode(storedBytes)) as Manifest, project, host);
-	if (old.seq !== body.from_seq) return fail(409, "manifest_changed", `this host's manifest is at seq ${old.seq}, not ${body.from_seq}: sync again`);
-	const listed = new Map(old.files.map((e) => [e.path, e]));
-	const missing = (paths as string[]).filter((p) => !listed.has(p));
-	if (missing.length) return fail(400, "bad_paths", `the manifest does not list ${JSON.stringify(missing.slice(0, 3))}`);
-	const dropped = new Set(paths as string[]);
-	const next: Manifest = {
-		schema: SCHEMA,
-		project,
-		host_id: host,
-		host_name: old.host_name,
-		seq: old.seq + 1,
-		generated_at: new Date(deps.now()).toISOString(),
-		files: old.files.filter((e) => !dropped.has(e.path)),
-	};
-	const nextBytes = new TextEncoder().encode(`${JSON.stringify(next, null, 2)}\n`);
-	const written = await bucket.put(key("manifest.json"), nextBytes, { ifMatch: stored.etag, contentType: "application/json" });
-	if (!written.ok) return fail(409, "manifest_changed", "this host's manifest changed meanwhile: sync again");
-	// the manifest no longer lists them: a delete that fails leaves a stray, which the host's next reconcile moves away
-	let bytes = nextBytes.byteLength - storedBytes.byteLength;
-	let objects = 0;
-	const deleted: string[] = [];
-	for (const path of paths as string[]) {
-		try {
-			await bucket.delete(key(path));
-		} catch {
-			continue;
-		}
-		deleted.push(path);
-		bytes -= listed.get(path)!.size;
-		objects -= 1;
-	}
-	await deps.store.addUsage(owner, bytes, objects);
-	return json(200, { seq: next.seq, deleted, manifest: next });
+	if (typeof body.job !== "string" || !HOST_ID.test(body.job)) return fail(400, "bad_job", "job is a lowercase UUID v4 the machine keeps until it has the answer");
+	// WHY the session's owner: the root is never the request's
+	const answer = await webHostOf(env, deps)({ method: "HOST_DELETE", owner: person.userId, project, hostId: host, path: "", job: body.job, fromSeq: body.from_seq as number, paths: paths as string[] });
+	return json(answer.status, answer.body, answer.headers ?? {});
 }
 
 async function jsonBody(request: Request): Promise<Record<string, unknown> | Response> {

@@ -2,7 +2,10 @@ package syncer
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -129,11 +132,12 @@ func (e *EmptyFolderError) Error() string {
 	return fmt.Sprintf("%s looks empty or unmounted (0 files, the last manifest had %d); refusing to delete them all", e.Folder, e.Had)
 }
 
-// ReadOnlyError is a push with read-only keys (the account is over its storage quota, docs/peps/0003 §3.7) that had
-// uploads to hold: the round still pulls, and reports this.
+// ReadOnlyError is a push with read-only keys (the account is over its storage quota, docs/peps/0003 §3.7) that held
+// uploads or could not finish its deletes: the round still pulls, and reports this.
 type ReadOnlyError struct {
 	Reason string
 	Held   int
+	Err    error // a delete through the accounts server that did not finish this round
 }
 
 func (e *ReadOnlyError) Error() string {
@@ -141,8 +145,18 @@ func (e *ReadOnlyError) Error() string {
 	if why == "" {
 		why = "the storage keys are read-only"
 	}
-	return fmt.Sprintf("this account is over its storage quota (%s): %d upload(s) held until it is back under; deleting files frees space", why, e.Held)
+	msg := fmt.Sprintf("this account is over its storage quota (%s): %d upload(s) held until it is back under; deleting files frees space", why, e.Held)
+	if e.Err != nil {
+		msg += "; " + e.Err.Error()
+	}
+	return msg
 }
+
+func (e *ReadOnlyError) Unwrap() error { return e.Err }
+
+// ErrManifestChanged: the accounts server says this host's manifest is not at the seq a delete named (a round the local
+// copy never saw); the round takes the bucket's own manifest.
+var ErrManifestChanged = errors.New("this host's manifest moved on")
 
 // Push uploads this machine's changes, moves overwritten and deleted objects to
 // _trash/, and rewrites the manifest (docs/peps/0001 §4-§5).
@@ -294,7 +308,7 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 }
 
 // DeleteAnswer is the accounts server's answer to a delete: the manifest it built and published for this host, the
-// paths whose objects are gone, and (review r3 #2) the ones it will still delete.
+// paths whose objects are gone, and (review r3 #2) the ones it will still delete on its own.
 type DeleteAnswer struct {
 	Seq      int64             `json:"seq"`
 	Deleted  []string          `json:"deleted"`
@@ -302,37 +316,152 @@ type DeleteAnswer struct {
 	Manifest manifest.Manifest `json:"manifest"`
 }
 
-// pushReadOnly is a push with read-only keys (review r2 #7): nothing is uploaded; deletes go through the accounts server,
-// which builds the next manifest from the published one minus them (review r3 #1), deletes them permanently and lowers
-// the usage. The manifest it answers becomes this machine's, once checked to be exactly that.
+// deleteJob is ~/.folder-sync/projects/<key>/delete-job.json: a delete sent to the accounts server whose answer has
+// not arrived. WHY kept (review r3 #2): the server may have committed it; the same job id asked again gets the same
+// answer, never a second delete.
+type deleteJob struct {
+	Job     string   `json:"job"`
+	FromSeq int64    `json:"from_seq"`
+	Paths   []string `json:"paths"`
+}
+
+func newJobID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// pushReadOnly is a push with read-only keys (review r2 #7): nothing is uploaded and nothing is written to the bucket.
+// Deletes go through the accounts server as a job (review r3 #1-2): it builds the next manifest from the published
+// one, deletes them permanently and lowers the usage; its manifest becomes this machine's once checked. A job whose
+// answer was lost is asked for again first; a server that says the manifest moved on makes the round take the
+// bucket's own (a read). Anything that goes wrong is a ReadOnlyError, so the round still pulls.
 func (p *Project) pushReadOnly(ctx context.Context, prev manifest.Manifest, changed, deleted []string, result *Result) error {
-	if len(deleted) > 0 {
-		if p.RemoteDelete == nil {
-			return fmt.Errorf("the storage keys are read-only (%s) and this machine is not signed in to an accounts server to delete through", p.Creds.Reason)
+	refusal := func(err error) error {
+		held := len(changed)
+		if held > 0 {
+			result.HeldUploads = changed
 		}
-		answer, err := p.RemoteDelete(ctx, prev.Seq, deleted)
+		if err == nil && held == 0 {
+			return nil
+		}
+		return &ReadOnlyError{Reason: p.Creds.Reason, Held: held, Err: err}
+	}
+	if p.RemoteDelete == nil {
+		if len(deleted) > 0 {
+			return refusal(fmt.Errorf("this machine is not signed in to an accounts server to delete through"))
+		}
+		return refusal(nil)
+	}
+	jobPath := p.statePath("delete-job.json")
+	run := func(job deleteJob) error {
+		answer, err := p.RemoteDelete(ctx, job.Job, job.FromSeq, job.Paths)
+		if errors.Is(err, ErrManifestChanged) {
+			os.Remove(jobPath)
+			if adoptErr := p.adoptPublished(); adoptErr != nil {
+				return fmt.Errorf("the accounts server says this host's manifest moved on, and it could not be read: %w", adoptErr)
+			}
+			return fmt.Errorf("this host's manifest had moved on; taken from the bucket, the deletes go next round")
+		}
 		if err != nil {
-			return fmt.Errorf("deleting through the accounts server: %w", err)
+			return fmt.Errorf("deleting through the accounts server (asked again next round): %w", err)
 		}
-		if err := checkDeleteAnswer(prev, deleted, answer.Manifest, p.Host.ID, p.Config.Project); err != nil {
+		if err := checkDeleteAnswer(prev, job.Paths, answer.Manifest, p.Host.ID, p.Config.Project); err != nil {
 			return fmt.Errorf("the accounts server's manifest: %w", err)
 		}
-		pending := p.statePath("manifest.pending.json")
-		if err := manifest.Save(pending, answer.Manifest); err != nil {
+		if err := p.keepManifest(answer.Manifest); err != nil {
 			return err
 		}
-		if err := os.Rename(pending, p.statePath("manifest.json")); err != nil {
-			return err
-		}
-		result.Deleted = answer.Deleted
+		os.Remove(jobPath)
+		prev = answer.Manifest
+		result.Deleted = append(result.Deleted, answer.Deleted...)
 		result.ManifestWritten = true
 		p.say("%d deleted permanently through the accounts server (over quota: no trash copy)", len(answer.Deleted))
+		if len(answer.Pending) > 0 {
+			p.say("%d more out of the manifest; the accounts server deletes their files on its own", len(answer.Pending))
+		}
+		return nil
 	}
-	if len(changed) > 0 {
-		result.HeldUploads = changed
-		return &ReadOnlyError{Reason: p.Creds.Reason, Held: len(changed)}
+	var earlier deleteJob
+	if data, err := os.ReadFile(jobPath); err == nil && json.Unmarshal(data, &earlier) == nil && earlier.Job != "" {
+		if err := run(earlier); err != nil {
+			return refusal(err)
+		}
+		done := make(map[string]bool, len(earlier.Paths))
+		for _, path := range earlier.Paths {
+			done[path] = true
+		}
+		var rest []string
+		for _, path := range deleted {
+			if !done[path] {
+				rest = append(rest, path)
+			}
+		}
+		deleted = rest
 	}
-	return nil
+	for start := 0; start < len(deleted); start += deleteBatch {
+		job := deleteJob{Job: newJobID(), FromSeq: prev.Seq, Paths: deleted[start:min(start+deleteBatch, len(deleted))]}
+		data, _ := json.Marshal(job)
+		if err := os.WriteFile(jobPath, data, 0o600); err != nil {
+			return refusal(err)
+		}
+		if err := run(job); err != nil {
+			return refusal(err)
+		}
+	}
+	return refusal(nil)
+}
+
+// deleteBatch is how many paths one delete job carries (the server takes up to 1000).
+const deleteBatch = 500
+
+// keepManifest makes m this machine's published manifest (it already is, in the bucket).
+func (p *Project) keepManifest(m manifest.Manifest) error {
+	pending := p.statePath("manifest.pending.json")
+	if err := manifest.Save(pending, m); err != nil {
+		return err
+	}
+	return os.Rename(pending, p.statePath("manifest.json"))
+}
+
+// ReconcileReadOnly is the reconcile of a round with read-only keys: no stray moves (they write), only this host's
+// published manifest taken when it is ahead of the local copy (a delete's answer lost with its job file).
+func (p *Project) ReconcileReadOnly() error {
+	got, err := p.S3.GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
+	if err != nil || got.NotFound {
+		return err
+	}
+	remote, err := manifest.Parse(got.Body)
+	if err != nil {
+		return err
+	}
+	if local, err := p.ownManifest(); err == nil && remote.Seq <= local.Seq {
+		return nil
+	}
+	return p.adoptPublished()
+}
+
+// adoptPublished takes this host's manifest from the bucket (a read): a round with read-only keys reconciles its
+// manifest state this way, with no write (review r3 #2).
+func (p *Project) adoptPublished() error {
+	got, err := p.S3.GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
+	if err != nil {
+		return err
+	}
+	if got.NotFound {
+		return fmt.Errorf("this host has no manifest in the bucket")
+	}
+	m, err := manifest.Parse(got.Body)
+	if err != nil {
+		return err
+	}
+	if m.HostID != p.Host.ID || m.Project != p.Config.Project {
+		return fmt.Errorf("the manifest under this host's prefix claims %s/%s", m.Project, m.HostID)
+	}
+	return p.keepManifest(m)
 }
 
 // checkDeleteAnswer: the server's manifest is this host's, the next seq, and exactly prev minus the deleted paths.

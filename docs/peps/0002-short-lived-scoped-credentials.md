@@ -24,9 +24,12 @@
    - **`ReadOnly` and `Reason`** (optional, review r2 #7): `"ReadOnly": true` says the keys only read, as the accounts
      Worker issues them to an account over its storage quota (PEP 0003 §3.7), and `Reason` says why, in a sentence
      folder-sync prints. A round with read-only keys skips the reconcile, holds its uploads (the round fails, naming
-     them and the reason), sends its deletes to the accounts server (`POST …/hosts/<host>/delete` with the seq it last
-     published and the paths; the server builds the next manifest, deletes them permanently, lowers the usage and
-     answers the manifest, which folder-sync keeps once checked), and still pulls. Absent, the keys read and write, as before.
+     them and the reason), sends its deletes to the accounts server (`POST …/hosts/<host>/delete` with a job id, the seq it
+     last published and the paths; the server builds the next manifest, deletes them permanently, lowers the usage
+     and answers the manifest, which folder-sync keeps once checked). The job is kept in the project's state dir
+     (`delete-job.json`) until its answer comes, and asked for again first thing next round; a server that says the
+     manifest moved on makes the round take its own manifest from the bucket, a read, as its read-only reconcile does
+     when that one is ahead. Whatever goes wrong there, the round still pulls. Absent, the keys read and write, as before.
 2. **A session token** is signed on every request, folder-sync's own (`x-amz-security-token` as a signed header) and
    rclone's (`RCLONE_CONFIG_FSREMOTE_SESSION_TOKEN`).
 3. **An account root.** When the keys carry a `Prefix` (`users/<id>/`), every key folder-sync reads or writes starts

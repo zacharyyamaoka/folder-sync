@@ -111,9 +111,9 @@ type Project struct {
 	Out      io.Writer // what the user sees
 	Now      func() time.Time
 	// RemoteDelete deletes this machine's files through the accounts server while its keys are read-only (an account
-	// over its storage quota, docs/peps/0003 §3.7), from the manifest at fromSeq; the server answers the manifest it
-	// built. Nil when not signed in.
-	RemoteDelete func(ctx context.Context, fromSeq int64, paths []string) (DeleteAnswer, error)
+	// over its storage quota, docs/peps/0003 §3.7), as job (an id kept until the answer comes), from the manifest at
+	// fromSeq; the server answers the manifest it built. Nil when not signed in.
+	RemoteDelete func(ctx context.Context, job string, fromSeq int64, paths []string) (DeleteAnswer, error)
 
 	// reportedSkips are the names last round already reported, so --watch says each once.
 	reportedSkips map[string]bool
