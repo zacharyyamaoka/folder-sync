@@ -404,7 +404,9 @@ async function bundle(request: Request, env: Env, deps: Deps, app: App | null, p
 		total += data.byteLength;
 		out.push({ host: f.hostId, path: f.path, mtime: f.mtime, sha256: f.sha256, text });
 	}
-	return json(200, { files: out }, cacheFor(decided.visibility));
+	// WHY the owner (review r2 #1): one browser has one cookie, so a page's read can come back for another person
+	// who signed in meanwhile; the page drops any answer whose owner is not the person it shows
+	return json(200, { owner: decided.owner, files: out }, cacheFor(decided.visibility));
 }
 
 async function file(request: Request, env: Env, deps: Deps, app: App | null, project: string, host: string, rest: string[], head: boolean): Promise<Response> {
