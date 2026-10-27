@@ -28,7 +28,8 @@
    - **Why:** the falsification pass priced a stock `rclone sync` every 10 s at about $20k/month in R2 operations for 5 machines × 5,000 files. The manifest-driven version stays inside the free tier.
 5. **Nothing is lost without a copy.**
    - Every sync passes `--backup-dir` into `_trash/…/<UTC-stamp>/`.
-   - A lifecycle rule expires `_trash/` after 30 days, and an R2 bucket lock on `_trash/` stops anyone deleting it sooner [7,8].
+   - A lifecycle rule expires `_trash/` after 30 days [7]. (A bucket lock on `_trash/` [8] was planned here; PEP 0003
+     §3.7 drops it: a person over quota deletes their own trash.)
    - Every sync carries `--max-delete`. An empty or unmounted source can't wipe a prefix.
    - R2 has no object versioning; this is the substitute [9].
 6. **Two-way editing (v1) runs only under a lease.** The lease is an object in `_leases/`:

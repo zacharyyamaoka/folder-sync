@@ -159,8 +159,8 @@ most `QUOTA_BYTES` (default 1 GiB) and `QUOTA_OBJECTS` (default 100 000) under `
 figures in `Reason` (review r2 #7): a machine can still pull; it holds its uploads; and it sends its deletes through
 `POST …/hosts/<host>/delete`, which deletes them permanently and lowers the usage, so a person gets back under by
 deleting files, with no operator. A person with only a browser does the same with `DELETE …/web/<path>?permanent=1` and
-`POST …/web-trash/purge`, both run in the folder's object (review r3 #3). **Open for Zach:** CONTRACT.md plans an R2
-bucket lock on `_trash/` (30 days); with it set, the purge cannot delete and only the permanent delete frees space. WHY permanent and not into the trash: the trash counts (a trash that did not would
+`POST …/web-trash/purge`, both run in the folder's object (review r3 #3). **Decided (Zach, 2026-10-27): no bucket lock on `_trash/`,** only the 30-day lifecycle expiry, so the purge
+always frees space. WHY permanent and not into the trash: the trash counts (a trash that did not would
 let one file, overwritten again and again, grow without bound for 30 days), so a delete into it would never get a
 person back under. WHY a Worker endpoint: an R2 temporary credential has no delete-only scope. Usage is measured by listing the root (one subrequest per
 1000 files; above ~45 000 files that needs Workers Paid's subrequest limit) when keys or a web write are asked for and

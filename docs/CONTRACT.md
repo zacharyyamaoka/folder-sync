@@ -98,7 +98,7 @@ Either way, re-read the manifest (it has changed) and retry once. Never treat an
 
 - A path missing from the manifest is deleted. That is the only deletion signal; there are no tombstones.
 - The deleted or overwritten object is kept at `<root>_trash/<project>/<host-id>/<UTC-stamp>/<path>`. An app can offer "restore" by copying it back to the owner's folder, never into `hosts/`.
-- A bucket lifecycle rule expires `_trash/` after 30 days, and an R2 bucket lock on `_trash/` stops anyone deleting it sooner. Both are set once in the R2 dashboard (README, "Pending").
+- A bucket lifecycle rule expires `_trash/` after 30 days, set once in the R2 dashboard (README, "Pending"). There is no bucket lock on `_trash/` (Zach, 2026-10-27): a person over their storage quota may delete their own trash sooner (docs/peps/0003 §3.7), and deletes by the accounts Worker are permanent by design.
 - folder-sync never deletes more than `max_delete` files (default 50) in one round, and refuses outright to push when a folder that had files looks empty (unmounted disk); it still pulls the other hosts, and the round reports the refusal.
 
 ## Who writes
