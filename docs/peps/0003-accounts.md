@@ -155,7 +155,10 @@ most `QUOTA_BYTES` (default 1 GiB) and `QUOTA_OBJECTS` (default 100 000) under `
 (`wrangler.toml` vars; `src/quota.ts`; review r1 #7). Over either, `POST /fs/v1/credentials` and web `PUT`s answer
 `403 over_quota` with the figures; web `DELETE` still works. Usage is measured by listing the root (one subrequest per
 1000 files; above ~45 000 files that needs Workers Paid's subrequest limit) when keys or a web write are asked for and
-the last measurement, cached in D1 (`usage`), is older than `QUOTA_RECHECK_S` (300 s). A web write is admitted and
+the last measurement, cached in D1 (`usage`), is older than `QUOTA_RECHECK_S` (300 s). One request at a time measures
+a person: it claims the measurement in D1 for a minute first, so a burst of refreshes costs one listing, and a listing
+that fails is not repeated within that minute; meanwhile the last measurement serves, or, with none yet, the request
+answers `503 measuring` to try again (review r2 #8). A web write is admitted and
 charged inside the folder's Durable Object, one at a time, by its net change to what is stored: the new bytes, one
 object, and the manifest's growth (a write that changes nothing costs nothing; a delete moves the file to `_trash/`,
 which still counts, and charges only the manifest's change) (review r2 #6). Two folders of one person have two

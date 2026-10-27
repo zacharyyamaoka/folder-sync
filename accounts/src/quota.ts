@@ -39,11 +39,33 @@ export function quotaOf(env: QuotaEnv): Quota {
 	return { bytes: positive(env.QUOTA_BYTES, 1024 ** 3), objects: positive(env.QUOTA_OBJECTS, 100_000), recheckS: positive(env.QUOTA_RECHECK_S, 300) };
 }
 
-/** The person's usage: the cached measurement while it is fresh, else `measure()` (stored for next time). */
+/** No measurement can be had yet: another is under way, or the last one failed less than a minute ago (503). */
+export class Measuring extends Error {}
+
+/** How long a measurement's claim lasts: one measurement per person in that time, and a failed one is not retried
+ *  sooner (review r2 #8). */
+export const CLAIM_MS = 60_000;
+
+/** The person's usage: the cached measurement while it is fresh, else `measure()` (stored for next time). WHY a claim
+ *  in D1 first: thirty machines refreshing at once must cost one listing of the root (up to a hundred pages), not
+ *  thirty; and a listing that fails is not repeated by every request behind it. Without the claim, the last
+ *  measurement serves while there is one, else Measuring. */
 export async function usageOf(store: Store, owner: string, quota: Quota, now: number, measure: () => Promise<{ bytes: number; objects: number }>): Promise<Usage> {
 	const cached = await store.usage(owner);
-	if (cached && now - Date.parse(cached.measured_at) < quota.recheckS * 1000) return cached;
-	const measured = { ...(await measure()), measured_at: new Date(now).toISOString() };
+	const known = cached && cached.measured_at ? cached : null;
+	if (known && now - Date.parse(known.measured_at) < quota.recheckS * 1000) return known;
+	if (!(await store.claimMeasurement(owner, now, now + CLAIM_MS))) {
+		if (known) return known;
+		throw new Measuring("this account's storage is being measured (or could not be, just now); try again in a minute");
+	}
+	let counted: { bytes: number; objects: number };
+	try {
+		counted = await measure();
+	} catch (error) {
+		if (known) return known;
+		throw new Measuring(`this account's storage could not be measured (${error instanceof Error ? error.message : String(error)}); try again in a minute`);
+	}
+	const measured = { ...counted, measured_at: new Date(now).toISOString() };
 	await store.setUsage(owner, measured.bytes, measured.objects, measured.measured_at);
 	return measured;
 }

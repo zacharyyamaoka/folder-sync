@@ -30,7 +30,7 @@
 import { appFor, apps, OWN_APP, type App } from "./apps.ts";
 import { folderPrefix, mint, NotConfigured, PROJECT, ttlOf, USER_ID, userRoot, type CredsEnv } from "./creds.ts";
 import { checkPath, ContractError, Project } from "../../readers/worker/src/folder-sync-read.ts";
-import { overQuota, quotaOf, usageOf, type QuotaEnv } from "./quota.ts";
+import { Measuring, overQuota, quotaOf, usageOf, type QuotaEnv } from "./quota.ts";
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store, Visibility } from "./store.ts";
 import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhost.ts";
@@ -253,8 +253,10 @@ async function decide(deps: Deps, person: Person | null, project: string, ownerP
 async function quotaRefusal(env: Env, deps: Deps, owner: string, addBytes = 0, addObjects = 0): Promise<string | null> {
 	const quota = quotaOf(env);
 	const root = userRoot(owner);
-	const usage = await usageOf(deps.store, owner, quota, deps.now(), async () =>
-		(await bucketFor(env, deps, root, "object-read-only", READ_TTL_S)).measure(root, { bytes: quota.bytes, objects: quota.objects }));
+	// WHY signed before usageOf: only the listing's own failures are a measurement's (Measuring); a credential that
+	// cannot be signed is a fault, not a 503 to try again
+	const bucket = await bucketFor(env, deps, root, "object-read-only", READ_TTL_S);
+	const usage = await usageOf(deps.store, owner, quota, deps.now(), () => bucket.measure(root, { bytes: quota.bytes, objects: quota.objects }));
 	return overQuota(usage, quota, addBytes, addObjects);
 }
 
@@ -598,6 +600,7 @@ export async function handle(request: Request, env: Env, deps: Deps | null): Pro
 		if (error instanceof NotConfigured) return fail(503, "not_configured", "folder storage is not set up on this Worker yet");
 		if (error instanceof Denied) return fail(404, "not_found", "no such file");
 		if (error instanceof ContractError) return fail(502, "bad_manifest", "a host's manifest breaks the contract");
+		if (error instanceof Measuring) return fail(503, "measuring", error.message, { "Retry-After": "60" });
 		throw error;
 	});
 	if (!allowed["Access-Control-Allow-Origin"]) return answer;

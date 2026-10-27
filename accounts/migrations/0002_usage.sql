@@ -5,5 +5,7 @@ CREATE TABLE "usage" (
   "owner_id" TEXT PRIMARY KEY NOT NULL REFERENCES "user" ("id") ON DELETE CASCADE,
   "bytes" INTEGER NOT NULL,
   "objects" INTEGER NOT NULL,
-  "measured_at" TEXT NOT NULL
+  "measured_at" TEXT NOT NULL,
+  -- until when (ms) one request holds the right to measure: one listing at a time, a failed one not retried sooner
+  "claimed_until" INTEGER NOT NULL DEFAULT 0
 );

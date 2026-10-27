@@ -33,6 +33,8 @@ export interface Store {
 	setUsage(owner: string, bytes: number, objects: number, measuredAt: string): Promise<void>;
 	/** Adds what the web host just wrote to the last measurement (none yet: nothing to add to). */
 	addUsage(owner: string, bytes: number, objects: number): Promise<void>;
+	/** Claims the person's next measurement until `until` (ms): true for exactly one caller while no claim is live. */
+	claimMeasurement(owner: string, now: number, until: number): Promise<boolean>;
 }
 
 /** The subset of Cloudflare's D1Database binding used here. */
@@ -96,6 +98,14 @@ export function d1Store(db: D1Like): Store {
 		},
 		async addUsage(owner, bytes, objects) {
 			await run('UPDATE "usage" SET bytes = bytes + ?, objects = objects + ? WHERE owner_id = ?', bytes, objects, owner);
+		},
+		async claimMeasurement(owner, now, until) {
+			// one statement: a first claim inserts an unmeasured row (measured_at ''), a later one moves an expired claim
+			const done = await run(
+				'INSERT INTO "usage" (owner_id, bytes, objects, measured_at, claimed_until) VALUES (?, 0, 0, \'\', ?) ON CONFLICT (owner_id) DO UPDATE SET claimed_until = excluded.claimed_until WHERE "usage".claimed_until < ?',
+				owner, until, now,
+			);
+			return (done.meta?.changes ?? 0) > 0;
 		},
 	};
 	return store;

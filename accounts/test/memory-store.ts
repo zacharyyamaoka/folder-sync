@@ -73,6 +73,15 @@ export class MemoryStore implements Store {
 		if (row) this.usageRows.set(owner, { ...row, bytes: row.bytes + bytes, objects: row.objects + objects });
 	}
 
+	readonly claims = new Map<string, number>();
+
+	async claimMeasurement(owner: string, now: number, until: number) {
+		if ((this.claims.get(owner) ?? 0) >= now) return false;
+		this.claims.set(owner, until);
+		if (!this.usageRows.has(owner)) this.usageRows.set(owner, { bytes: 0, objects: 0, measured_at: "" });
+		return true;
+	}
+
 	async ensureWebHost(owner: string, project: string, candidate: string) {
 		const key = this.k(owner, project);
 		if (!this.webHosts.has(key)) this.webHosts.set(key, candidate);
