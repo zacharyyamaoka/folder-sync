@@ -1541,3 +1541,9 @@ test("review r5 #6: the fresh-cache shortcut honours QUOTA_MAX_AGE_S too", async
 	const keys = await (await call(handle, e, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } })).json();
 	assert.equal(keys.ReadOnly, true, "older than the max age: measured again, and over (the review saw read-write keys on the cached zero)");
 });
+
+test("review r5 #1: GET /fs/v1/usage names whose usage it is, so a page can refuse another person's", async () => {
+	const { deps } = fakeDeps(people());
+	assert.equal((await (await call(handle, env(), deps, "/fs/v1/usage", { headers: cookie(OWNER) })).json()).owner, OWNER.userId);
+	assert.equal((await (await call(handle, env(), deps, "/fs/v1/usage", { headers: cookie(SISTER) })).json()).owner, SISTER.userId);
+});
