@@ -91,7 +91,8 @@ is refused, `409 wrong_user`, and the page reloads (review r1 #2).
 | `GET /fs/v1/folders/:project/bundle?prefix=<p>[&owner=]` | same | `{ owner, files: [{host, path, mtime, sha256, text}], skipped: [{host, path}] }` (`owner`: whose folder answered; `skipped`: files whose bytes did not match their manifest at the time, e.g. an upload in flight). Any folder read answers `503 recovering` while its web host cannot settle a cut-off change (review r3 #4), UTF-8 files under `prefix`, ≤ 256 KB each, ≤ 2 MB total (one request for an app's small files) |
 | `GET /fs/v1/folders/:project/files/:host/<path>[?owner=]` | same | the bytes (`ETag: "<sha256>"`, `Cache-Control: private, no-store` unless public) |
 | `PUT /fs/v1/folders/:project/web/<path>` | owner | writes `<path>` into the folder's web host (§3.4) → `{ host, path, sha256, seq }`. With `X-Folder-Sync-Keep-Newest: <field>` (e.g. `at`), the body must be a JSON object whose `<field>` is an RFC 3339 instant, and a write older than the stored version's is refused, `409 stale`, nothing written: so writes arriving out of order keep the newest (robotparts' hearts). An exact tie is settled the same in either order: with `X-Folder-Sync-Tie-Prefers: <field>` (robotparts: `saved`) the body whose `<field>` is `true` wins, else the larger sha256 |
-| `DELETE /fs/v1/folders/:project/web/<path>` | owner | removes it from the web host (moved to `_trash/`) → `{ host, path, seq }` |
+| `DELETE /fs/v1/folders/:project/web/<path>[?permanent=1]` | owner | removes it from the web host (moved to `_trash/`) → `{ host, path, seq }`; with `?permanent=1` (review r3 #3) there is no trash copy: the folder's object runs it as a delete job (manifest first, then the file, the usage lowered) → `{ host, path, seq, permanent, pending }` |
+| `POST /fs/v1/folders/:project/web-trash/purge` | owner | the web host's `_trash/` copies deleted for good, up to 1000 a call, the usage lowered by each → `{ purged, bytes, more }` (review r3 #3) |
 | `PATCH /fs/v1/folders/:project` `{visibility}` | owner | `"public"` or `"private"` → the folder row |
 | `POST /fs/v1/folders/:project/readers` `{email}` / `DELETE …/readers/:email` | owner | grants / revokes read |
 | `GET /fs/v1/access?project=&owner=` | session | `{ allowed, role: "owner"\|"reader"\|"public"\|null, root }` — for an app's own server |
@@ -157,7 +158,9 @@ most `QUOTA_BYTES` (default 1 GiB) and `QUOTA_OBJECTS` (default 100 000) under `
 (web `DELETE` still works), and `POST /fs/v1/credentials` answers **read-only** keys with `ReadOnly: true` and the
 figures in `Reason` (review r2 #7): a machine can still pull; it holds its uploads; and it sends its deletes through
 `POST …/hosts/<host>/delete`, which deletes them permanently and lowers the usage, so a person gets back under by
-deleting files, with no operator. WHY permanent and not into the trash: the trash counts (a trash that did not would
+deleting files, with no operator. A person with only a browser does the same with `DELETE …/web/<path>?permanent=1` and
+`POST …/web-trash/purge`, both run in the folder's object (review r3 #3). **Open for Zach:** CONTRACT.md plans an R2
+bucket lock on `_trash/` (30 days); with it set, the purge cannot delete and only the permanent delete frees space. WHY permanent and not into the trash: the trash counts (a trash that did not would
 let one file, overwritten again and again, grow without bound for 30 days), so a delete into it would never get a
 person back under. WHY a Worker endpoint: an R2 temporary credential has no delete-only scope. Usage is measured by listing the root (one subrequest per
 1000 files; above ~45 000 files that needs Workers Paid's subrequest limit) when keys or a web write are asked for and

@@ -135,6 +135,20 @@ export class S3Bucket implements R2BucketLike {
 		return { bytes, objects };
 	}
 
+	/** Up to `max` keys under `prefix` with their sizes (one ListObjectsV2 page), and whether there are more. */
+	async keys(prefix: string, max = 1000): Promise<{ keys: { key: string; size: number }[]; more: boolean }> {
+		this.calls.push(`LIST ${prefix}`);
+		const query = new URLSearchParams({ "list-type": "2", prefix, "max-keys": String(max) });
+		const answer = await this.call(`${this.base}?${query}`);
+		if (!answer.ok) {
+			await answer.body?.cancel();
+			throw new Error(`the storage answered ${answer.status} for a listing`);
+		}
+		const xml = await answer.text();
+		const keys = [...xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)].map((m) => ({ key: tagValues(m[1], "Key")[0], size: Number(tagValues(m[1], "Size")[0] || 0) }));
+		return { keys, more: /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml) };
+	}
+
 	/** PUT an object. `ifMatch` / `ifNoneMatch` make it conditional; a 412 comes back as `{ ok: false, status: 412 }`. */
 	async put(key: string, body: Uint8Array, options: { ifMatch?: string; ifNoneMatch?: "*"; contentType?: string } = {}): Promise<{ ok: boolean; status: number; etag: string }> {
 		this.calls.push(`PUT ${key}`);

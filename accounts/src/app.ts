@@ -485,7 +485,8 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 	} else {
 		const hostId = await deps.store.webHost(owner, project);
 		if (!hostId) return fail(404, "not_found", "this folder has no web host yet");
-		op = { method: "DELETE", owner, project, hostId, path };
+		// ?permanent=1: no trash copy, the usage lowered at once (review r3 #3: how a person gets under their quota)
+		op = { method: "DELETE", owner, project, hostId, path, permanent: new URL(request.url).searchParams.get("permanent") === "1" };
 	}
 	// WHY through the folder's queue: one writer per web host, so no two writes interleave their file and manifest
 	// steps (review r1 #3)
@@ -529,6 +530,17 @@ async function machineDelete(request: Request, env: Env, deps: Deps, app: App | 
 	if (typeof body.job !== "string" || !HOST_ID.test(body.job)) return fail(400, "bad_job", "job is a lowercase UUID v4 the machine keeps until it has the answer");
 	// WHY the session's owner: the root is never the request's
 	const answer = await webHostOf(env, deps)({ method: "HOST_DELETE", owner: person.userId, project, hostId: host, path: "", job: body.job, fromSeq: body.from_seq as number, paths: paths as string[] });
+	return json(answer.status, answer.body, answer.headers ?? {});
+}
+
+/** POST …/web-trash/purge: the folder's web host's trash deleted for good, a page at a time (review r3 #3). */
+async function purgeWebTrash(request: Request, env: Env, deps: Deps, app: App | null, project: string): Promise<Response> {
+	const who = await writer(request, deps, app);
+	if (who instanceof Response) return who;
+	const owner = who.person.userId; // the session's, never the request's
+	const hostId = await deps.store.webHost(owner, project);
+	if (!hostId) return json(200, { purged: 0, bytes: 0, more: false });
+	const answer = await webHostOf(env, deps)({ method: "PURGE_TRASH", owner, project, hostId, path: "" });
 	return json(answer.status, answer.body, answer.headers ?? {});
 }
 
@@ -723,6 +735,9 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 		return method === "PUT" || method === "DELETE" ? web(request, env, deps, app, project, more, method) : fail(405, "method", "PUT or DELETE", { Allow: "PUT, DELETE" });
 	}
 	if (sub === "readers") return readers(request, deps, app, project, more, method);
+	if (sub === "web-trash" && more.length === 1 && more[0] === "purge") {
+		return method === "POST" ? purgeWebTrash(request, env, deps, app, project) : fail(405, "method", "POST only", { Allow: "POST" });
+	}
 	if (sub === "hosts" && more.length === 2 && more[1] === "delete") {
 		return method === "POST" ? machineDelete(request, env, deps, app, project, more[0]) : fail(405, "method", "POST only", { Allow: "POST" });
 	}

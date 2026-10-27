@@ -350,7 +350,7 @@ export class Serial {
 export interface WebOp {
 	/** SETTLE only puts a cut-off change right (a read asks for it first: review r2 #2). HOST_DELETE is a machine
 	 *  host's delete through the Worker while its keys are read-only (over quota: review r2 #7, r3 #1-2). */
-	method: "PUT" | "DELETE" | "SETTLE" | "HOST_DELETE";
+	method: "PUT" | "DELETE" | "SETTLE" | "HOST_DELETE" | "PURGE_TRASH";
 	owner: string;
 	project: string;
 	hostId: string;
@@ -365,6 +365,8 @@ export interface WebOp {
 	job?: string;
 	fromSeq?: number;
 	paths?: string[];
+	/** DELETE: permanently, with no trash copy (a person under or over quota freeing space, review r3 #3). */
+	permanent?: boolean;
 }
 
 /** The answer to send: a status, a JSON body (an error is { error, why }) and extra headers. */
@@ -552,6 +554,8 @@ export class WebHostCore {
 	 *  finished (`env`: the vars to run it with, the object's own unless a test's request brings others). */
 	run(op: WebOp, env: CredsEnv & QuotaEnv = this.env): Promise<WebAnswer> {
 		if (op.method === "HOST_DELETE") return this.serial.run("", () => this.hostDelete(env, op));
+		if (op.method === "DELETE" && op.permanent) return this.serial.run("", () => this.permanentWebDelete(env, op));
+		if (op.method === "PURGE_TRASH") return this.serial.run("", () => this.purgeTrash(env, op));
 		return this.serial.run("", () => runWebOp(env, this.s3, op, this.journal(), this.clock, this.store));
 	}
 
@@ -597,6 +601,48 @@ export class WebHostCore {
 			if (error instanceof ContractError) return refuse(502, "bad_manifest", "a host's manifest breaks the contract");
 			throw error;
 		}
+	}
+
+	/** A web file deleted permanently (review r3 #3): the web host settled first, then the same job as a machine's
+	 *  delete (the manifest committed, then the file deleted with no trash copy, the usage lowered, each once). */
+	private async permanentWebDelete(env: CredsEnv & QuotaEnv, op: WebOp): Promise<WebAnswer> {
+		const settled = await runWebOp(env, this.s3, { ...op, method: "SETTLE", permanent: false }, this.journal(), this.clock, this.store);
+		if (settled.status !== 200) return settled;
+		try {
+			checkWebPath(op.path);
+		} catch (error) {
+			return { status: 400, body: { error: "bad_path", why: error instanceof Error ? error.message : String(error) } };
+		}
+		const root = userRoot(op.owner);
+		const bucket = new S3Bucket(await mint(env, root, "object-read-only", WRITE_TTL_S, this.clock()), this.s3);
+		const { manifest } = await readManifest(bucket, { root, project: op.project, hostId: op.hostId });
+		if (!manifest.files.some((e) => e.path === op.path)) return { status: 404, body: { error: "not_found", why: "the web host does not hold that file" } };
+		const answer = await this.hostDelete(env, { ...op, method: "HOST_DELETE", job: crypto.randomUUID(), fromSeq: manifest.seq, paths: [op.path] });
+		if (answer.status !== 200) return answer;
+		const body = answer.body as { seq: number; pending: string[] };
+		return { status: 200, body: { host: op.hostId, path: op.path, seq: body.seq, permanent: true, pending: body.pending } };
+	}
+
+	/** The web host's trash, deleted for good, a page (1000 copies) at a time, the usage lowered by each (review r3 #3):
+	 *  how a person with only a browser gets under their quota once their deletes have gone to the trash. WHY only
+	 *  the web host's: a machine's trash is its own; over quota its deletes skip the trash already. */
+	private async purgeTrash(env: CredsEnv & QuotaEnv, op: WebOp): Promise<WebAnswer> {
+		const root = userRoot(op.owner);
+		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
+		const { keys, more } = await bucket.keys(`${root}_trash/${op.project}/${op.hostId}/`);
+		let purged = 0;
+		let bytes = 0;
+		for (const { key, size } of keys) {
+			try {
+				await bucket.delete(key);
+			} catch {
+				continue;
+			}
+			purged += 1;
+			bytes += size;
+			await this.store.addUsage(op.owner, -size, -1);
+		}
+		return { status: 200, body: { purged, bytes, more: more || purged < keys.length } };
 	}
 
 	/** The alarm: settles a change a crash or a failed undo left journalled, finishes delete jobs, drops old finished
