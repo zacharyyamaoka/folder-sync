@@ -953,3 +953,29 @@ test("review r2 #6: a write that changes nothing costs nothing; a replacement co
 	const after = await store.usage(OWNER.userId);
 	assert.deepEqual({ bytes: after!.bytes, objects: after!.objects }, stored(s3, OWNER), "a delete is counted too");
 });
+
+test("review r2 #8: one quota measurement per person at a time, paged as S3 pages it, and a failed one is not retried at once", async () => {
+	const s3 = people();
+	for (let n = 0; n < 2500; n++) s3.put(`users/${OWNER.userId}/robotparts/hosts/${MACHINE}/bulk/${String(n).padStart(5, "0")}.txt`, "x");
+	let now = Date.parse("2026-10-26T12:34:56Z");
+	const { deps } = fakeDeps(s3, new MemoryStore(), { now: () => now });
+	const root = `users/${OWNER.userId}/`;
+	const pages = () => s3.calls.filter((c) => c.method === "LIST" && c.prefix === root).length;
+	const keys = () => call(handle, env(), deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } }).catch(() => new Response(null, { status: 599 }));
+	// a failed measurement: answered 503, and not tried again for a minute
+	s3.fail = (method) => method === "LIST";
+	const failed = await keys();
+	assert.equal(failed.status, 503, "a measurement that fails is a 503 to try again");
+	s3.fail = null;
+	const tried = pages();
+	assert.equal((await keys()).status, 503, "still within the minute: the failure is remembered");
+	assert.equal(pages(), tried, "and the root is not listed again");
+	now += 61_000;
+	// thirty machines at once: one measurement (2500 files and the fixture's: three pages of 1000)
+	const answers = await Promise.all(Array.from({ length: 30 }, keys));
+	assert.equal(pages() - tried, 3, `one measurement of three pages, not one per request (the review saw thirty)`);
+	assert.ok(answers.some((a) => a.status === 200), "the request that measured gets its keys");
+	assert.ok(answers.every((a) => a.status === 200 || a.status === 503), `the others wait for it: ${answers.map((a) => a.status)}`);
+	assert.equal((await keys()).status, 200, "once measured, everyone gets keys from the cache");
+	assert.equal(pages() - tried, 3);
+});

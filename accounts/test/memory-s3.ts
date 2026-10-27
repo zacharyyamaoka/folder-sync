@@ -72,17 +72,26 @@ export class MemoryS3 {
 			const prefix = url.searchParams.get("prefix") || "";
 			if (!this.inScope(claims, prefix) || !prefix) return deny(`LIST ${prefix}`);
 			this.calls.push({ method: "LIST", key: "", prefix, allowed: true, scoped, scope });
+			if (this.fail?.("LIST", prefix)) return new Response("<Error><Code>InternalError</Code></Error>", { status: 500 });
 			const delimiter = url.searchParams.get("delimiter") || "";
-			const common = new Set<string>();
-			const contents: string[] = [];
+			// WHY paged as S3 pages (max-keys, at most 1000, and a continuation token): a listing's cost is its pages
+			const maxKeys = Math.min(1000, Number(url.searchParams.get("max-keys") || 1000));
+			const after = url.searchParams.get("continuation-token") || "";
+			const entries = new Map<string, "key" | "prefix">();
 			for (const name of [...this.objects.keys()].sort()) {
 				if (!name.startsWith(prefix)) continue;
-				const after = name.slice(prefix.length);
-				const cut = delimiter ? after.indexOf(delimiter) : -1;
-				if (cut >= 0) common.add(prefix + after.slice(0, cut + 1));
-				else contents.push(name);
+				const rest = name.slice(prefix.length);
+				const cut = delimiter ? rest.indexOf(delimiter) : -1;
+				if (cut >= 0) entries.set(prefix + rest.slice(0, cut + 1), "prefix");
+				else entries.set(name, "key");
 			}
-			const xml = `<ListBucketResult><IsTruncated>false</IsTruncated>${contents.map((k) => `<Contents><Key>${k}</Key><Size>${this.objects.get(k)!.byteLength}</Size></Contents>`).join("")}${[...common].sort().map((p) => `<CommonPrefixes><Prefix>${p}</Prefix></CommonPrefixes>`).join("")}</ListBucketResult>`;
+			const ordered = [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).filter(([name]) => !after || name > after);
+			const page = ordered.slice(0, maxKeys);
+			const truncated = ordered.length > page.length;
+			const contents = page.filter(([, kind]) => kind === "key").map(([k]) => `<Contents><Key>${k}</Key><Size>${this.objects.get(k)!.byteLength}</Size></Contents>`).join("");
+			const common = page.filter(([, kind]) => kind === "prefix").map(([p]) => `<CommonPrefixes><Prefix>${p}</Prefix></CommonPrefixes>`).join("");
+			const next = truncated ? `<NextContinuationToken>${page[page.length - 1][0]}</NextContinuationToken>` : "";
+			const xml = `<ListBucketResult><IsTruncated>${truncated}</IsTruncated>${contents}${common}${next}</ListBucketResult>`;
 			return new Response(xml, { status: 200, headers: { "Content-Type": "application/xml" } });
 		}
 		if (!this.inScope(claims, key)) return deny(key);
