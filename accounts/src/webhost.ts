@@ -214,12 +214,25 @@ export async function settle(bucket: WritableBucket, w: Where, journal: Journal)
 	const committed = pending.sha256 === null ? !entry : entry?.sha256 === pending.sha256;
 	if (!committed) {
 		if (!entry) await bucket.delete(hostKey(w, pending.path));
-		else if (pending.restore && entry.sha256 === pending.restoreSha256) await bucket.copy(pending.restore, hostKey(w, pending.path));
+		else if (!(await holds(bucket, hostKey(w, pending.path), entry.sha256))) {
+			// WHY checked, not assumed (review r4 #2): a COPY from a backup that is gone copies nothing, and the journal
+			// is the only record of what to put back; it stays until the file is verified to hold the manifest's bytes
+			if (!pending.restore || entry.sha256 !== pending.restoreSha256 || !(await bucket.copy(pending.restore, hostKey(w, pending.path)))) {
+				throw new Error(`the backup of ${JSON.stringify(pending.path)} is not there to put back`);
+			}
+			if (!(await holds(bucket, hostKey(w, pending.path), entry.sha256))) throw new Error(`${JSON.stringify(pending.path)} does not match its manifest after the restore`);
+		}
 		// WHY (review r3 #6): the trash copy was taken for this change alone; undone, it is a second copy of what is
 		// live, which the quota never charged. A delete that fails leaves it, until the next measurement counts it
 		if (pending.restore) await bucket.delete(pending.restore).catch(() => undefined);
 	}
 	await journal.delete();
+}
+
+/** Whether the object at `key` holds the bytes whose sha256 is `sha256`. */
+async function holds(bucket: WritableBucket, key: string, sha256: string): Promise<boolean> {
+	const object = await bucket.get(key);
+	return !!object && "arrayBuffer" in object && (await sha256Hex(new Uint8Array(await object.arrayBuffer()))) === sha256;
 }
 
 /** Settles any cut-off change first; one that cannot be undone yet stops this operation (Recovering). */
@@ -635,6 +648,10 @@ export class WebHostCore {
 	 *  how a person with only a browser gets under their quota once their deletes have gone to the trash. WHY only
 	 *  the web host's: a machine's trash is its own; over quota its deletes skip the trash already. */
 	private async purgeTrash(env: CredsEnv & QuotaEnv, op: WebOp): Promise<WebAnswer> {
+		// WHY settled first (review r4 #2): a cut-off change's backup lives in this trash; while it is journalled the
+		// purge waits (503 recovering), and once settled no journal names any copy here
+		const settled = await runWebOp(env, this.s3, { ...op, method: "SETTLE" }, this.journal(), this.clock, this.store);
+		if (settled.status !== 200) return settled;
 		const root = userRoot(op.owner);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
 		const { keys, more } = await bucket.keys(`${root}_trash/${op.project}/${op.hostId}/`);
