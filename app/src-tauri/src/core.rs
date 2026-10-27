@@ -233,7 +233,8 @@ fn now_hms() -> String {
 
 /// On start: signed in (keychain) → folder → engine, or the first step that is missing.
 pub fn boot(app: &AppHandle) {
-    let signed_in = matches!(vault::load(), Ok(Some(_)));
+    let server = app.state::<Shared>().lock().settings.server.clone();
+    let signed_in = matches!(vault::load(&server), Ok(Some(_)));
     let (has_folder, paused) = {
         let shared = app.state::<Shared>();
         let mut inner = shared.lock();
@@ -291,7 +292,8 @@ pub fn sign_in(app: &AppHandle) -> Result<(), String> {
                         continue;
                     }
                     // the token goes from the engine's pipe straight into the keychain
-                    if let Err(why) = vault::store(&account.to_string()) {
+                    let server = app.state::<Shared>().lock().settings.server.clone();
+                    if let Err(why) = vault::store(&server, &account.to_string()) {
                         set_status(&app, Status::Error { why });
                         continue;
                     }
@@ -374,10 +376,10 @@ pub fn sign_out(app: &AppHandle) -> Result<(), String> {
         inner.settings.clone()
     };
     // the server ends this machine's session (the engine asks this app for the token one last time)
-    if matches!(vault::load(), Ok(Some(_))) {
+    if matches!(vault::load(&settings.server), Ok(Some(_))) {
         let _ = engine(&settings).arg("logout").stdout(Stdio::null()).stderr(Stdio::null()).status();
     }
-    vault::forget()?;
+    vault::forget(&settings.server)?;
     {
         let shared = app.state::<Shared>();
         let mut inner = shared.lock();
@@ -535,7 +537,8 @@ fn on_event(app: &AppHandle, generation: u64, ev: &Value) {
                     Some("signed_out") => {
                         // the server no longer knows this machine (signed out elsewhere, revoked)
                         stop_engine(app);
-                        let _ = vault::forget();
+                        let server = app.state::<Shared>().lock().settings.server.clone();
+                        let _ = vault::forget(&server);
                         {
                             let shared = app.state::<Shared>();
                             shared.lock().signed_in = false;

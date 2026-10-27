@@ -20,7 +20,7 @@ No terminal, no code to type. Tauri 2.11.5 wraps the folder-sync Go binary, whic
 | Piece | Where | What it does |
 |---|---|---|
 | Sign-in | `src-tauri/src/core.rs` `sign_in` | runs `folder-sync login --json --print-token`. Opens the `device` event's link in the system browser. Moves the `signed_in` event's session from the pipe straight into the keychain |
-| Session | `src-tauri/src/vault.rs` | the stock `keyring` crate: Secret Service on Linux, Keychain on macOS, Credential Manager on Windows. **The token is never written to disk in plain text.** There is no `account.json` |
+| Session | `src-tauri/src/vault.rs` | the stock `keyring` crate: Secret Service on Linux, Keychain on macOS, Credential Manager on Windows. One entry per server (`dev.folder-sync.desktop` / `session@<server>`), so a local or staging sign-in is never used against robotparts.dev. **The token is never written to disk in plain text.** There is no `account.json` |
 | Engine ↔ session | `FOLDER_SYNC_ACCOUNT_PROCESS` | the engine runs `folder-sync-desktop --account-process` whenever it needs the sign-in (keys, hub, logout). That reads the keychain and prints it; exit 3 means signed out |
 | Folder | `core.rs` `use_folder` | `mkdir -p`, then `folder-sync init --project robotparts --dir <folder>` |
 | Sync | `core.rs` `start_engine` | `folder-sync sync --watch --events --dir <folder>`, so push is on (PEP 0004). Each round is a `folder-sync-event/1` JSON line, and the tray state comes from those lines. The engine is restarted if it dies and stopped with SIGTERM so it finishes its round |
@@ -49,6 +49,17 @@ pinned Tauri CLI (2.11.5) into `app/node_modules` on first use, then builds:
 
 `--no-bundle` builds only the binary. The build needs Rust ≥ 1.88, `libwebkit2gtk-4.1-dev`,
 `libayatana-appindicator3-dev`, `librsvg2-dev` and Go. All of these are already on Zach's machine.
+
+## Try it (local stack, this desktop)
+
+```bash
+/home/bam/folder-sync/.claude/worktrees/lane-desktop/app/scripts/try_local.sh
+```
+
+This starts robotparts' local accounts stack (ports 4970–4979) and runs the AppImage with its own HOME under
+`~/.cache/folder-sync-desktop-try`, so your real `~/robotparts`, autostart folder and `~/.folder-sync` are untouched.
+To sign in, enter `maker@example.com` on the device page, then the code shown at
+`http://127.0.0.1:4973/fs/dev/mailbox?email=maker@example.com`. Quit from the tray and the stack stops.
 
 ## Proof
 

@@ -352,7 +352,13 @@ def main():
         os.environ["XDG_RUNTIME_DIR"] = runtime
         os.environ["GIO_USE_VFS"] = "local"
         os.environ["GTK_USE_PORTAL"] = "0"
-        os.execvp("dbus-run-session", ["dbus-run-session", "--", sys.executable, *sys.argv])
+        # WHY a child and not exec: services the bus activated (the document portal) recreate files in the runtime dir
+        # until dbus-run-session itself has exited, so only this outer process can remove it for good
+        try:
+            code = subprocess.run(["dbus-run-session", "--", sys.executable, *sys.argv]).returncode
+        finally:
+            shutil.rmtree(runtime, ignore_errors=True)
+        sys.exit(code)
     display = args.display or next(n for n in range(140, 200) if not os.path.exists(f"/tmp/.X11-unix/X{n}"))
     out = args.out.resolve()
     marker = out / ".proof_linux"
@@ -508,7 +514,7 @@ def main():
             settings = proof.settings()
             proof.step("settings.json keys", keys=sorted(settings))
             # the token itself, read back from the keychain only to check that no file on disk holds it
-            doc = subprocess.run([str(proof.app), "--account-process"], env=proof.env(APPIMAGE_EXTRACT_AND_RUN="1"), capture_output=True, text=True)
+            doc = subprocess.run([str(proof.app), "--account-process"], env=proof.env(APPIMAGE_EXTRACT_AND_RUN="1", FOLDER_SYNC_SERVER=SITE), capture_output=True, text=True)
             token = json.loads(doc.stdout)["token"] if doc.returncode == 0 else ""
             proof.result["keychain_has_session"] = bool(token)
             (out / "logs" / "tokens.txt").write_text(token + "\n")
@@ -519,7 +525,7 @@ def main():
             proof.wait_status("Signed out", timeout=30)
             proof.tray_menu("signed-out-after")
             proof.shot("window-signed-out-after", region=proof.app_region())
-            after = subprocess.run([str(proof.app), "--account-process"], env=proof.env(APPIMAGE_EXTRACT_AND_RUN="1"), capture_output=True, text=True)
+            after = subprocess.run([str(proof.app), "--account-process"], env=proof.env(APPIMAGE_EXTRACT_AND_RUN="1", FOLDER_SYNC_SERVER=SITE), capture_output=True, text=True)
             proof.result["account_process_after_sign_out_exit"] = after.returncode
             # the server no longer accepts the old token
             req = urllib.request.Request(f"{SITE}/fs/v1/me", headers={"Authorization": f"Bearer {token}"})
@@ -548,9 +554,6 @@ def main():
         except SystemExit as e:
             log("demo down:", e)
         (out / "proof.json").write_text(json.dumps(proof.result, indent=1))
-        runtime = os.environ.get("XDG_RUNTIME_DIR", "")
-        if runtime.startswith("/tmp/fsd-run-"):
-            shutil.rmtree(runtime, ignore_errors=True)
         log("wrote", out / "proof.json")
 
 

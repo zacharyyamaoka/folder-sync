@@ -106,6 +106,12 @@ same pieces.
   `why`, `hub`, `stopped`); human lines move to stderr. `credentials` names a 403 `over_quota` with a fixed
   `over quota: <why>` prefix so the round's error carries the server's reason to the tray.
 - **One engine.** The app shells out to the same binary for sign-in, init, sync and sign-out; Rust holds no HTTP client.
+- **One keychain entry per server** (`session@<server>`), so a local or staging sign-in never reaches a robotparts.dev run.
+- **Offline is shown while it is true.** `--watch` trims rclone's own retries (the loop retries anyway), and a failed
+  round dials the storage endpoint and the account server before it is called an error. Before this change, with storage
+  down, a round held the tray on "Syncing…" for minutes.
+- **Found by the proof:** the device page reload-looped for anyone already signed in (`signin.js` ran its own boot
+  before `device.js`'s tag existed). Fixed here in `26f3701`; `lane/accounts` still has it.
 - **Not done yet:** the updater plugin and signing (both need a build host and Zach's certificates), a download page,
   the deep link, and `folder-sync serve` for offline reads. The rclone the engine needs is downloaded and sha256-checked
   on first `init` (`~/.folder-sync/bin`), as for the CLI; bundling it as a second sidecar (85 MB) is the alternative.

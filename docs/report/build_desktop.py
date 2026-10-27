@@ -84,7 +84,12 @@ def build(proof_dir: pathlib.Path, extra: pathlib.Path | None, out: pathlib.Path
     ms = [t["ms"] for t in trials if t["ms"] is not None]
     med = round(statistics.median(ms)) if ms else None
     worst = max(ms) if ms else None
-    all_under = bool(ms) and len(ms) == len(trials) and worst < 1000
+    under = sum(1 for m in ms if m < 1000)
+    cli = [t["ms"] for t in proof.get("cli_disk_to_page_ms", []) if t["ms"] is not None]
+    cli_med = round(statistics.median(cli)) if cli else None
+    cli_under = sum(1 for m in cli if m < 1000)
+    load = proof.get("load_average", [None])[0]
+    all_under = bool(ms) and under == len(trials)
     token_files = proof.get("token_files_on_disk", ["(not checked)"])
     old_token = proof.get("old_token_after_sign_out")
     after_exit = proof.get("account_process_after_sign_out_exit")
@@ -100,13 +105,17 @@ def build(proof_dir: pathlib.Path, extra: pathlib.Path | None, out: pathlib.Path
     checks = [
         ("Sign in opens the browser at the device page; no code typed in the app", "browser opened" in steps_t, f"{sign_in_s} s from the click to the session in the keychain (includes typing the email code in the browser)" if sign_in_s else ""),
         ("The app makes ~/robotparts and it syncs", "folder synced" in steps_t, "Create folder → <code>init</code> → <code>sync --watch --events</code>"),
-        ("A file dropped in the folder shows on the signed-in /saved/ page in under 1 s", all_under, f"median {med} ms, worst {worst} ms over {len(trials)} files"),
+        ("A file dropped in the folder shows on the signed-in /saved/ page in under 1 s", all_under,
+         f"{under} of {len(trials)} under 1 s; median {med} ms, worst {worst} ms. The machine's load average was {load:.0f} on 24 cores" if load else f"median {med} ms"),
+        ("…and the app adds nothing to that path (the same files, the same moment, through the demo's CLI machine)", med is not None and cli_med is not None and med <= cli_med * 1.15,
+         f"CLI baseline: median {cli_med} ms, {cli_under} of {len(cli)} under 1 s; app median {med} ms"),
         ("The token is never on disk in plain text", token_files == [], "grep of every file under the app's HOME for the token: " + (", ".join(token_files) or "none")),
         ("Sign out ends the server session", old_token == 401, f"old token on /fs/v1/me after sign-out: HTTP {old_token}"),
         ("Sign out empties the keychain", after_exit == 3, f"<code>--account-process</code> exits {after_exit} (3 = signed out)"),
         ("Start at login is on after the first sign-in", bool(autostart), ", ".join(autostart) or "none"),
     ]
     rows = "\n".join(f"<tr><td>{esc(a)}</td><td>{ok(b)}</td><td>{c}</td></tr>" for a, b, c in checks)
+    cli_rows = "".join(f"<tr><td><code>{esc(t['part'])}.json</code> (CLI)</td><td>{t['ms'] if t['ms'] is not None else 'timeout'} ms</td></tr>" for t in proof.get("cli_disk_to_page_ms", []))
     trial_rows = "".join(f"<tr><td><code>{esc(t['part'].split('/')[-1])}.json</code></td><td>{t['ms'] if t['ms'] is not None else 'timeout'} ms</td></tr>" for t in trials)
 
     gallery = []
@@ -118,10 +127,14 @@ def build(proof_dir: pathlib.Path, extra: pathlib.Path | None, out: pathlib.Path
         gallery.append(f'<figure class="state"><img src="{NAME}/{esc(st["shot"])}" alt="tray menu: {esc(title)}" loading="lazy">'
                        f'<figcaption><b>{esc(title)}</b> {esc(note)}</figcaption></figure>')
     windows = []
+    seen_bytes = set()
     for name, title in [("window-signed-out", "First run"), ("window-signing-in", "Waiting for the browser"),
                         ("window-needs-folder", "Signed in: the folder step"), ("window-synced", "Synced"),
                         ("window-offline", "Offline"), ("window-over-quota", "Over quota, with the reason")]:
-        if (media / f"{name}.png").exists():
+        path = media / f"{name}.png"
+        # WHY: a still captured before the window repainted is a copy of the previous state; never label it as a new one
+        if path.exists() and path.read_bytes() not in seen_bytes:
+            seen_bytes.add(path.read_bytes())
             windows.append(f'<figure class="win"><img src="{NAME}/{name}.png" alt="{esc(title)}" loading="lazy"><figcaption>{esc(title)}</figcaption></figure>')
     copy_shots = []
     for name, title in [("robotparts-your-folder", "“Your folder” now leads with the app"), ("robotparts-your-folder-dev", "“For developers” opened: the two commands")]:
@@ -161,7 +174,8 @@ details summary {{ cursor:pointer; color:var(--muted) }}
 </style></head><body><main>
 <h1>folder-sync desktop app</h1>
 <p class="muted">PEP 0005 prototype · lane <code>lane/desktop</code> (folder-sync), not merged · 2026-10-27 · proved against the local accounts stack only, never production</p>
-<div class="verdict"><b>Sign in, click Create folder, and the folder syncs. A file dropped in it showed on the robotparts page in a median of {med} ms (worst {worst} ms, {len(ms)}/{len(trials)} files under 1 s).</b>
+<div class="verdict"><b>Sign in, click Create folder, and the folder syncs. A file dropped in it showed on the robotparts page in a median of {med} ms ({under} of {len(trials)} under 1 s), with the machine at load {load:.0f}; the CLI, measured at the same moment, had a median of {cli_med} ms.</b>
+The 1 s target is met by the median but not by every file on this loaded machine; the app adds no time of its own (robotparts' bench measured 584 ms on the same engine path on a quieter machine).
 The token lives only in the OS keychain. Linux .deb and AppImage are built locally. macOS and Windows are written down, not built. There is no download link yet (needs a build host).</div>
 
 <div class="hero">
@@ -174,7 +188,8 @@ The token lives only in the OS keychain. Linux .deb and AppImage are built local
 {rows}
 </table>
 <div class="cols" style="margin-top:14px">
-<table><tr><th>File written to <code>~/robotparts/saved/</code></th><th>until the row shows on /saved/</th></tr>{trial_rows}</table>
+<table><tr><th>File written to <code>~/robotparts/saved/</code></th><th>until the row shows on /saved/</th></tr>{trial_rows}
+<tr><th colspan="2">The same moment, through the demo's CLI machine</th></tr>{cli_rows}</table>
 <div><p class="muted">Measured by the proof driver: the time the file is written, to a MutationObserver on the signed-in page seeing <code>[data-saved-part]</code> for it (the same probe as robotparts' <code>tools/sync_bench.py</code>). The path: fsnotify (100 ms debounce) → the engine's round uploads → hub announce → the page refetches. The app adds nothing to that path. It runs the same engine with push on.</p></div>
 </div>
 
@@ -226,6 +241,13 @@ The token lives only in the OS keychain. Linux .deb and AppImage are built local
 <p>Before: “To get it:” followed by <code>folder-sync login --server …</code> and <code>folder-sync init --project robotparts</code>. After: three steps naming the app (install, Sign in, Create folder), with the two commands behind a closed <b>For developers: the command line</b> disclosure. The /saved/ page's paragraph says the same.</p>
 <div class="grid">{''.join(copy_shots)}</div>
 
+<h2>Found along the way</h2>
+<ul>
+<li><b>The device page looped for anyone already signed in.</b> <code>signin.js</code> checked for <code>device.js</code>'s script tag before the parser reached it. Its own boot then also ran on <code>/fs/device</code> and sent a signed-in person back to <code>/fs/device</code> with no <code>?user_code=</code>, over and over. Every CLI login whose browser was already signed in would hit it. Fixed on <code>lane/desktop</code> in <code>26f3701</code> (the check waits for DOMContentLoaded). <b><code>lane/accounts</code> still has it</b>, and I did not edit that lane.</li>
+<li><b>With storage down, the tray said "Syncing…" for minutes.</b> rclone's default retries hold a round open. <code>--watch</code> now trims them, and a failed round dials the servers before calling it offline (<code>e9e923c</code>). The CLI's <code>--once</code> keeps full retries.</li>
+<li><b>Headless keyrings and long paths:</b> a unix socket path is capped at 108 bytes, so a keyring under a long scratch path never starts. That is test-rig only; the proof now uses a short <code>/tmp/fsd-run-*</code> dir and removes it.</li>
+</ul>
+
 <h2>Tests</h2>
 <ul>
 <li>folder-sync <code>go test ./...</code>: {esc(extra_facts.get('go_tests', 'all packages ok (e2e included)'))}. New: <code>cmd/folder-sync/desktop_test.go</code>, 10 tests (account process; exit 3; no echo of its stdout; <code>login --json --print-token</code> writes no account.json; over quota named; error kinds; event lines).</li>
@@ -276,11 +298,13 @@ The token lives only in the OS keychain. Linux .deb and AppImage are built local
 <h3>Needs Zach</h3><ul>
 <li><b>Where do downloads live?</b> Recommendation: GitHub Releases on the private repo, with a <code>robotparts.dev/download</code> page linking there. Default if you say nothing: the robotparts copy names the app but carries no link, as now.</li>
 <li><b>Signing accounts</b> (Apple Developer ID, a Windows certificate). Default: unsigned Linux builds only until you choose.</li>
+<li><b>The device-page loop fix (<code>26f3701</code>) for <code>lane/accounts</code>.</b> It affects every CLI login whose browser is already signed in. Recommendation: the accounts lane picks it up (one file, <code>accounts/site/signin.js</code>). Default: it stays on <code>lane/desktop</code> and the accounts lane is left alone, because that lane is mid-review.</li>
 <li><b>Start at login on by default after the first sign-in?</b> Default: yes, like Dropbox or Obsidian Sync. One menu click turns it off.</li>
 </ul>
 <h3>Deliberately not done</h3><ul>
 <li>No merge, no deploy, no production server touched.</li>
 <li>No macOS or Windows builds (written down above).</li>
+<li>No run against robotparts.dev: production was never touched. <code>app/scripts/try_local.sh</code> runs the app on the local stack with its own HOME.</li>
 <li>No in-app web view of robotparts.dev (PEP 0005 §3.5): the tray app came first, as asked.</li>
 </ul></div></div>
 </main></body></html>
