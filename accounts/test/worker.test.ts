@@ -1041,3 +1041,60 @@ test("the store's SQL runs against the migrations applied in order on SQLite, D1
 	assert.deepEqual({ ...(await store.usage(OWNER.userId)) }, { bytes: 60, objects: 1, measured_at: "2026-10-26T12:00:00.000Z" });
 	assert.equal(await store.ensureWebHost(OWNER.userId, "robotparts", WEB, "2026-10-26"), WEB);
 });
+
+// ------------------------------------------------------------------------------------------------ over quota (r2 #7)
+
+test("review r2 #7: over quota, a machine still gets keys: read-only, saying why, so it can still pull", async () => {
+	const s3 = people();
+	const { deps } = fakeDeps(s3);
+	const tight = env({ QUOTA_BYTES: String(stored(s3, SISTER).bytes + 10) });
+	const answer = await call(handle, tight, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } });
+	assert.equal(answer.status, 200);
+	const keys = await answer.json();
+	assert.equal(keys.ReadOnly, true);
+	assert.match(keys.Reason, /bytes/);
+	assert.equal(claimsOf(keys.SessionToken).scope, "object-read-only");
+	assert.deepEqual((claimsOf(keys.SessionToken).paths as { prefixPaths: string[] }).prefixPaths, [`users/${OWNER.userId}/`]);
+	const put = await s3.fetch(new Request(`${ENDPOINT}/${BUCKET}/users/${OWNER.userId}/robotparts/hosts/${MACHINE}/more.md`, { method: "PUT", body: "more", headers: { "X-Amz-Security-Token": keys.SessionToken } }));
+	assert.equal(put.status, 403, "R2 refuses a write with them");
+	const read = await s3.fetch(new Request(`${ENDPOINT}/${BUCKET}/users/${OWNER.userId}/robotparts/hosts/${MACHINE}/manifest.json`, { headers: { "X-Amz-Security-Token": keys.SessionToken } }));
+	assert.equal(read.status, 200, "and lets it read: pull still works");
+	const under = await (await call(handle, tight, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-sister-laptop" } })).json();
+	assert.equal(under.ReadOnly, undefined, "under quota: read-write keys, as before");
+	assert.equal(claimsOf(under.SessionToken).scope, "object-read-write");
+});
+
+test("review r2 #7: a machine deletes through the Worker: exactly its manifest minus those paths, permanently, usage down", async () => {
+	const s3 = people();
+	const store = new MemoryStore();
+	const { deps } = fakeDeps(s3, store);
+	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/w.json", { method: "PUT", headers: page(OWNER), body: "{}\n" })).status, 200);
+	const base = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/`;
+	const old = JSON.parse(s3.text(`${base}manifest.json`)!);
+	const minus = (paths: string[], extra: Record<string, unknown> = {}) => ({ ...old, seq: old.seq + 1, generated_at: "2026-10-26T13:00:00Z", files: old.files.filter((f: { path: string }) => !paths.includes(f.path)), ...extra });
+	const del = (body: unknown, headers: Record<string, string> = { Authorization: "Bearer token-owner-laptop" }, host = MACHINE) =>
+		call(handle, env(), deps, `/fs/v1/folders/robotparts/hosts/${host}/delete`, { origin: OWN, method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+	const before = new Map(s3.objects);
+	for (const [what, answer, status] of [
+		["a browser's cookie", del({ paths: ["cad/bracket.step"], manifest: minus(["cad/bracket.step"]) }, page(OWNER)), 401],
+		["a manifest that also drops another file", del({ paths: ["cad/bracket.step"], manifest: minus(["cad/bracket.step", "saved/a.json"]) }), 400],
+		["a manifest that also changes another file", del({ paths: ["cad/bracket.step"], manifest: { ...minus(["cad/bracket.step"]), files: minus(["cad/bracket.step"]).files.map((f: { path: string }) => ({ ...f, sha256: "0".repeat(64) })) } }), 400],
+		["a path the manifest does not list", del({ paths: ["nope.md"], manifest: minus([]) }), 400],
+		["a seq that is not the next", del({ paths: ["cad/bracket.step"], manifest: minus(["cad/bracket.step"], { seq: old.seq + 2 }) }), 400],
+		["the web host (its deletes are DELETE …/web/<path>)", del({ paths: ["saved/w.json"], manifest: {} }, undefined, WEB), 400],
+		["a host this person does not have", del({ paths: ["saved/a.json"], manifest: {} }, undefined, SISTER_MACHINE), 404],
+	] as const) {
+		assert.equal((await answer).status, status, what);
+		assert.deepEqual([...s3.objects.keys()].sort(), [...before.keys()].sort(), `${what}: nothing changed`);
+	}
+	// measured first (a machine's keys measure the person), then the delete
+	await call(handle, env(), deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } });
+	const ok = await del({ paths: ["cad/bracket.step"], manifest: minus(["cad/bracket.step"]) });
+	assert.equal(ok.status, 200);
+	assert.deepEqual(await ok.json(), { seq: old.seq + 1, deleted: ["cad/bracket.step"] });
+	assert.equal(s3.objects.has(`${base}cad/bracket.step`), false, "deleted");
+	assert.ok(![...s3.objects.keys()].some((k) => k.includes("_trash/") && k.endsWith("cad/bracket.step")), "permanently: no trash copy");
+	assert.deepEqual(JSON.parse(s3.text(`${base}manifest.json`)!).files.map((f: { path: string }) => f.path), ["saved/a.json"]);
+	const counted = await store.usage(OWNER.userId);
+	assert.deepEqual({ bytes: counted!.bytes, objects: counted!.objects }, stored(s3, OWNER), "the usage went down by what was deleted, manifest included");
+});
