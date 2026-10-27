@@ -391,16 +391,21 @@ func (p *Project) pushReadOnly(ctx context.Context, prev manifest.Manifest, chan
 	}
 	var earlier deleteJob
 	if data, err := os.ReadFile(jobPath); err == nil && json.Unmarshal(data, &earlier) == nil && earlier.Job != "" {
+		split := false
 		if prev.Seq > earlier.FromSeq {
 			// its result, or a later manifest, is already this machine's (kept before a restart removed the job file,
 			// or taken from the bucket by a read-only reconcile): the job is done (review r4 #4)
 			os.Remove(jobPath)
-		} else if err := run(earlier); err != nil {
+		} else if err := run(earlier); errors.Is(err, ErrTooLarge) {
+			// refused before anything was done (review r5 #3): its paths go again below, in jobs that fit
+			os.Remove(jobPath)
+			split = true
+		} else if err != nil {
 			return refusal(err)
 		}
 		done := make(map[string]bool, len(earlier.Paths))
 		for _, path := range earlier.Paths {
-			done[path] = true
+			done[path] = !split // a split job's paths are still to delete
 		}
 		var rest []string
 		for _, path := range deleted {
@@ -417,6 +422,9 @@ func (p *Project) pushReadOnly(ctx context.Context, prev manifest.Manifest, chan
 			return refusal(err)
 		}
 		if err := run(job); err != nil {
+			if errors.Is(err, ErrTooLarge) {
+				os.Remove(jobPath) // refused before anything was done: never kept to be refused again
+			}
 			return refusal(err)
 		}
 	}
