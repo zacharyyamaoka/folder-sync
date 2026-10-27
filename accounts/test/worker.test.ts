@@ -839,3 +839,59 @@ test("review r2 #3: a failed undo stops the write and keeps its journal, so the 
 	assert.equal(s3.text(xKey), "old\n");
 	assert.equal(await journal.get(), null);
 });
+
+/** A Durable Object's storage, in memory: the journal's key and the one alarm. */
+function objectStorage() {
+	const data = new Map<string, unknown>();
+	const storage = {
+		data,
+		alarm: null as number | null,
+		get: async <T>(key: string) => data.get(key) as T | undefined,
+		put: async (key: string, value: unknown) => { data.set(key, structuredClone(value)); },
+		delete: async (key: string) => data.delete(key),
+		setAlarm: async (at: number) => { storage.alarm = at; },
+		deleteAlarm: async () => { storage.alarm = null; },
+	};
+	return storage;
+}
+
+/** A write cut off between its bytes and its manifest, with its undo failing too: the journal is all that is left. */
+function cutOff(s3: MemoryS3) {
+	const base = `users/${OWNER.userId}/robotparts/hosts/${WEB}/`;
+	s3.fail = (method, key) => (method === "PUT" && key === `${base}manifest.json`) || (method === "COPY" && key === `${base}saved/x.json`);
+}
+
+test("review r2 #2: a read settles a cut-off write: the bundle serves the file again with no new write", async () => {
+	const s3 = people();
+	const { deps } = fakeDeps(s3);
+	const at = (body: string) => call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/x.json", { method: "PUT", headers: page(OWNER), body });
+	assert.equal((await at('{"v": "one"}\n')).status, 200);
+	cutOff(s3);
+	assert.equal((await at('{"v": "two"}\n')).status, 503);
+	s3.fail = null;
+	assert.deepEqual(mismatched(s3), ["saved/x.json"], "cut off: the file holds bytes its manifest does not list");
+	const bundle = await (await call(handle, env(), deps, "/fs/v1/folders/robotparts/bundle?prefix=saved/", { headers: cookie(OWNER) })).json();
+	assert.deepEqual(bundle.files.filter((f: { host: string }) => f.host === WEB).map((f: { path: string; text: string }) => [f.path, f.text]), [["saved/x.json", '{"v": "one"}\n']],
+		"the review saw three bundles of {files: []} here");
+	assert.deepEqual(mismatched(s3), []);
+});
+
+test("review r2 #2: the folder's Durable Object settles a cut-off write on its own alarm", async () => {
+	const { WebHostCore } = (await import("../src/webhost.ts")) as Record<string, any>;
+	const s3 = people();
+	const storage = objectStorage();
+	const core = new WebHostCore(env(), s3.fetch, storage, () => Date.parse("2026-10-26T12:34:56Z"), new MemoryStore());
+	const op = (text: string) => ({ method: "PUT", owner: OWNER.userId, project: "robotparts", hostId: WEB, path: "saved/x.json", data: new TextEncoder().encode(text) });
+	assert.equal((await core.run(op("one\n"))).status, 200);
+	assert.equal(storage.alarm, null, "nothing pending, no alarm");
+	cutOff(s3);
+	assert.equal((await core.run(op("two\n"))).status, 503);
+	s3.fail = null;
+	assert.ok(storage.data.get("pending"), "the journal is in the object's storage");
+	assert.ok(storage.alarm !== null, "and an alarm is set to settle it if nothing else does");
+	await core.alarm();
+	assert.deepEqual(mismatched(s3), []);
+	assert.equal(s3.text(`users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/x.json`), "one\n");
+	assert.equal(storage.data.get("pending"), undefined);
+	assert.equal(storage.alarm, null);
+});
