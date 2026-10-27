@@ -18,9 +18,11 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"folder-sync/internal/creds"
 	"folder-sync/internal/layout"
+	"folder-sync/internal/trace"
 )
 
 // Remote is the rclone remote name folder-sync defines through the environment.
@@ -34,8 +36,9 @@ type Runner struct {
 	Bin    string
 	Layout layout.Layout
 	Creds  creds.Creds
-	Log    io.Writer // rclone's stderr, scrubbed of the key
-	Debug  bool      // -vv instead of NOTICE-level logging
+	Log    io.Writer     // rclone's stderr, scrubbed of the key
+	Debug  bool          // -vv instead of NOTICE-level logging
+	Trace  *trace.Writer // per-process timing (FOLDER_SYNC_TRACE); nil = off
 }
 
 // GlobalFlags are passed to every rclone call.
@@ -92,7 +95,9 @@ func (r Runner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	started := time.Now()
 	err := cmd.Run()
+	r.Trace.Since("rclone", started, map[string]any{"verb": args[0]})
 	scrubbed := r.Creds.Scrub(stderr.String())
 	if r.Log != nil && scrubbed != "" {
 		fmt.Fprintf(r.Log, "rclone %s\n%s", args[0], scrubbed)

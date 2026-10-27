@@ -25,6 +25,7 @@ import (
 	"folder-sync/internal/manifest"
 	"folder-sync/internal/rclone"
 	"folder-sync/internal/s3"
+	"folder-sync/internal/trace"
 )
 
 // ReconcileEvery is how often a full listing reconcile runs (docs/peps/0001 §4: "at start and hourly").
@@ -115,6 +116,7 @@ type Project struct {
 	// over its storage quota, docs/peps/0003 §3.7), as job (an id kept until the answer comes), from the manifest at
 	// fromSeq; the server answers the manifest it built. Nil when not signed in.
 	RemoteDelete func(ctx context.Context, job string, fromSeq int64, paths []string) (DeleteAnswer, error)
+	Trace    *trace.Writer // FOLDER_SYNC_TRACE: step timings; nil = off
 
 	// reportedSkips are the names last round already reported, so --watch says each once.
 	reportedSkips map[string]bool
@@ -164,6 +166,8 @@ func Open(folder string, l layout.Layout, getenv func(string) string, rcloneBin 
 	}
 	p.Log = logFile
 	p.Rclone = rclone.Runner{Bin: rcloneBin, Layout: l, Creds: c, Log: logFile, Debug: getenv("FOLDER_SYNC_DEBUG") != ""}
+	p.Trace = trace.Open(getenv(trace.Env))
+	p.Rclone.Trace = p.Trace
 	p.S3 = &s3.Client{}
 	p.useCreds(c)
 	return p, nil
