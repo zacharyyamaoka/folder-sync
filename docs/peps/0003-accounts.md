@@ -49,6 +49,7 @@ One Cloudflare Worker, `folder-sync-accounts`, with:
     shared; no row = private.
   - `folder_reader(owner_id, project, reader_email, created_at)` — who else may read a private folder.
   - `web_host(owner_id, project, host_id, created_at)` — the folder's web writer (§3.4).
+- **A Durable Object per folder's web host** (`WEB_HOST`): its one writer (§3.4).
 - **No R2 binding.** It reads and writes through R2 temporary credentials it signs for exactly one prefix per request
   (vibetracks `worker/src/creds.ts`, moved here unchanged in spirit: HS256 JWT, `prefixPaths`, secret = sha256(jwt),
   session token = base64("jwt/"+jwt)). The parent R2 key is its only storage secret.
@@ -104,7 +105,17 @@ the accounts Worker **is** a folder-sync host for each (person, project): it min
 (`web_host` row; a lowercase UUID v4, `host_name: "web"`), writes files then the manifest exactly as a round does
 (changed objects first copied to `_trash/`), and writes the manifest with `If-Match` on its last ETag, retrying from a
 fresh read on 412 (R2 honours conditional PUTs; the local stand-in does not, PEP 0001's known gap). Every machine pulls
-it like any peer, read-only, into `<folder>/hosts/<web-host-id>/`. `docs/CONTRACT.md` "Who writes" gains this one
+it like any peer, read-only, into `<folder>/hosts/<web-host-id>/`.
+
+**One writer per web host, as per machine host** (review r1 #3): every write and delete of one (person, project) runs
+in that folder's Durable Object (`WEB_HOST`, `src/webhost-do.ts`), one at a time, so no two interleave their file and
+manifest steps. A change journals what it is about to touch (in the object's storage); if its manifest PUT fails or it
+is cut off, the file goes back to the bytes the manifest lists (from the trash copy, or deleted when the path was new),
+at once or first thing in the folder's next write. So every object always matches its manifest's sha256. Each trash
+copy's stamp is the contract's UTC stamp plus the millisecond and a nonce, so two replacements in one second keep both.
+WHY a queue and not new bytes under a content-addressed key the manifest points at: every reader reads
+`hosts/<host>/<path>` and checks it against the manifest, and a second layout would change the contract for all of
+them. `docs/CONTRACT.md` "Who writes" gains this one
 sentence. WHY not v1's two-way `shared/`: it needs the lease, which is not built; the web host needs nothing new from
 the sync engine and keeps every rule.
 

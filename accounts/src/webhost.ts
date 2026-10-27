@@ -7,10 +7,20 @@
 // manifest PUT carries If-Match on the ETag it was read with (If-None-Match: * for the first), and a 412 starts over
 // from a fresh read. Every machine pulls the web host like any peer, read-only, into <folder>/hosts/<web-host-id>/.
 //
+// One writer per web host, as per machine host (review r1 #3): every write and delete of one (person, project) runs
+// through one queue, live a Durable Object per folder (webhost-do.ts), so two of them never interleave their file and
+// manifest steps. And until the manifest lists new bytes, the old ones are what the file holds: a write journals what
+// it is about to change, and a manifest PUT that fails (or never happens, if the write is cut off) is undone, at once
+// or by the folder's next write, from the trash copy. WHY a queue and not a content-addressed key the manifest points
+// at: every reader (the Go round, readers/worker, readers/python) reads hosts/<host>/<path> and checks its sha256
+// against the manifest; a second key layout would change the bucket contract for all of them.
+//
 // WHY not v1's two-way shared/: it needs the lease, which is not built; the web host needs nothing new from the sync
 // engine and keeps every rule.
 
 import { checkPath, ContractError, SCHEMA, validateManifest, type Manifest, type ManifestEntry, type R2BucketLike } from "../../readers/worker/src/folder-sync-read.ts";
+import { mint, NotConfigured, userRoot, type CredsEnv } from "./creds.ts";
+import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 
 export const WEB_HOST_NAME = "web";
 /** How many times a manifest write starts over after a 412 before giving up. */
@@ -116,10 +126,67 @@ function next(manifest: Manifest, files: ManifestEntry[], now: number): Manifest
 	};
 }
 
+/** What a write or delete is about to change, kept until the manifest lists it or it is undone (review r1 #3). */
+export interface Pending {
+	path: string;
+	/** The trash copy of the bytes the manifest lists for `path`, or null when it lists none (a new path). */
+	restore: string | null;
+	/** Their sha256, so a copy is only put back over the bytes it was taken from. */
+	restoreSha256: string | null;
+	/** What the manifest lists once the change commits: the new bytes' sha256, or null for a delete. */
+	sha256: string | null;
+}
+
+/** Where a web host keeps its one Pending: the Durable Object's storage live, memory in the tests. */
+export interface Journal {
+	get(): Promise<Pending | null>;
+	put(pending: Pending): Promise<void>;
+	delete(): Promise<void>;
+}
+
+export function memoryJournal(): Journal {
+	let pending: Pending | null = null;
+	return {
+		get: async () => pending,
+		put: async (p) => { pending = p; },
+		delete: async () => { pending = null; },
+	};
+}
+
+/** Puts a cut-off write or delete right: when the manifest did not take it, the file goes back to the bytes the
+ *  manifest lists (the trash copy), or away when it lists none. Every web-host operation starts with this. */
+export async function settle(bucket: WritableBucket, w: Where, journal: Journal): Promise<void> {
+	const pending = await journal.get();
+	if (!pending) return;
+	const { manifest } = await readManifest(bucket, w);
+	const entry = manifest.files.find((e) => e.path === pending.path);
+	const committed = pending.sha256 === null ? !entry : entry?.sha256 === pending.sha256;
+	if (!committed) {
+		if (!entry) await bucket.delete(hostKey(w, pending.path));
+		else if (pending.restore && entry.sha256 === pending.restoreSha256) await bucket.copy(pending.restore, hostKey(w, pending.path));
+	}
+	await journal.delete();
+}
+
+/** Runs one change (its file steps, then the manifest PUT); undoes the file steps unless the manifest took them. */
+async function change(bucket: WritableBucket, w: Where, journal: Journal, pending: Pending, steps: () => Promise<boolean>): Promise<boolean> {
+	await journal.put(pending);
+	let committed = false;
+	try {
+		committed = await steps();
+	} finally {
+		// WHY swallowed: the step's own error is the one to report; a failed undo stays journalled for the next write
+		if (committed) await journal.delete();
+		else await settle(bucket, w, journal).catch(() => undefined);
+	}
+	return committed;
+}
+
 /** Writes `path` into the web host: trash copy of the old version, the file, then the manifest (If-Match). */
-export async function writeWebFile(bucket: WritableBucket, w: Where, path: string, data: Uint8Array, clock: () => number): Promise<{ host: string; path: string; sha256: string; seq: number }> {
+export async function writeWebFile(bucket: WritableBucket, w: Where, path: string, data: Uint8Array, clock: () => number, journal: Journal = memoryJournal()): Promise<{ host: string; path: string; sha256: string; seq: number }> {
 	checkWebPath(path);
 	const sha256 = await sha256Hex(data);
+	await settle(bucket, w, journal);
 	for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
 		const now = clock();
 		const { manifest, etag } = await readManifest(bucket, w);
@@ -127,28 +194,112 @@ export async function writeWebFile(bucket: WritableBucket, w: Where, path: strin
 		if (old && old.sha256 === sha256 && old.size === data.byteLength) return { host: w.hostId, path, sha256, seq: manifest.seq };
 		const twin = manifest.files.find((e) => e.path !== path && e.path.toLowerCase() === path.toLowerCase());
 		if (twin) throw new BadPath(`${JSON.stringify(path)} and ${JSON.stringify(twin.path)} differ only by case, which Windows and macOS cannot hold`);
-		if (old) await bucket.copy(hostKey(w, path), trashKey(w, path, now));
-		await bucket.put(hostKey(w, path), data);
+		const restore = old ? trashKey(w, path, now) : null;
+		if (restore) await bucket.copy(hostKey(w, path), restore);
 		const iso = new Date(now).toISOString();
 		const entry: ManifestEntry = { path, size: data.byteLength, mtime: iso, sha256, written_at: iso };
 		const updated = next(manifest, [...manifest.files.filter((e) => e.path !== path), entry], now);
-		if (await writeManifest(bucket, w, updated, etag)) return { host: w.hostId, path, sha256, seq: updated.seq };
-		// 412: another write moved the manifest since our read; start over from a fresh one
+		const committed = await change(bucket, w, journal, { path, restore, restoreSha256: old?.sha256 ?? null, sha256 }, async () => {
+			await bucket.put(hostKey(w, path), data);
+			return writeManifest(bucket, w, updated, etag);
+		});
+		if (committed) return { host: w.hostId, path, sha256, seq: updated.seq };
+		// 412: another write moved the manifest since our read; the file is back as it was, start over from a fresh read
 	}
 	throw new Busy("the web host's manifest kept changing; try again");
 }
 
 /** Removes `path` from the web host (moved to _trash/); null when the web host does not hold it. */
-export async function deleteWebFile(bucket: WritableBucket, w: Where, path: string, clock: () => number): Promise<{ host: string; path: string; seq: number } | null> {
+export async function deleteWebFile(bucket: WritableBucket, w: Where, path: string, clock: () => number, journal: Journal = memoryJournal()): Promise<{ host: string; path: string; seq: number } | null> {
 	checkWebPath(path);
+	await settle(bucket, w, journal);
 	for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
 		const now = clock();
 		const { manifest, etag } = await readManifest(bucket, w);
-		if (!manifest.files.some((e) => e.path === path)) return null;
-		await bucket.copy(hostKey(w, path), trashKey(w, path, now));
-		await bucket.delete(hostKey(w, path));
+		const old = manifest.files.find((e) => e.path === path);
+		if (!old) return null;
+		const restore = trashKey(w, path, now);
+		await bucket.copy(hostKey(w, path), restore);
 		const updated = next(manifest, manifest.files.filter((e) => e.path !== path), now);
-		if (await writeManifest(bucket, w, updated, etag)) return { host: w.hostId, path, seq: updated.seq };
+		const committed = await change(bucket, w, journal, { path, restore, restoreSha256: old.sha256, sha256: null }, async () => {
+			await bucket.delete(hostKey(w, path));
+			return writeManifest(bucket, w, updated, etag);
+		});
+		if (committed) return { host: w.hostId, path, seq: updated.seq };
 	}
 	throw new Busy("the web host's manifest kept changing; try again");
+}
+
+// ------------------------------------------------------------------------------------------------ one writer per host
+
+/** One job at a time per key, in arrival order (a job that fails does not stop the next). */
+export class Serial {
+	private readonly tails = new Map<string, Promise<unknown>>();
+
+	run<T>(key: string, job: () => Promise<T>): Promise<T> {
+		const result = (this.tails.get(key) ?? Promise.resolve()).then(() => job());
+		const tail = result.catch(() => undefined);
+		this.tails.set(key, tail);
+		void tail.then(() => {
+			if (this.tails.get(key) === tail) this.tails.delete(key);
+		});
+		return result;
+	}
+}
+
+/** One web-host operation, as the route hands it to the folder's queue (plain data: it crosses into a Durable Object). */
+export interface WebOp {
+	method: "PUT" | "DELETE";
+	owner: string;
+	project: string;
+	hostId: string;
+	path: string;
+	data?: Uint8Array;
+}
+
+/** The answer to send: a status, a JSON body (an error is { error, why }) and extra headers. */
+export interface WebAnswer {
+	status: number;
+	body: unknown;
+	headers?: Record<string, string>;
+}
+
+/** The key of a folder's queue (and the name of its Durable Object). */
+export function webHostName(owner: string, project: string): string {
+	return `${owner}/${project}`;
+}
+
+/** How long the credential a web-host operation signs lives. */
+const WRITE_TTL_S = 300;
+
+/** Runs one web-host operation in the caller's queue: signs a read-write credential for the owner's root, settles any
+ *  cut-off change first, then writes or deletes. Errors the person can act on come back as answers. */
+export async function runWebOp(env: CredsEnv, s3: FetchLike, op: WebOp, journal: Journal, clock: () => number): Promise<WebAnswer> {
+	try {
+		const root = userRoot(op.owner);
+		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, clock()), s3);
+		const w = { root, project: op.project, hostId: op.hostId };
+		if (op.method === "PUT") return { status: 200, body: await writeWebFile(bucket, w, op.path, op.data ?? new Uint8Array(), clock, journal) };
+		const gone = await deleteWebFile(bucket, w, op.path, clock, journal);
+		return gone ? { status: 200, body: gone } : { status: 404, body: { error: "not_found", why: "the web host does not hold that file" } };
+	} catch (error) {
+		if (error instanceof BadPath) return { status: 400, body: { error: "bad_path", why: error.message } };
+		if (error instanceof Busy) return { status: 503, body: { error: "busy", why: error.message }, headers: { "Retry-After": "1" } };
+		if (error instanceof NotConfigured) return { status: 503, body: { error: "not_configured", why: "folder storage is not set up on this Worker yet" } };
+		if (error instanceof Denied) return { status: 404, body: { error: "not_found", why: "no such file" } };
+		if (error instanceof ContractError) return { status: 502, body: { error: "bad_manifest", why: "a host's manifest breaks the contract" } };
+		throw error;
+	}
+}
+
+/** The web host in this isolate: one queue and journal per folder. WHY only for the tests and a local proof without a
+ *  Durable Object binding: in production two isolates would each have their own queue (auth.ts never uses it). */
+export function localWebHost(env: CredsEnv, s3: FetchLike, clock: () => number): (op: WebOp) => Promise<WebAnswer> {
+	const serial = new Serial();
+	const journals = new Map<string, Journal>();
+	return (op) => {
+		const name = webHostName(op.owner, op.project);
+		if (!journals.has(name)) journals.set(name, memoryJournal());
+		return serial.run(name, () => runWebOp(env, s3, op, journals.get(name)!, clock));
+	};
 }

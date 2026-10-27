@@ -20,6 +20,7 @@ import type { App } from "./apps.ts";
 import type { Deps, Env, Person, Via } from "./app.ts";
 import { signUpAllowed } from "./signup.ts";
 import { d1Store, type D1Like } from "./store.ts";
+import { webHostName } from "./webhost.ts";
 
 const DAY_S = 24 * 60 * 60;
 export const CLIENT_ID = "folder-sync";
@@ -168,5 +169,11 @@ export function liveDeps(env: Env): Deps | null {
 		now: () => Date.now(),
 		uuid: () => crypto.randomUUID(),
 		mailbox: env.ENVIRONMENT === "dev" ? (email) => mailbox.get(email.toLowerCase()) ?? null : undefined,
+		// WHY never this isolate's own queue: two isolates would each have one, and two writers again (review r1 #3)
+		webHost: async (op) => {
+			const objects = env.WEB_HOST;
+			if (!objects) return { status: 503, body: { error: "not_configured", why: "the web host's Durable Object (WEB_HOST) is not bound on this Worker" } };
+			return objects.get(objects.idFromName(webHostName(op.owner, op.project))).run(op);
+		},
 	};
 }

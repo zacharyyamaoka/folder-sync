@@ -32,7 +32,7 @@ import { folderPrefix, mint, NotConfigured, PROJECT, ttlOf, USER_ID, userRoot, t
 import { checkPath, ContractError, Project } from "../../readers/worker/src/folder-sync-read.ts";
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store, Visibility } from "./store.ts";
-import { BadPath, Busy, deleteWebFile, writeWebFile } from "./webhost.ts";
+import { localWebHost, type WebAnswer, type WebOp } from "./webhost.ts";
 
 export interface Env extends CredsEnv {
 	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
@@ -46,6 +46,8 @@ export interface Env extends CredsEnv {
 	GOOGLE_CLIENT_SECRET?: string;
 	/** Who may create an account (signup.ts): listed emails, "*" = anyone, unset = nobody new. A secret: real emails. */
 	SIGN_UP_EMAILS?: string;
+	/** The web host's one writer per folder: a Durable Object namespace of webhost-do.ts's WebHostObject. */
+	WEB_HOST?: { idFromName(name: string): unknown; get(id: unknown): { run(op: WebOp): Promise<WebAnswer> } };
 }
 
 /** A signed-in person, as a session proves them. */
@@ -76,10 +78,12 @@ export interface Deps {
 	uuid(): string;
 	/** Dev only: the last sign-in code sent to an email. */
 	mailbox?(email: string): string | null;
+	/** Runs one web-host write or delete in its folder's queue (§3.4: one writer per host). Live, the folder's Durable
+	 *  Object (auth.ts, webhost-do.ts); absent, a queue in this isolate (the unit tests). */
+	webHost?(op: WebOp): Promise<WebAnswer>;
 }
 
 const READ_TTL_S = 300;
-const WRITE_TTL_S = 300;
 /** §3.3: the bundle's limits. */
 const BUNDLE_FILE_MAX = 256 * 1024;
 const BUNDLE_TOTAL_MAX = 2 * 1024 * 1024;
@@ -399,34 +403,42 @@ async function file(request: Request, env: Env, deps: Deps, app: App | null, pro
 	return new Response(head ? null : data, { status: 200, headers: headers({ ...base, "Content-Length": String(data.byteLength) }) });
 }
 
+/** This isolate's web-host queue for deps without one (the unit tests): one per Deps, so tests never share it. */
+const localHosts = new WeakMap<Deps, (op: WebOp) => Promise<WebAnswer>>();
+
+function webHostOf(env: Env, deps: Deps): (op: WebOp) => Promise<WebAnswer> {
+	if (deps.webHost) return (op) => deps.webHost!(op);
+	let local = localHosts.get(deps);
+	if (!local) {
+		local = localWebHost(env, deps.s3, () => deps.now());
+		localHosts.set(deps, local);
+	}
+	return local;
+}
+
 async function web(request: Request, env: Env, deps: Deps, app: App | null, project: string, rest: string[], method: string): Promise<Response> {
 	const who = await writer(request, deps, app);
 	if (who instanceof Response) return who;
 	const path = filePath(rest);
 	if (path === null) return fail(400, "bad_path", "the path breaks the contract's path rules");
 	const owner = who.person.userId; // fs-mutation: the web host's root. WHY: the session's, never a URL's, a body's or a header's
-	const root = userRoot(owner);
-	const clock = () => deps.now();
-	try {
-		if (method === "PUT") {
-			const declared = Number(request.headers.get("Content-Length") || 0);
-			if (declared > WEB_FILE_MAX) return fail(413, "too_large", `the web host takes files up to ${WEB_FILE_MAX >> 20} MiB`);
-			const data = new Uint8Array(await request.arrayBuffer());
-			if (data.byteLength > WEB_FILE_MAX) return fail(413, "too_large", `the web host takes files up to ${WEB_FILE_MAX >> 20} MiB`);
-			const bucket = await bucketFor(env, deps, root, "object-read-write", WRITE_TTL_S);
-			const hostId = await deps.store.ensureWebHost(owner, project, deps.uuid(), new Date(deps.now()).toISOString());
-			return json(200, await writeWebFile(bucket, { root, project, hostId }, path, data, clock));
-		}
+	let op: WebOp;
+	if (method === "PUT") {
+		const declared = Number(request.headers.get("Content-Length") || 0);
+		if (declared > WEB_FILE_MAX) return fail(413, "too_large", `the web host takes files up to ${WEB_FILE_MAX >> 20} MiB`);
+		const data = new Uint8Array(await request.arrayBuffer());
+		if (data.byteLength > WEB_FILE_MAX) return fail(413, "too_large", `the web host takes files up to ${WEB_FILE_MAX >> 20} MiB`);
+		const hostId = await deps.store.ensureWebHost(owner, project, deps.uuid(), new Date(deps.now()).toISOString());
+		op = { method: "PUT", owner, project, hostId, path, data };
+	} else {
 		const hostId = await deps.store.webHost(owner, project);
 		if (!hostId) return fail(404, "not_found", "this folder has no web host yet");
-		const bucket = await bucketFor(env, deps, root, "object-read-write", WRITE_TTL_S);
-		const gone = await deleteWebFile(bucket, { root, project, hostId }, path, clock);
-		return gone ? json(200, gone) : fail(404, "not_found", "the web host does not hold that file");
-	} catch (error) {
-		if (error instanceof BadPath) return fail(400, "bad_path", error.message);
-		if (error instanceof Busy) return fail(503, "busy", error.message, { "Retry-After": "1" });
-		throw error;
+		op = { method: "DELETE", owner, project, hostId, path };
 	}
+	// WHY through the folder's queue: one writer per web host, so no two writes interleave their file and manifest
+	// steps (review r1 #3)
+	const answer = await webHostOf(env, deps)(op);
+	return json(answer.status, answer.body, answer.headers ?? {});
 }
 
 async function jsonBody(request: Request): Promise<Record<string, unknown> | Response> {

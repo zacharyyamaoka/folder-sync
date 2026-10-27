@@ -31,6 +31,16 @@ migrations_dir = "migrations"
 # No R2 binding (§3.1): the Worker reads and writes each person's files through a temporary credential it signs for
 # exactly one prefix per request, with the parent key below.
 
+# One web-host writer per folder (§3.4, review r1 #3): every browser write and delete of one (person, project) runs in
+# its own Durable Object (src/webhost-do.ts), one at a time, its in-flight change journalled in the object's storage.
+[[durable_objects.bindings]]
+name = "WEB_HOST"
+class_name = "WebHostObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WebHostObject"]
+
 [vars]
 ENVIRONMENT = "production"
 # This Worker's own host: the CLI's default server and the account pages (placeholder until the first deploy)
