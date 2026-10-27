@@ -420,7 +420,7 @@ func cmdSync(args []string, out io.Writer) error {
 	watch := fs.Bool("watch", false, "run a round every `interval` (from .folder-sync.toml) until stopped")
 	install := fs.Bool("install-service", false, "write the autostart definition for `sync --watch` and print how to enable it")
 	discover := fs.Bool("discover", false, "look for new machines this round (one LIST) instead of every 5 min")
-	noPush := fs.Bool("no-push", false, "--watch: poll every `interval` only; no folder watcher and no hub (docs/peps/0004)")
+	noPush := fs.Bool("no-push", false, "poll every `interval` only: no folder watcher, no hub, no announce after --once (docs/peps/0004)")
 	dir := folderFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -442,6 +442,9 @@ func cmdSync(args []string, out io.Writer) error {
 			return err
 		}
 		printResult(out, p, result)
+		if result.ManifestWritten && !*noPush {
+			announceOnce(p)
+		}
 		return nil
 	}
 	return watchLoop(p, out, *noPush)
@@ -565,21 +568,45 @@ func hubState(h *push.Hub) string {
 	return "on (" + h.URL + ")"
 }
 
-// startHub connects to the folder's hub when this machine syncs through its account (the same condition under which
-// folder-sync is its own credential process): a stored key or a key in the environment has no account to ask.
-func startHub(ctx context.Context, p *syncer.Project) *push.Hub {
+// announceOnce tells the folder's hub about this round's manifest (sync --once; PEP 0004), when signed in.
+func announceOnce(p *syncer.Project) {
+	server, token, ok := hubAccount(p)
+	if !ok {
+		return
+	}
+	u, err := push.EventsURL(server, p.Config.Project)
+	if err != nil {
+		return
+	}
+	if err := push.AnnounceOnce(context.Background(), u, token, userAgent(p.Layout), p.Host.ID, p.ManifestSeq(), 5*time.Second); err != nil {
+		p.Trace.Event("hub", map[string]any{"state": "announce failed"})
+	}
+}
+
+// hubAccount is the account server and token the hub is reached with, when this machine syncs through its account.
+func hubAccount(p *syncer.Project) (server, token string, ok bool) {
 	if os.Getenv(creds.EnvCredentialProcess) != "" || os.Getenv(creds.EnvAccessKeyID) != "" || os.Getenv(creds.EnvSecretAccessKey) != "" {
-		return nil
+		return "", "", false
 	}
 	a, err := account.Load(p.Layout.Account)
 	if err != nil || a.Server == "" || a.Token == "" {
+		return "", "", false
+	}
+	return a.Server, a.Token, true
+}
+
+// startHub connects to the folder's hub when this machine syncs through its account (the same condition under which
+// folder-sync is its own credential process): a stored key or a key in the environment has no account to ask.
+func startHub(ctx context.Context, p *syncer.Project) *push.Hub {
+	server, token, ok := hubAccount(p)
+	if !ok {
 		return nil
 	}
-	u, err := push.EventsURL(a.Server, p.Config.Project)
+	u, err := push.EventsURL(server, p.Config.Project)
 	if err != nil {
 		return nil
 	}
-	hub := push.NewHub(u, a.Token, userAgent(p.Layout))
+	hub := push.NewHub(u, token, userAgent(p.Layout))
 	hub.OnState = func(state string) { p.Trace.Event("hub", map[string]any{"state": state}) }
 	go hub.Run(ctx)
 	return hub

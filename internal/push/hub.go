@@ -233,3 +233,31 @@ func ParseEvent(data []byte) (Event, bool) {
 	}
 	return Event{}, false
 }
+
+// AnnounceOnce tells the hub, over a short-lived socket, that host's manifest is at seq: for `sync --once`, which has
+// no long-lived socket. WHY (PEP 0004): a machine that publishes once (a new machine's first round, a cloud agent,
+// a scheduled task) must still reach the others at once, not at their next discovery 5 minutes later. Best effort:
+// it gives up after timeout and never fails the round.
+func AnnounceOnce(ctx context.Context, eventsURL, token, userAgent, host string, seq int, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+token)
+	if userAgent != "" {
+		header.Set("User-Agent", userAgent)
+	}
+	conn, resp, err := websocket.Dial(ctx, eventsURL, &websocket.DialOptions{HTTPHeader: header})
+	if err != nil {
+		if resp != nil {
+			return fmt.Errorf("hub answered %d", resp.StatusCode)
+		}
+		return fmt.Errorf("hub unreachable")
+	}
+	defer conn.CloseNow()
+	msg, _ := json.Marshal(map[string]any{"type": "changed", "host": host, "seq": seq})
+	if err := conn.Write(ctx, websocket.MessageText, msg); err != nil {
+		return err
+	}
+	// the close handshake: the hub has read the message before the socket goes
+	return conn.Close(websocket.StatusNormalClosure, "")
+}

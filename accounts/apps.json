@@ -10,7 +10,9 @@
       "https://robotparts.dev",
       "https://www.robotparts.dev",
       "http://127.0.0.1:4933",
-      "http://localhost:4933"
+      "http://localhost:4933",
+      "http://127.0.0.1:4973",
+      "http://localhost:4973"
     ],
     "project": "robotparts"
   },

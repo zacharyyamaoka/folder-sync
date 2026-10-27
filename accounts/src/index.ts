@@ -16,7 +16,9 @@ export { WebHostObject } from "./webhost-do.ts";
 export { FolderHub } from "./hub.ts";
 
 export default {
-	async fetch(request: Request, env: Env): Promise<Response> {
-		return handle(request, env, liveDeps(env));
+	async fetch(request: Request, env: Env, ctx: { waitUntil(work: Promise<unknown>): void }): Promise<Response> {
+		const deps = liveDeps(env);
+		if (deps) deps.waitUntil = (work) => ctx.waitUntil(work);
+		return handle(request, env, deps);
 	},
 };

@@ -76,6 +76,8 @@ export type Via = "cookie" | "bearer";
 
 /** What the routes need from the accounts layer (auth.ts builds the live one over Better Auth and D1). */
 export interface Deps {
+	/** Keeps work running after the answer is sent (the Worker's ctx.waitUntil); absent in tests, which then await it. */
+	waitUntil?: (work: Promise<unknown>) => void;
 	/** Better Auth's handler for this app's origin (baseURL = that origin, basePath /fs/api/auth). */
 	auth(request: Request, app: App): Promise<Response>;
 	/** The person whose session this request carries: by its cookie (a browser) or its bearer token (a machine). */
@@ -553,7 +555,12 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 	// steps (review r1 #3)
 	// WHY the quota is admitted and charged in there too: one at a time, by what the change really adds (review r2 #6)
 	const answer = await webHostOf(env, deps)(op);
-	if (answer.status === 200) await notifyHub(env, owner, project, answer.body);
+	if (answer.status === 200) {
+		// WHY after the answer (PEP 0004): telling the hub must not add its round trip to the page's write
+		const told = notifyHub(env, owner, project, answer.body);
+		if (deps.waitUntil) deps.waitUntil(told);
+		else await told;
+	}
 	return json(answer.status, answer.body, answer.headers ?? {});
 }
 

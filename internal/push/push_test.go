@@ -212,3 +212,28 @@ func TestParseEventIgnoresJunk(t *testing.T) {
 		}
 	}
 }
+
+func TestAnnounceOnce(t *testing.T) {
+	fake := &fakeHub{}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	u := strings.Replace(srv.URL, "http://", "ws://", 1)
+	if err := AnnounceOnce(context.Background(), u, "tok", "ua", "me", 3, 3*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		fake.mu.Lock()
+		n := len(fake.received)
+		fake.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.received) != 1 || !strings.Contains(fake.received[0], `"seq":3`) || fake.auth[0] != "Bearer tok" {
+		t.Fatalf("received %v auth %v", fake.received, fake.auth)
+	}
+}
