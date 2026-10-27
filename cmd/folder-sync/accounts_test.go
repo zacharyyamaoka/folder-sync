@@ -290,3 +290,108 @@ func TestPublishPublicAndPrivateIsThePatch(t *testing.T) {
 		}
 	}
 }
+
+// TestMain lets the test binary stand in for folder-sync itself: signed in, folder-sync's credential process is
+// `<its own binary> credentials`, so with FOLDER_SYNC_TEST_AS_MAIN=1 this binary runs folder-sync's commands.
+func TestMain(m *testing.M) {
+	if os.Getenv("FOLDER_SYNC_TEST_AS_MAIN") == "1" {
+		os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	}
+	os.Exit(m.Run())
+}
+
+// twoPeople is the accounts Worker for two people signing in on one machine, one after the other: the device grant
+// hands out the token of whoever is next, and each token's /fs/v1/me and credentials are that person's.
+type twoPeople struct {
+	mu   sync.Mutex
+	next string
+}
+
+var twoPeopleIDs = map[string]string{"A": "userAAAA1111", "B": "userBBBB2222"}
+
+func (p *twoPeople) start(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		who := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer tok-")
+		id, known := twoPeopleIDs[who]
+		switch r.Method + " " + r.URL.Path {
+		case "POST /fs/api/auth/device/code":
+			io.WriteString(w, `{"device_code":"dc","user_code":"WXYZ2345","verification_uri":"http://`+r.Host+`/fs/device","verification_uri_complete":"http://`+r.Host+`/fs/device?user_code=WXYZ2345","expires_in":900,"interval":1}`)
+		case "POST /fs/api/auth/device/token":
+			io.WriteString(w, `{"access_token":"tok-`+p.next+`","token_type":"Bearer","expires_in":100,"scope":""}`)
+		case "GET /fs/v1/me", "POST /fs/v1/credentials":
+			if !known {
+				w.WriteHeader(401)
+				io.WriteString(w, `{"error":"signed_out","why":"not signed in"}`)
+				return
+			}
+			if r.URL.Path == "/fs/v1/me" {
+				io.WriteString(w, `{"user":{"id":"`+id+`","email":"`+strings.ToLower(who)+`@example.com"},"root":"users/`+id+`/","app":null}`)
+				return
+			}
+			io.WriteString(w, processOutput("http://127.0.0.1:1", "users/"+id+"/", "folder-sync"))
+		case "POST /fs/v1/sign-out":
+			io.WriteString(w, `{"ok":true}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// Review r1 #1: login and logout change account.json, and the cached keys in session.json must follow it.
+func TestAnotherPersonsLoginNeverGetsTheCachedKeys(t *testing.T) {
+	l, _ := sandbox(t)
+	people := &twoPeople{next: "A"}
+	srv := people.start(t)
+	t.Setenv(account.EnvServer, srv.URL)
+	t.Setenv("FOLDER_SYNC_TEST_AS_MAIN", "1") // read by the credential process (this binary), not by this test
+	prefix := func(step string) string {
+		t.Helper()
+		c, err := creds.NewResolver(l.Credentials, l.Session, credentialEnv(l, os.Getenv, os.Executable)).Current()
+		if err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		return c.Prefix
+	}
+	login := func(who string) {
+		t.Helper()
+		people.mu.Lock()
+		people.next = who
+		people.mu.Unlock()
+		if code, _, errOut := runCmd("login"); code != 0 {
+			t.Fatalf("login as %s: %d %q", who, code, errOut)
+		}
+	}
+	login("A")
+	if got := prefix("A signed in"); got != "users/userAAAA1111/" {
+		t.Fatalf("A signed in: %q", got)
+	}
+	cachedA, err := os.ReadFile(l.Session)
+	if err != nil {
+		t.Fatal("A's keys were not cached:", err)
+	}
+	if code, _, errOut := runCmd("logout"); code != 0 {
+		t.Fatalf("logout: %d %q", code, errOut)
+	}
+	login("B")
+	if got := prefix("B signed in after A logged out"); got != "users/userBBBB2222/" {
+		t.Fatalf("B's next credential belongs to %q: A's cached keys outlived A's sign-in", got)
+	}
+	// A's cache back on disk (a copy that survived somehow) is never B's: its identity is not account.json's
+	if err := os.WriteFile(l.Session, cachedA, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := prefix("A's old cache beside B's account.json"); got != "users/userBBBB2222/" {
+		t.Fatalf("a cache for A was used while account.json is B: %q", got)
+	}
+	// and a login on top of another, with no logout between, starts from nothing too
+	login("A")
+	if got := prefix("A signed in over B"); got != "users/userAAAA1111/" {
+		t.Fatalf("A signed in over B: %q", got)
+	}
+}
