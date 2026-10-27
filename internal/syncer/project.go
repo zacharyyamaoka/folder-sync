@@ -3,6 +3,7 @@
 package syncer
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -285,9 +286,15 @@ func (p *Project) HostsPrefix() string {
 	return p.Root + p.Config.Project + "/hosts"
 }
 
-// Stamp formats a round's UTC time for trash folders.
+// Stamp names a round's trash folder (and its conflict copies): the round's UTC second, then the millisecond and 8
+// random hex digits (20261025T120000Z-789-1f2e3d4c), as the web host's trash. WHY unique (review r2 #9): two rounds
+// in one second replacing the same path would move both old versions onto one key, and the second would overwrite
+// the first; WHY the second first: anything sorting or grouping the trash by its second still reads it.
 func Stamp(t time.Time) string {
-	return t.UTC().Format("20060102T150405Z")
+	nonce := make([]byte, 4)
+	rand.Read(nonce)
+	u := t.UTC()
+	return fmt.Sprintf("%s-%03d-%s", u.Format("20060102T150405Z"), u.Nanosecond()/1_000_000, hex.EncodeToString(nonce))
 }
 
 // State files.
