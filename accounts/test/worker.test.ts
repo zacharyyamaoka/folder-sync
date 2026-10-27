@@ -1378,3 +1378,27 @@ test("review r4 #1: a delete's pending cleanup never erases a later replacement 
 	const counted = (await store.usage(OWNER.userId))!;
 	assert.deepEqual({ bytes: counted.bytes, objects: counted.objects }, stored(s3, OWNER));
 });
+
+test("review r4 #2: a purge never destroys a backup a cut-off change still needs; a restore from nothing is no restore", async () => {
+	const s3 = people();
+	const { core, storage, op, put } = await folderObject(s3);
+	const base = `users/${OWNER.userId}/robotparts/hosts/${WEB}/`;
+	assert.equal((await put("saved/x.json", "old\n")).status, 200);
+	cutOff(s3); // the manifest PUT and the undo COPY both fail
+	assert.equal((await put("saved/x.json", "new\n")).status, 503);
+	const purge = await op("PURGE_TRASH", "");
+	assert.equal(purge.status, 503, "the folder is recovering: no purge (the review saw 200 and the backup gone)");
+	assert.ok([...s3.objects.keys()].some((k) => k.includes("/_trash/") && k.endsWith("saved/x.json") && s3.text(k) === "old\n"), "the backup is still there");
+	s3.fail = null;
+	await core.alarm();
+	assert.equal(s3.text(`${base}saved/x.json`), "old\n");
+	assert.deepEqual(mismatched(s3), []);
+	// a backup that is gone: the restore cannot happen, so the change stays journalled, and reads say so
+	cutOff(s3);
+	assert.equal((await put("saved/x.json", "newer\n")).status, 503);
+	s3.fail = null;
+	for (const k of [...s3.objects.keys()].filter((k) => k.includes("/_trash/") && k.endsWith("saved/x.json") && s3.text(k) === "old\n")) s3.objects.delete(k);
+	await core.alarm();
+	assert.ok(storage.data.get("pending"), "the journal stays: a COPY from nothing is a failure (the review saw it cleared)");
+	assert.equal((await op("SETTLE", "")).status, 503);
+});
