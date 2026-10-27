@@ -485,6 +485,127 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 		}
 	})
 
+	t.Run("over quota: a lost answer is asked for again with the same job, and the round still pulls", func(t *testing.T) {
+		// review r3 #2. The stand-in endpoint keeps each job's answer (as the Worker's folder object does); the first
+		// time it commits the delete but the answer is lost (502). Then a delete whose job file is gone: the server
+		// says the manifest moved on (409), and the read-only round adopts the bucket's own manifest (a read).
+		minted := func() map[string]any {
+			out, err := exec.Command(standin, "mint", "--account", account, "--parent", parentID+":"+parentSecret,
+				"--endpoint", endpoint, "--bucket", scopedBucket, "--prefix", rootA, "--ttl", "15m").Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var c map[string]any
+			json.Unmarshal(out, &c)
+			return c
+		}
+		send := func(method, key string, body []byte) []byte {
+			c := minted()
+			req, _ := http.NewRequest(method, endpoint+"/"+scopedBucket+"/"+key, bytes.NewReader(body))
+			sum := sha256.Sum256(body)
+			s3.SignWithToken(req, fmt.Sprint(c["AccessKeyId"]), fmt.Sprint(c["SecretAccessKey"]), fmt.Sprint(c["SessionToken"]), "auto", time.Now(), hex.EncodeToString(sum[:]))
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			data, _ := io.ReadAll(resp.Body)
+			return data
+		}
+		type call struct {
+			Job     string   `json:"job"`
+			FromSeq int64    `json:"from_seq"`
+			Paths   []string `json:"paths"`
+		}
+		var calls []call
+		answers := map[string]string{}
+		lose := true
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body call
+			json.NewDecoder(r.Body).Decode(&body)
+			calls = append(calls, body)
+			if answer, ok := answers[body.Job]; ok && body.Job != "" {
+				w.Header().Set("Content-Type", "application/json")
+				io.WriteString(w, answer)
+				return
+			}
+			var stored map[string]any
+			json.Unmarshal(send("GET", rootA+"home/hosts/"+idA1+"/manifest.json", nil), &stored)
+			if int64(stored["seq"].(float64)) != body.FromSeq {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(409)
+				io.WriteString(w, `{"error":"manifest_changed","why":"sync again"}`)
+				return
+			}
+			gone := map[string]bool{}
+			for _, path := range body.Paths {
+				gone[path] = true
+			}
+			var files []any
+			for _, f := range stored["files"].([]any) {
+				if !gone[f.(map[string]any)["path"].(string)] {
+					files = append(files, f)
+				}
+			}
+			stored["files"], stored["seq"], stored["generated_at"] = files, body.FromSeq+1, time.Now().UTC().Format(time.RFC3339)
+			next, _ := json.Marshal(stored)
+			send("PUT", rootA+"home/hosts/"+idA1+"/manifest.json", next)
+			for _, path := range body.Paths {
+				send("DELETE", rootA+"home/hosts/"+idA1+"/"+path, nil)
+			}
+			answers[body.Job] = fmt.Sprintf(`{"seq":%d,"deleted":%s,"pending":[],"manifest":%s}`, body.FromSeq+1, mustJSON(body.Paths), next)
+			if lose {
+				lose = false
+				w.WriteHeader(502) // committed, but the answer never arrives
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, answers[body.Job])
+		}))
+		defer server.Close()
+		accountJSON := filepath.Join(a1.home, ".folder-sync", "account.json")
+		os.WriteFile(accountJSON, []byte(`{"schema":"folder-sync-account/1","server":"`+server.URL+`","token":"tok-a1","user":{"id":"aaa","email":"a@example.com"}}`), 0o600)
+		defer os.Remove(accountJSON)
+		// a file that stays, so the folder never looks empty (that guard is its own refusal)
+		writeFile(t, filepath.Join(a1.folder, "tracks", "keep.md"), "keep\n", time.Time{})
+		w.must(a1, "sync", "--once")
+		argv, _ := json.Marshal([]string{filepath.Join(work, "read-only.sh")})
+		normal := a1.env[len(a1.env)-1]
+		a1.env = append(a1.env[:len(a1.env)-1], "FOLDER_SYNC_CREDENTIAL_PROCESS="+string(argv))
+		defer func() { a1.env = append(a1.env[:len(a1.env)-1], normal) }()
+
+		writeFile(t, filepath.Join(a2.folder, "tracks", "lost-answer.md"), "while A1's answer was lost\n", time.Time{})
+		w.must(a2, "sync", "--once")
+		os.Remove(filepath.Join(a1.folder, "tracks", "new.md"))
+		out, code := w.run(a1, "sync", "--once", "--discover")
+		if code == 0 {
+			t.Fatalf("a lost answer is a failed round: %s", out)
+		}
+		if got, err := os.ReadFile(filepath.Join(a1.folder, "hosts", idA2, "tracks", "lost-answer.md")); err != nil || string(got) != "while A1's answer was lost\n" {
+			t.Fatalf("a round whose delete answer was lost must still pull: %v\n%s", err, out)
+		}
+		out, code = w.run(a1, "sync", "--once")
+		if code != 0 || len(calls) != 2 || calls[0].Job == "" || calls[1].Job != calls[0].Job || calls[1].FromSeq != calls[0].FromSeq {
+			t.Fatalf("the next round asks for the same job again and takes its answer: exit %d, calls %+v\n%s", code, calls, out)
+		}
+		// a job whose file is gone: the next delete names an old seq; the server says the manifest moved on, and the
+		// read-only round takes the bucket's own manifest, so the round after is clean
+		writeFile(t, filepath.Join(a1.folder, "tracks", "two.md"), "two\n", time.Time{})
+		a1.env = append(a1.env[:len(a1.env)-1], normal)
+		w.must(a1, "sync", "--once")
+		a1.env = append(a1.env[:len(a1.env)-1], "FOLDER_SYNC_CREDENTIAL_PROCESS="+string(argv))
+		send("PUT", rootA+"home/hosts/"+idA1+"/manifest.json", bumpSeq(t, send("GET", rootA+"home/hosts/"+idA1+"/manifest.json", nil)))
+		os.Remove(filepath.Join(a1.folder, "tracks", "two.md"))
+		w.run(a1, "sync", "--once")
+		out, code = w.run(a1, "sync", "--once")
+		if code != 0 || len(calls) != 4 || calls[3].FromSeq != calls[2].FromSeq+1 {
+			t.Fatalf("after a 409 the round adopts the bucket's manifest and deletes from its seq: exit %d, calls %+v\n%s", code, calls, out)
+		}
+		if _, ok := w.object(rootA + "home/hosts/" + idA1 + "/tracks/two.md"); ok {
+			t.Fatal("two.md is still in the bucket")
+		}
+	})
+
 	t.Run("signed out: exit 4 and the cached keys are dropped", func(t *testing.T) {
 		script := filepath.Join(work, "signed-out.sh")
 		os.WriteFile(script, []byte("#!/bin/sh\necho 'this machine is signed out' >&2\nexit 3\n"), 0o755)
@@ -506,4 +627,15 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 func mustJSON(v any) string {
 	data, _ := json.Marshal(v)
 	return string(data)
+}
+
+// bumpSeq is a host's manifest published once more by itself (seq + 1), as a round the local copy never saw.
+func bumpSeq(t *testing.T, data []byte) []byte {
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["seq"] = m["seq"].(float64) + 1
+	out, _ := json.Marshal(m)
+	return out
 }
