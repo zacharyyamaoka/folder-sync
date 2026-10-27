@@ -64,8 +64,10 @@ export class MemoryStore implements Store {
 		return this.usageRows.get(owner) ?? null;
 	}
 
-	async setUsage(owner: string, bytes: number, objects: number, measuredAt: string) {
+	async setUsage(owner: string, bytes: number, objects: number, measuredAt: string, token?: string) {
+		if (token !== undefined && this.claims.get(owner)?.token !== token) return false;
 		this.usageRows.set(owner, { bytes, objects, measured_at: measuredAt });
+		return true;
 	}
 
 	async addUsage(owner: string, bytes: number, objects: number) {
@@ -73,11 +75,11 @@ export class MemoryStore implements Store {
 		if (row) this.usageRows.set(owner, { ...row, bytes: row.bytes + bytes, objects: row.objects + objects });
 	}
 
-	readonly claims = new Map<string, number>();
+	readonly claims = new Map<string, { until: number; token: string }>();
 
-	async claimMeasurement(owner: string, now: number, until: number) {
-		if ((this.claims.get(owner) ?? 0) >= now) return false;
-		this.claims.set(owner, until);
+	async claimMeasurement(owner: string, now: number, until: number, token: string) {
+		if ((this.claims.get(owner)?.until ?? 0) >= now) return false;
+		this.claims.set(owner, { until, token });
 		if (!this.usageRows.has(owner)) this.usageRows.set(owner, { bytes: 0, objects: 0, measured_at: "" });
 		return true;
 	}

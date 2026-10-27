@@ -32,7 +32,7 @@
 import { appFor, apps, OWN_APP, type App } from "./apps.ts";
 import { folderPrefix, mint, NotConfigured, PROJECT, ttlOf, USER_ID, userRoot, type CredsEnv } from "./creds.ts";
 import { checkPath, ContractError, Project, SCHEMA, validateManifest, type Manifest, type ManifestEntry } from "../../readers/worker/src/folder-sync-read.ts";
-import { Measuring, overQuota, quotaOf, usageOf, type QuotaEnv } from "./quota.ts";
+import { Measuring, overQuota, quotaOf, TooOld, usageOf, type QuotaEnv } from "./quota.ts";
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store, Visibility } from "./store.ts";
 import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhost.ts";
@@ -311,7 +311,14 @@ async function credentials(request: Request, env: Env, deps: Deps, app: App | nu
 	// WHY here: a machine writes to R2 directly and R2 scopes a prefix, never a size, so an account over its quota
 	// gets read-only keys (review r1 #7, r2 #7): it can still pull, its uploads wait, and its deletes go through
 	// POST …/hosts/<host>/delete, which lowers the usage; the read-write keys it holds run out within the TTL
-	const over = await quotaRefusal(env, deps, person.userId);
+	let over: string | null;
+	try {
+		over = await quotaRefusal(env, deps, person.userId);
+	} catch (error) {
+		// a measurement too old to admit writes on (review r3 #7): read-only keys, so it can still pull and delete
+		if (!(error instanceof TooOld)) throw error;
+		over = error.message;
+	}
 	if (over) return json(200, { ...(await mint(env, userRoot(person.userId), "object-read-only", ttlOf(env), deps.now())), ReadOnly: true, Reason: over });
 	const minted = await mint(env, userRoot(person.userId), "object-read-write", ttlOf(env), deps.now()); // fs-mutation: the session's root
 	return json(200, minted);

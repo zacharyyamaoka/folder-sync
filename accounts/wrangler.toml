@@ -60,6 +60,8 @@ SYNC_CREDENTIAL_TTL_S = "300"
 QUOTA_BYTES = "1073741824"
 QUOTA_OBJECTS = "100000"
 QUOTA_RECHECK_S = "300"
+# A measurement older than this (s) admits no new writes when no newer one can be taken: read-only keys, web writes 503
+QUOTA_MAX_AGE_S = "3600"
 # Secrets, set once by the operator (never in this file): BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
 # R2_PARENT_ACCESS_KEY_ID, R2_PARENT_SECRET_ACCESS_KEY, and SIGN_UP_EMAILS (who may create an account, comma-separated;
 # unset means nobody new, "*" anyone; it holds real emails, so it is a secret). Until they are set, sign-in answers 503

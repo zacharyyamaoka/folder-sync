@@ -143,7 +143,7 @@ export function devVars(p, k, env = process.env) {
 		R2_PARENT_SECRET_ACCESS_KEY: k.parentSecret,
 		SIGN_UP_EMAILS: env.SIGN_UP_EMAILS || "*",
 		// a quota of the caller's (the proof restarts with QUOTA_BYTES=1); unset, wrangler.toml's
-		...Object.fromEntries(["QUOTA_BYTES", "QUOTA_OBJECTS", "QUOTA_RECHECK_S"].filter((name) => env[name]).map((name) => [name, env[name]])),
+		...Object.fromEntries(["QUOTA_BYTES", "QUOTA_OBJECTS", "QUOTA_RECHECK_S", "QUOTA_MAX_AGE_S"].filter((name) => env[name]).map((name) => [name, env[name]])),
 	};
 }
 

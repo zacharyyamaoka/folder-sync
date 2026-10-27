@@ -30,11 +30,14 @@ export interface Store {
 	ensureWebHost(owner: string, project: string, candidate: string, now: string): Promise<string>;
 	/** The person's storage as last measured (quota.ts), or null before the first measurement. */
 	usage(owner: string): Promise<{ bytes: number; objects: number; measured_at: string } | null>;
-	setUsage(owner: string, bytes: number, objects: number, measuredAt: string): Promise<void>;
+	/** Stores a measurement; with `token`, only while that claim is still the person's (review r3 #7): false when a
+	 *  newer claim has taken over, and nothing is written. */
+	setUsage(owner: string, bytes: number, objects: number, measuredAt: string, token?: string): Promise<boolean>;
 	/** Adds what the web host just wrote to the last measurement (none yet: nothing to add to). */
 	addUsage(owner: string, bytes: number, objects: number): Promise<void>;
-	/** Claims the person's next measurement until `until` (ms): true for exactly one caller while no claim is live. */
-	claimMeasurement(owner: string, now: number, until: number): Promise<boolean>;
+	/** Claims the person's next measurement until `until` (ms), as `token`: true for exactly one caller while no claim
+	 *  is live. */
+	claimMeasurement(owner: string, now: number, until: number, token: string): Promise<boolean>;
 }
 
 /** The subset of Cloudflare's D1Database binding used here. */
@@ -90,20 +93,25 @@ export function d1Store(db: D1Like): Store {
 			return id;
 		},
 		usage: (owner) => one<{ bytes: number; objects: number; measured_at: string }>('SELECT bytes, objects, measured_at FROM "usage" WHERE owner_id = ?', owner),
-		async setUsage(owner, bytes, objects, measuredAt) {
+		async setUsage(owner, bytes, objects, measuredAt, token) {
+			if (token !== undefined) {
+				const done = await run('UPDATE "usage" SET bytes = ?, objects = ?, measured_at = ? WHERE owner_id = ? AND claim_token = ?', bytes, objects, measuredAt, owner, token);
+				return (done.meta?.changes ?? 0) > 0;
+			}
 			await run(
 				'INSERT INTO "usage" (owner_id, bytes, objects, measured_at) VALUES (?, ?, ?, ?) ON CONFLICT (owner_id) DO UPDATE SET bytes = excluded.bytes, objects = excluded.objects, measured_at = excluded.measured_at',
 				owner, bytes, objects, measuredAt,
 			);
+			return true;
 		},
 		async addUsage(owner, bytes, objects) {
 			await run('UPDATE "usage" SET bytes = bytes + ?, objects = objects + ? WHERE owner_id = ?', bytes, objects, owner);
 		},
-		async claimMeasurement(owner, now, until) {
+		async claimMeasurement(owner, now, until, token) {
 			// one statement: a first claim inserts an unmeasured row (measured_at ''), a later one moves an expired claim
 			const done = await run(
-				'INSERT INTO "usage" (owner_id, bytes, objects, measured_at, claimed_until) VALUES (?, 0, 0, \'\', ?) ON CONFLICT (owner_id) DO UPDATE SET claimed_until = excluded.claimed_until WHERE "usage".claimed_until < ?',
-				owner, until, now,
+				'INSERT INTO "usage" (owner_id, bytes, objects, measured_at, claimed_until, claim_token) VALUES (?, 0, 0, \'\', ?, ?) ON CONFLICT (owner_id) DO UPDATE SET claimed_until = excluded.claimed_until, claim_token = excluded.claim_token WHERE "usage".claimed_until < ?',
+				owner, until, token, now,
 			);
 			return (done.meta?.changes ?? 0) > 0;
 		},

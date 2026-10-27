@@ -17,12 +17,15 @@ export interface QuotaEnv {
 	QUOTA_OBJECTS?: string;
 	/** How old a measurement may be before it is taken again, in seconds (default 300). */
 	QUOTA_RECHECK_S?: string;
+	/** How old a measurement may be and still admit writes when no newer one can be taken (default 3600). */
+	QUOTA_MAX_AGE_S?: string;
 }
 
 export interface Quota {
 	bytes: number;
 	objects: number;
 	recheckS: number;
+	maxAgeS: number;
 }
 
 export interface Usage {
@@ -37,11 +40,14 @@ function positive(value: string | undefined, fallback: number): number {
 }
 
 export function quotaOf(env: QuotaEnv): Quota {
-	return { bytes: positive(env.QUOTA_BYTES, 1024 ** 3), objects: positive(env.QUOTA_OBJECTS, 100_000), recheckS: positive(env.QUOTA_RECHECK_S, 300) };
+	return { bytes: positive(env.QUOTA_BYTES, 1024 ** 3), objects: positive(env.QUOTA_OBJECTS, 100_000), recheckS: positive(env.QUOTA_RECHECK_S, 300), maxAgeS: positive(env.QUOTA_MAX_AGE_S, 3600) };
 }
 
 /** No measurement can be had yet: another is under way, or the last one failed less than a minute ago (503). */
 export class Measuring extends Error {}
+/** The last measurement is older than QUOTA_MAX_AGE_S and no newer one can be had: reads and deletes go on, new write
+ *  access waits (review r3 #7: read-only keys, web writes 503). */
+export class TooOld extends Measuring {}
 
 /** How long a measurement's claim lasts: one measurement per person in that time, and a failed one is not retried
  *  sooner (review r2 #8). */
@@ -55,19 +61,27 @@ export async function usageOf(store: Store, owner: string, quota: Quota, now: nu
 	const cached = await store.usage(owner);
 	const known = cached && cached.measured_at ? cached : null;
 	if (known && now - Date.parse(known.measured_at) < quota.recheckS * 1000) return known;
-	if (!(await store.claimMeasurement(owner, now, now + CLAIM_MS))) {
-		if (known) return known;
-		throw new Measuring("this account's storage is being measured (or could not be, just now); try again in a minute");
-	}
+	// WHY a bound (review r3 #7): without one, a listing that keeps failing would admit writes on a figure of any age
+	const fallback = (why: string): Usage => {
+		if (known && now - Date.parse(known.measured_at) <= quota.maxAgeS * 1000) return known;
+		if (known) throw new TooOld(`this account's storage was last measured ${Math.round((now - Date.parse(known.measured_at)) / 60_000)} min ago and ${why}: reads and deletes go on, writes wait`);
+		throw new Measuring(`this account's storage ${why}; try again in a minute`);
+	};
+	const token = crypto.randomUUID();
+	if (!(await store.claimMeasurement(owner, now, now + CLAIM_MS, token))) return fallback("is being measured (or could not be, just now)");
 	let counted: { bytes: number; objects: number };
 	try {
 		counted = await measure();
 	} catch (error) {
-		if (known) return known;
-		throw new Measuring(`this account's storage could not be measured (${error instanceof Error ? error.message : String(error)}); try again in a minute`);
+		return fallback(`could not be measured (${error instanceof Error ? error.message : String(error)})`);
 	}
 	const measured = { ...counted, measured_at: new Date(now).toISOString() };
-	await store.setUsage(owner, measured.bytes, measured.objects, measured.measured_at);
+	// WHY fenced by the claim's token (review r3 #7): a listing that outlived its claim must not overwrite the newer
+	// measurement of whoever claimed after it; that one stands
+	if (!(await store.setUsage(owner, measured.bytes, measured.objects, measured.measured_at, token))) {
+		const newer = await store.usage(owner);
+		return newer && newer.measured_at ? newer : measured;
+	}
 	return measured;
 }
 

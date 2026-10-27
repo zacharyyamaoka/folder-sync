@@ -1037,10 +1037,11 @@ test("the store's SQL runs against the migrations applied in order on SQLite, D1
 	};
 	db.prepare('INSERT INTO "user" (id, name, email, emailVerified, createdAt, updatedAt) VALUES (?, ?, ?, 1, ?, ?)').run(OWNER.userId, "Owner", OWNER.email, "2026-10-26", "2026-10-26");
 	const store = d1Store(d1);
-	assert.equal(await store.claimMeasurement(OWNER.userId, 1000, 61_000), true, "the first claim");
-	assert.equal(await store.claimMeasurement(OWNER.userId, 2000, 62_000), false, "a second while the first is live");
-	assert.equal(await store.claimMeasurement(OWNER.userId, 61_001, 121_001), true, "once it has run out");
-	await store.setUsage(OWNER.userId, 100, 2, "2026-10-26T12:00:00.000Z");
+	assert.equal(await store.claimMeasurement(OWNER.userId, 1000, 61_000, "claim-a"), true, "the first claim");
+	assert.equal(await store.claimMeasurement(OWNER.userId, 2000, 62_000, "claim-x"), false, "a second while the first is live");
+	assert.equal(await store.claimMeasurement(OWNER.userId, 61_001, 121_001, "claim-b"), true, "once it has run out");
+	assert.equal(await store.setUsage(OWNER.userId, 0, 0, "2026-10-26T11:00:00.000Z", "claim-a"), false, "the outlived claim's result is fenced off (review r3 #7)");
+	assert.equal(await store.setUsage(OWNER.userId, 100, 2, "2026-10-26T12:00:00.000Z", "claim-b"), true);
 	await store.addUsage(OWNER.userId, -40, -1);
 	assert.deepEqual({ ...(await store.usage(OWNER.userId)) }, { bytes: 60, objects: 1, measured_at: "2026-10-26T12:00:00.000Z" });
 	assert.equal(await store.ensureWebHost(OWNER.userId, "robotparts", WEB, "2026-10-26"), WEB);

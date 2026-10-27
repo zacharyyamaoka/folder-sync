@@ -2,5 +2,6 @@
 	"_why": "Each migration's sha256 as it was first committed. A written migration never changes (D1 applies each file once, by name); a change is a new file. test/worker.test.ts checks every file against this.",
 	"0001_accounts.sql": "7c94f9722bd5e711ff9182706edce1078d4e4d2c98ddfe2a461c8ee7afae63fb",
 	"0002_usage.sql": "cef498547a78a769db9871b0fcf8b8f04cee209ed5631644ca09b4d48aa66888",
-	"0003_usage_claim.sql": "a5b3a4187615da170632d2c77fa5926a1b5faaa2158b75fe005b5bf651256b6b"
+	"0003_usage_claim.sql": "a5b3a4187615da170632d2c77fa5926a1b5faaa2158b75fe005b5bf651256b6b",
+	"0004_usage_claim_token.sql": "6be6b7aae26392fc8e4bf96ca8c2e89df9bb4aa414a992377d3e7f0b32e4882d"
 }
