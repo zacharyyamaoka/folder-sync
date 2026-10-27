@@ -1547,3 +1547,43 @@ test("review r5 #1: GET /fs/v1/usage names whose usage it is, so a page can refu
 	assert.equal((await (await call(handle, env(), deps, "/fs/v1/usage", { headers: cookie(OWNER) })).json()).owner, OWNER.userId);
 	assert.equal((await (await call(handle, env(), deps, "/fs/v1/usage", { headers: cookie(SISTER) })).json()).owner, SISTER.userId);
 });
+
+test("review r5 #2: a deletion credit that lands after a complete measurement never takes the figure below what is stored", async () => {
+	const s3 = people();
+	const base = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/`;
+	const m = JSON.parse(s3.text(`${base}manifest.json`)!);
+	for (const [path, size] of [["cad/big.bin", 50_000], ["cad/other.bin", 11_000]] as const) {
+		const body = "b".repeat(size);
+		m.files.push({ path, size, mtime: "2026-10-26T11:00:00Z", sha256: createHash("sha256").update(body).digest("hex"), written_at: "2026-10-26T12:00:00Z" });
+		s3.put(`${base}${path}`, body);
+	}
+	s3.put(`${base}manifest.json`, JSON.stringify(m));
+	const store = new MemoryStore();
+	let now = Date.parse("2026-10-27T12:00:00Z");
+	const { deps } = fakeDeps(s3, store, { now: () => now });
+	const tight = env({ QUOTA_BYTES: "1000" });
+	const keys = async () => (await call(handle, tight, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } })).json();
+	assert.equal((await keys()).ReadOnly, true);
+	// the per-file credit waits; meanwhile a complete measurement already sees the file gone
+	const real = store.addUsage.bind(store);
+	let release!: () => void;
+	const gate = new Promise<void>((done) => { release = done; });
+	let reached!: () => void;
+	const atCredit = new Promise<void>((done) => { reached = done; });
+	store.addUsage = async (owner: string, bytes: number, objects: number) => {
+		if (objects < 0) { reached(); await gate; }
+		return real(owner, bytes, objects);
+	};
+	const del = call(handle, tight, deps, `/fs/v1/folders/robotparts/hosts/${MACHINE}/delete`, { origin: OWN, method: "POST",
+		headers: { Authorization: "Bearer token-owner-laptop", "Content-Type": "application/json" }, body: JSON.stringify({ job: JOB, from_seq: m.seq, paths: ["cad/big.bin"] }) });
+	await atCredit;
+	now += 601_000;
+	assert.equal((await call(handle, tight, deps, "/fs/v1/usage", { headers: cookie(OWNER) })).status, 200);
+	release();
+	assert.equal((await del).status, 200);
+	const counted = (await store.usage(OWNER.userId))!;
+	assert.ok(counted.bytes >= 0, `the review saw the figure go to −38 KB: ${counted.bytes}`);
+	assert.equal((await keys()).ReadOnly, true, "still over (11 KB stored against 1 KB): no write access");
+	const after = (await store.usage(OWNER.userId))!;
+	assert.deepEqual({ bytes: after.bytes, objects: after.objects }, stored(s3, OWNER), "measured again: the figure is what is stored");
+});
