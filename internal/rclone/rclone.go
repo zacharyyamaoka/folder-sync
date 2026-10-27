@@ -39,7 +39,15 @@ type Runner struct {
 	Log    io.Writer     // rclone's stderr, scrubbed of the key
 	Debug  bool          // -vv instead of NOTICE-level logging
 	Trace  *trace.Writer // per-process timing (FOLDER_SYNC_TRACE); nil = off
+	// FailFast trims rclone's own retries (`sync --watch`): a call against a storage server that is down then fails
+	// in seconds instead of minutes. WHY only for --watch: its loop runs the next round anyway, and a person (the
+	// desktop app's tray) must see "offline" while it is true, not "syncing" for minutes; a one-off `sync --once`
+	// from cron keeps rclone's full retries.
+	FailFast bool
 }
+
+// FailFastFlags are added to every call when FailFast is set.
+var FailFastFlags = []string{"--retries", "1", "--low-level-retries", "2", "--contimeout", "5s"}
 
 // GlobalFlags are passed to every rclone call.
 func (r Runner) GlobalFlags() []string {
@@ -47,12 +55,16 @@ func (r Runner) GlobalFlags() []string {
 	if r.Debug {
 		level = "DEBUG"
 	}
-	return []string{
+	flags := []string{
 		"--config", r.Layout.RcloneConf,
 		"--cache-dir", r.Layout.Cache,
 		"--temp-dir", r.Layout.Tmp,
 		"--log-level", level,
 	}
+	if r.FailFast {
+		flags = append(flags, FailFastFlags...)
+	}
+	return flags
 }
 
 // Env is the process environment for rclone: the caller's, minus any RCLONE_*

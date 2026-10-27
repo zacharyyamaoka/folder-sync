@@ -465,6 +465,7 @@ func cmdSync(args []string, out io.Writer) error {
 }
 
 func watchLoop(p *syncer.Project, out io.Writer, noPush bool, ev *eventWriter) error {
+	p.Rclone.FailFast = true // a down server shows as a failed round in seconds; the loop tries again (rclone.FailFast)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	interval := p.Config.IntervalDuration()
@@ -513,7 +514,7 @@ func watchLoop(p *syncer.Project, out io.Writer, noPush bool, ev *eventWriter) e
 			if ctx.Err() != nil {
 				break
 			}
-			kind, why := classify(err)
+			kind, why := classifyRound(err, p.Rclone.Creds.Endpoint, hubServer(p))
 			ev.emit(syncEvent{Event: "round", OK: boolPtr(false), Kind: kind, Why: why, Ms: time.Since(started).Milliseconds()})
 			fmt.Fprintf(out, "%s round failed: %v\n", time.Now().Format("15:04:05"), err)
 		} else {
@@ -615,6 +616,15 @@ func announceOnce(p *syncer.Project) {
 	if err := push.AnnounceOnce(context.Background(), u, token, userAgent(p.Layout), p.Host.ID, p.ManifestSeq(), 5*time.Second); err != nil {
 		p.Trace.Event("hub", map[string]any{"state": "announce failed"})
 	}
+}
+
+// hubServer is the account server this machine syncs through, or "" (for the offline probe of a failed round).
+func hubServer(p *syncer.Project) string {
+	server, _, ok := hubAccount(p)
+	if !ok {
+		return ""
+	}
+	return server
 }
 
 // hubAccount is the account server and token the hub is reached with, when this machine syncs through its account.

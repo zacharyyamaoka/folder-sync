@@ -6,7 +6,10 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -98,3 +101,46 @@ func classify(err error) (kind, why string) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// probeTimeout bounds the reachability check a failed round makes.
+const probeTimeout = 3 * time.Second
+
+// unreachable dials each endpoint (an http(s) URL) and returns the first that does not answer, with why.
+// WHY a dial and not only the error text: rclone words a refused connection in ways that do not say so (its S3
+// backend reports "is a file not a directory" when the HEAD it uses to tell files from folders fails), so a round's
+// error alone cannot tell "the server is down" from "something is wrong"; one TCP dial can.
+func unreachable(dial func(network, address string, timeout time.Duration) (net.Conn, error), endpoints ...string) (string, bool) {
+	for _, endpoint := range endpoints {
+		u, err := url.Parse(endpoint)
+		if err != nil || u.Host == "" {
+			continue
+		}
+		host := u.Host
+		if u.Port() == "" {
+			if u.Scheme == "http" || u.Scheme == "ws" {
+				host = net.JoinHostPort(u.Hostname(), "80")
+			} else {
+				host = net.JoinHostPort(u.Hostname(), "443")
+			}
+		}
+		conn, err := dial("tcp", host, probeTimeout)
+		if err != nil {
+			return fmt.Sprintf("%s does not answer (%v)", u.Host, err), true
+		}
+		conn.Close()
+	}
+	return "", false
+}
+
+// classifyRound is classify, plus: an unrecognised failure while the storage or account server does not answer is
+// offline.
+func classifyRound(err error, endpoints ...string) (kind, why string) {
+	kind, why = classify(err)
+	if kind == KindError {
+		if reason, down := unreachable(net.DialTimeout, endpoints...); down {
+			return KindOffline, reason
+		}
+	}
+	return kind, why
+}
+

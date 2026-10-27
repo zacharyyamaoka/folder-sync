@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -227,3 +228,26 @@ func TestSyncEventsNeedsWatch(t *testing.T) {
 		t.Fatalf("--events without --watch: %d %q", code, errOut)
 	}
 }
+
+func TestAFailedRoundAgainstADownServerIsOffline(t *testing.T) {
+	// a port nothing listens on: bind one, note it, close it
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	down := "http://" + l.Addr().String()
+	l.Close()
+	up := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(up.Close)
+	rcloneSaid := errors.New(`push: rclone copy failed: exit status 1: CRITICAL: Failed to create file system for "fsremote:x": is a file not a directory`)
+	if kind, why := classifyRound(rcloneSaid, down, up.URL); kind != KindOffline || !strings.Contains(why, "does not answer") {
+		t.Fatalf("storage down: %q %q", kind, why)
+	}
+	if kind, _ := classifyRound(rcloneSaid, up.URL, ""); kind != KindError {
+		t.Fatalf("everything answers: the error stays an error, got %q", kind)
+	}
+	if kind, _ := classifyRound(&account.OverQuotaError{Why: "full"}, down); kind != KindOverQuota {
+		t.Fatalf("a known kind is not re-sorted by the probe: %q", kind)
+	}
+}
+

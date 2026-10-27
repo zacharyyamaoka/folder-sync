@@ -93,3 +93,17 @@ func TestVersionPassesTheConfigUnderFolderSync(t *testing.T) {
 		t.Errorf("--config = %q in %q", conf, argv)
 	}
 }
+
+func TestFailFastTrimsRetriesOnlyWhenAsked(t *testing.T) {
+	r := Runner{}
+	if strings.Contains(strings.Join(r.GlobalFlags(), " "), "--retries") {
+		t.Fatalf("default flags trim retries: %q", r.GlobalFlags())
+	}
+	r.FailFast = true
+	joined := strings.Join(r.GlobalFlags(), " ")
+	for _, want := range []string{"--retries 1", "--low-level-retries 2", "--contimeout 5s"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("FailFast flags %q lack %q", joined, want)
+		}
+	}
+}
