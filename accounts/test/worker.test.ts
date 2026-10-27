@@ -989,3 +989,13 @@ test("review r2 #1: the bundle names whose folder it is, so a page can refuse an
 	const pub = await (await call(handle, env(), deps, `/fs/v1/folders/pub/bundle?owner=${OWNER.userId}`)).json();
 	assert.equal(pub.owner, OWNER.userId);
 });
+
+test("review r2 #8: a web write whose quota cannot be measured answers 503 measuring, not a fault", async () => {
+	const s3 = people();
+	const { deps } = fakeDeps(s3);
+	s3.fail = (method) => method === "LIST";
+	const put = await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/m.json", { method: "PUT", headers: page(OWNER), body: "{}" });
+	assert.equal(put.status, 503);
+	assert.equal((await put.json()).error, "measuring");
+	assert.ok(![...s3.objects.keys()].some((k) => k.endsWith("saved/m.json")), "nothing written");
+});
