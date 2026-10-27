@@ -29,10 +29,10 @@ export interface Store {
 	/** The folder's web host id: `candidate` if this call made the row, else the one already there. */
 	ensureWebHost(owner: string, project: string, candidate: string, now: string): Promise<string>;
 	/** The person's storage as last measured (quota.ts), or null before the first measurement. */
-	usage(owner: string): Promise<{ bytes: number; objects: number; measured_at: string } | null>;
+	usage(owner: string): Promise<{ bytes: number; objects: number; measured_at: string; partial?: boolean } | null>;
 	/** Stores a measurement; with `token`, only while that claim is still the person's (review r3 #7): false when a
 	 *  newer claim has taken over, and nothing is written. */
-	setUsage(owner: string, bytes: number, objects: number, measuredAt: string, token?: string): Promise<boolean>;
+	setUsage(owner: string, bytes: number, objects: number, measuredAt: string, token?: string, partial?: boolean): Promise<boolean>;
 	/** Adds what the web host just wrote to the last measurement (none yet: nothing to add to). */
 	addUsage(owner: string, bytes: number, objects: number): Promise<void>;
 	/** Claims the person's next measurement until `until` (ms), as `token`: true for exactly one caller while no claim
@@ -92,15 +92,18 @@ export function d1Store(db: D1Like): Store {
 			if (!id) throw new Error("the web host row did not stick");
 			return id;
 		},
-		usage: (owner) => one<{ bytes: number; objects: number; measured_at: string }>('SELECT bytes, objects, measured_at FROM "usage" WHERE owner_id = ?', owner),
-		async setUsage(owner, bytes, objects, measuredAt, token) {
+		async usage(owner) {
+			const row = await one<{ bytes: number; objects: number; measured_at: string; partial: number }>('SELECT bytes, objects, measured_at, partial FROM "usage" WHERE owner_id = ?', owner);
+			return row ? { bytes: row.bytes, objects: row.objects, measured_at: row.measured_at, partial: !!row.partial } : null;
+		},
+		async setUsage(owner, bytes, objects, measuredAt, token, partial = false) {
 			if (token !== undefined) {
-				const done = await run('UPDATE "usage" SET bytes = ?, objects = ?, measured_at = ? WHERE owner_id = ? AND claim_token = ?', bytes, objects, measuredAt, owner, token);
+				const done = await run('UPDATE "usage" SET bytes = ?, objects = ?, measured_at = ?, partial = ? WHERE owner_id = ? AND claim_token = ?', bytes, objects, measuredAt, partial ? 1 : 0, owner, token);
 				return (done.meta?.changes ?? 0) > 0;
 			}
 			await run(
-				'INSERT INTO "usage" (owner_id, bytes, objects, measured_at) VALUES (?, ?, ?, ?) ON CONFLICT (owner_id) DO UPDATE SET bytes = excluded.bytes, objects = excluded.objects, measured_at = excluded.measured_at',
-				owner, bytes, objects, measuredAt,
+				'INSERT INTO "usage" (owner_id, bytes, objects, measured_at, partial) VALUES (?, ?, ?, ?, ?) ON CONFLICT (owner_id) DO UPDATE SET bytes = excluded.bytes, objects = excluded.objects, measured_at = excluded.measured_at, partial = excluded.partial',
+				owner, bytes, objects, measuredAt, partial ? 1 : 0,
 			);
 			return true;
 		},

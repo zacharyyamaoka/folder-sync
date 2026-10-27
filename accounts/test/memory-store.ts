@@ -58,15 +58,15 @@ export class MemoryStore implements Store {
 		return this.webHosts.get(this.k(owner, project)) ?? null;
 	}
 
-	readonly usageRows = new Map<string, { bytes: number; objects: number; measured_at: string }>();
+	readonly usageRows = new Map<string, { bytes: number; objects: number; measured_at: string; partial?: boolean }>();
 
 	async usage(owner: string) {
 		return this.usageRows.get(owner) ?? null;
 	}
 
-	async setUsage(owner: string, bytes: number, objects: number, measuredAt: string, token?: string) {
+	async setUsage(owner: string, bytes: number, objects: number, measuredAt: string, token?: string, partial = false) {
 		if (token !== undefined && this.claims.get(owner)?.token !== token) return false;
-		this.usageRows.set(owner, { bytes, objects, measured_at: measuredAt });
+		this.usageRows.set(owner, { bytes, objects, measured_at: measuredAt, partial });
 		return true;
 	}
 

@@ -111,7 +111,7 @@ export class S3Bucket implements R2BucketLike {
 
 	/** Bytes and objects under `prefix` (ListObjectsV2, no delimiter, 1000 a page), counting stopped once either
 	 *  passes `stop` (then the answer only says "over"): what a person's quota is measured with. */
-	async measure(prefix: string, stop: { bytes: number; objects: number }): Promise<{ bytes: number; objects: number }> {
+	async measure(prefix: string, stop: { bytes: number; objects: number }): Promise<{ bytes: number; objects: number; complete: boolean }> {
 		let bytes = 0;
 		let objects = 0;
 		let cursor: string | undefined;
@@ -132,7 +132,8 @@ export class S3Bucket implements R2BucketLike {
 			const truncated = /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml);
 			cursor = truncated ? tagValues(xml, "NextContinuationToken")[0] : undefined;
 		} while (cursor && bytes <= stop.bytes && objects <= stop.objects);
-		return { bytes, objects };
+		// stopped with pages left: a lower bound (review r4 #5)
+		return { bytes, objects, complete: !cursor };
 	}
 
 	/** An object's size and ETag (HEAD), or null when there is none. */

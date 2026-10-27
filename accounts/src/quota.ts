@@ -32,6 +32,8 @@ export interface Usage {
 	bytes: number;
 	objects: number;
 	measured_at: string;
+	/** The measurement stopped once it saw the person over (review r4 #5): a lower bound, not a total. */
+	partial?: boolean;
 }
 
 function positive(value: string | undefined, fallback: number): number {
@@ -60,7 +62,8 @@ export const CLAIM_MS = 60_000;
 export async function usageOf(store: Store, owner: string, quota: Quota, now: number, measure: () => Promise<{ bytes: number; objects: number }>): Promise<Usage> {
 	const cached = await store.usage(owner);
 	const known = cached && cached.measured_at ? cached : null;
-	if (known && now - Date.parse(known.measured_at) < quota.recheckS * 1000) return known;
+	// WHY a partial one is never fresh (review r4 #5): only a complete measurement may say the person is back under
+	if (known && !known.partial && now - Date.parse(known.measured_at) < quota.recheckS * 1000) return known;
 	// WHY a bound (review r3 #7): without one, a listing that keeps failing would admit writes on a figure of any age
 	const fallback = (why: string): Usage => {
 		if (known && now - Date.parse(known.measured_at) <= quota.maxAgeS * 1000) return known;
@@ -69,16 +72,16 @@ export async function usageOf(store: Store, owner: string, quota: Quota, now: nu
 	};
 	const token = crypto.randomUUID();
 	if (!(await store.claimMeasurement(owner, now, now + CLAIM_MS, token))) return fallback("is being measured (or could not be, just now)");
-	let counted: { bytes: number; objects: number };
+	let counted: { bytes: number; objects: number; complete?: boolean };
 	try {
 		counted = await measure();
 	} catch (error) {
 		return fallback(`could not be measured (${error instanceof Error ? error.message : String(error)})`);
 	}
-	const measured = { ...counted, measured_at: new Date(now).toISOString() };
+	const measured: Usage = { bytes: counted.bytes, objects: counted.objects, measured_at: new Date(now).toISOString(), partial: counted.complete === false };
 	// WHY fenced by the claim's token (review r3 #7): a listing that outlived its claim must not overwrite the newer
 	// measurement of whoever claimed after it; that one stands
-	if (!(await store.setUsage(owner, measured.bytes, measured.objects, measured.measured_at, token))) {
+	if (!(await store.setUsage(owner, measured.bytes, measured.objects, measured.measured_at, token, measured.partial))) {
 		const newer = await store.usage(owner);
 		return newer && newer.measured_at ? newer : measured;
 	}
@@ -86,8 +89,10 @@ export async function usageOf(store: Store, owner: string, quota: Quota, now: nu
 }
 
 /** Why `usage` plus what is about to be added is over `quota`, or null when it is not. */
-export function overQuota(usage: { bytes: number; objects: number }, quota: Quota, addBytes = 0, addObjects = 0): string | null {
+export function overQuota(usage: { bytes: number; objects: number; partial?: boolean }, quota: Quota, addBytes = 0, addObjects = 0): string | null {
 	const gib = (n: number) => `${(n / 1024 ** 3).toFixed(2)} GiB`;
+	// a lower bound that already passed the quota: over, whatever has been credited since, until measured in full
+	if (usage.partial) return `this account holds more than its ${quota.bytes} bytes (${gib(quota.bytes)}) or ${quota.objects} files: delete files, or ask the operator for more`;
 	if (usage.bytes + addBytes > quota.bytes) return `this account holds ${usage.bytes} bytes (${gib(usage.bytes)}) of its ${quota.bytes} (${gib(quota.bytes)}): delete files, or ask the operator for more`;
 	if (usage.objects + addObjects > quota.objects) return `this account holds ${usage.objects} files of its ${quota.objects}: delete files, or ask the operator for more`;
 	return null;

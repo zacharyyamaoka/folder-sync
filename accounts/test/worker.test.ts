@@ -1043,7 +1043,9 @@ test("the store's SQL runs against the migrations applied in order on SQLite, D1
 	assert.equal(await store.setUsage(OWNER.userId, 0, 0, "2026-10-26T11:00:00.000Z", "claim-a"), false, "the outlived claim's result is fenced off (review r3 #7)");
 	assert.equal(await store.setUsage(OWNER.userId, 100, 2, "2026-10-26T12:00:00.000Z", "claim-b"), true);
 	await store.addUsage(OWNER.userId, -40, -1);
-	assert.deepEqual({ ...(await store.usage(OWNER.userId)) }, { bytes: 60, objects: 1, measured_at: "2026-10-26T12:00:00.000Z" });
+	assert.deepEqual({ ...(await store.usage(OWNER.userId)) }, { bytes: 60, objects: 1, measured_at: "2026-10-26T12:00:00.000Z", partial: false });
+	await store.setUsage(OWNER.userId, 1000, 1000, "2026-10-26T12:01:00.000Z", undefined, true);
+	assert.equal((await store.usage(OWNER.userId))!.partial, true, "a lower bound reads back as one (review r4 #5)");
 	assert.equal(await store.ensureWebHost(OWNER.userId, "robotparts", WEB, "2026-10-26"), WEB);
 });
 
