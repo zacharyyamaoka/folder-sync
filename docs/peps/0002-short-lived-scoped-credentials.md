@@ -27,7 +27,9 @@
      them and the reason), sends its deletes to the accounts server (`POST …/hosts/<host>/delete` with a job id, the seq it
      last published and the paths; the server builds the next manifest, deletes them permanently, lowers the usage
      and answers the manifest, which folder-sync keeps once checked). The job is kept in the project's state dir
-     (`delete-job.json`) until its answer comes, and asked for again first thing next round; a server that says the
+     (`delete-job.json`) until its answer comes, and asked for again first thing next round (its answer is checked
+     against the job's own seq; a job whose result this machine already holds, by a reconcile or a restart before the
+     file went, is simply retired: review r4 #4); a server that says the
      manifest moved on makes the round take its own manifest from the bucket, a read, as its read-only reconcile does
      when that one is ahead. Whatever goes wrong there, the round still pulls. Absent, the keys read and write, as before.
 2. **A session token** is signed on every request, folder-sync's own (`x-amz-security-token` as a signed header) and

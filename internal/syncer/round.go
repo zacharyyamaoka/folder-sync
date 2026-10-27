@@ -369,6 +369,10 @@ func (p *Project) pushReadOnly(ctx context.Context, prev manifest.Manifest, chan
 		if err != nil {
 			return fmt.Errorf("deleting through the accounts server (asked again next round): %w", err)
 		}
+		// WHY against the job's own base (review r4 #4): its answer is from_seq + 1, whatever this machine holds since
+		if prev.Seq != job.FromSeq {
+			return fmt.Errorf("a delete from seq %d against a local manifest at seq %d", job.FromSeq, prev.Seq)
+		}
 		if err := checkDeleteAnswer(prev, job.Paths, answer.Manifest, p.Host.ID, p.Config.Project); err != nil {
 			return fmt.Errorf("the accounts server's manifest: %w", err)
 		}
@@ -387,7 +391,11 @@ func (p *Project) pushReadOnly(ctx context.Context, prev manifest.Manifest, chan
 	}
 	var earlier deleteJob
 	if data, err := os.ReadFile(jobPath); err == nil && json.Unmarshal(data, &earlier) == nil && earlier.Job != "" {
-		if err := run(earlier); err != nil {
+		if prev.Seq > earlier.FromSeq {
+			// its result, or a later manifest, is already this machine's (kept before a restart removed the job file,
+			// or taken from the bucket by a read-only reconcile): the job is done (review r4 #4)
+			os.Remove(jobPath)
+		} else if err := run(earlier); err != nil {
 			return refusal(err)
 		}
 		done := make(map[string]bool, len(earlier.Paths))
