@@ -979,3 +979,13 @@ test("review r2 #8: one quota measurement per person at a time, paged as S3 page
 	assert.equal((await keys()).status, 200, "once measured, everyone gets keys from the cache");
 	assert.equal(pages() - tried, 3);
 });
+
+test("review r2 #1: the bundle names whose folder it is, so a page can refuse an answer for someone else", async () => {
+	const { deps } = fakeDeps(people());
+	const mine = await (await call(handle, env(), deps, "/fs/v1/folders/robotparts/bundle?prefix=saved/", { headers: cookie(OWNER) })).json();
+	assert.equal(mine.owner, OWNER.userId);
+	const hers = await (await call(handle, env(), deps, "/fs/v1/folders/robotparts/bundle?prefix=saved/", { headers: cookie(SISTER) })).json();
+	assert.equal(hers.owner, SISTER.userId);
+	const pub = await (await call(handle, env(), deps, `/fs/v1/folders/pub/bundle?owner=${OWNER.userId}`)).json();
+	assert.equal(pub.owner, OWNER.userId);
+});
