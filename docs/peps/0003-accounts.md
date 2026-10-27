@@ -173,8 +173,9 @@ listing may write its result, so one that outlives its minute cannot overwrite a
 `QUOTA_MAX_AGE_S` (an hour) admits no new writes when no newer one can be taken: read-only keys, web writes `503
 measuring`, reads and deletes as usual (review r3 #7; `0004_usage_claim_token.sql`). A measurement that stops early, once it has
 seen the person over (it saves listing all of a large root), is stored as a lower bound (`partial`,
-`0005_usage_partial.sql`): it counts as over whatever deletes have been credited since, and is never fresh, so the
-next request measures again; only a complete measurement puts a person back under (review r4 #5). A deletion (a machine's
+`0005_usage_partial.sql`): it counts as over whatever deletes have been credited since, and is never fresh for longer
+than a claim's minute (review r6 #3: without that, every request listed the root again), or once a deletion marks it
+stale; only a complete measurement puts a person back under (review r4 #5). A deletion (a machine's
 delete job, a permanent web delete, a purge, a stray backup removed) never subtracts from the measured figure: it marks
 it stale, an upper bound, and counts a mutation; the next request measures again, and a measurement a deletion crossed
 is stored stale too (`0006_usage_stale.sql`; review r5 #2: a credit landing after a complete measurement counted the

@@ -68,6 +68,9 @@ export async function usageOf(store: Store, owner: string, quota: Quota, now: nu
 	// WHY both ages (review r5 #6): a recheck interval longer than the max age must not keep a too-old figure "fresh"
 	const age = known ? now - Date.parse(known.measured_at) : Infinity;
 	if (known && !known.partial && !known.stale && age < quota.recheckS * 1000 && age <= quota.maxAgeS * 1000) return known;
+	// WHY a partial one still waits out a claim's minute (review r6 #3): it says over whatever is credited, so listing
+	// again sooner only costs pages; a deletion marks it stale, and that asks for the next measurement at once
+	if (known && known.partial && !known.stale && age < CLAIM_MS && age <= quota.maxAgeS * 1000) return known;
 	// WHY a bound (review r3 #7): without one, a listing that keeps failing would admit writes on a figure of any age
 	// WHY every return path goes through this (review r4 #6): a figure older than QUOTA_MAX_AGE_S never admits writes
 	const judged = (usage: Usage | null, why: string): Usage => {
