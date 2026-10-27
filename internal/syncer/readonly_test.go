@@ -163,3 +163,50 @@ func TestDeletesAreBatchedByBytesAsWellAsCount(t *testing.T) {
 		t.Fatalf("%d of %d paths deleted", sent, len(paths))
 	}
 }
+
+// Review r5 #3: a job kept from before the byte limit (400 long paths) is refused 413 every time it is asked again; it
+// must be split into jobs that fit, not retried unchanged for good.
+func TestAKeptJobTooLargeIsSplit(t *testing.T) {
+	paths := longPaths(400)
+	p, _ := readOnlyProject(t, 3, nil)
+	prev, _ := p.ownManifest()
+	for _, path := range paths {
+		prev.Files = append(prev.Files, manifest.Entry{Path: path, Size: 1, MTime: "2026-10-27T12:00:00Z", SHA256: strings.Repeat("0", 64), WrittenAt: "2026-10-27T12:00:00Z"})
+	}
+	prev.Sort()
+	manifest.Save(filepath.Join(p.StateDir, "manifest.json"), prev)
+	data, _ := json.Marshal(deleteJob{Job: "6f9b2c1e-3d4a-4b5c-8d7e-9f0a1b2c3d4e", FromSeq: 3, Paths: paths})
+	jobPath := filepath.Join(p.StateDir, "delete-job.json")
+	os.WriteFile(jobPath, data, 0o600)
+	current := prev
+	sent := 0
+	p.RemoteDelete = func(ctx context.Context, job string, fromSeq int64, batch []string) (DeleteAnswer, error) {
+		if deleteBodySize(job, fromSeq, batch) > 256*1024 {
+			return DeleteAnswer{}, fmt.Errorf("%w: 413", ErrTooLarge)
+		}
+		gone := map[string]bool{}
+		for _, path := range batch {
+			gone[path] = true
+		}
+		next := current
+		next.Seq, next.Files = current.Seq+1, nil
+		for _, e := range current.Files {
+			if !gone[e.Path] {
+				next.Files = append(next.Files, e)
+			}
+		}
+		current = next
+		sent += len(batch)
+		return DeleteAnswer{Seq: next.Seq, Deleted: batch, Manifest: next}, nil
+	}
+	var result Result
+	if err := p.pushReadOnly(context.Background(), prev, nil, paths, &result); err != nil {
+		t.Fatalf("a kept job refused as too large must be split: %v", err)
+	}
+	if sent != len(paths) {
+		t.Fatalf("%d of %d paths deleted", sent, len(paths))
+	}
+	if _, err := os.Stat(jobPath); err == nil {
+		t.Fatal("the job file is still there")
+	}
+}
