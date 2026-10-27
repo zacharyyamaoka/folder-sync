@@ -1100,3 +1100,24 @@ test("review r2 #7: a machine deletes through the Worker: exactly its manifest m
 	const counted = await store.usage(OWNER.userId);
 	assert.deepEqual({ bytes: counted!.bytes, objects: counted!.objects }, stored(s3, OWNER), "the usage went down by what was deleted, manifest included");
 });
+
+// ------------------------------------------------------------------------------------------------ round-3 review
+
+test("review r3 #4: a read whose folder cannot be settled answers 503 recovering, never a bundle with the file missing", async () => {
+	const s3 = people();
+	const { deps } = fakeDeps(s3);
+	const at = (body: string) => call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/x.json", { method: "PUT", headers: page(OWNER), body });
+	assert.equal((await at('{"v": "one"}\n')).status, 200);
+	cutOff(s3);
+	assert.equal((await at('{"v": "two"}\n')).status, 503);
+	// the undo still fails: every read of the folder says so
+	for (const path of ["/fs/v1/folders/robotparts/bundle?prefix=saved/", "/fs/v1/folders/robotparts", `/fs/v1/folders/robotparts/files/${WEB}/saved/x.json`]) {
+		const read = await call(handle, env(), deps, path, { headers: cookie(OWNER) });
+		assert.equal(read.status, 503, `${path} (the review saw 200 {files: []})`);
+		assert.equal((await read.json()).error, "recovering");
+	}
+	s3.fail = null;
+	const bundle = await call(handle, env(), deps, "/fs/v1/folders/robotparts/bundle?prefix=saved/", { headers: cookie(OWNER) });
+	assert.equal(bundle.status, 200);
+	assert.ok((await bundle.json()).files.some((f: { host: string; text: string }) => f.host === WEB && f.text === '{"v": "one"}\n'));
+});
