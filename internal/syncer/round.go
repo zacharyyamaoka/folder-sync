@@ -415,8 +415,8 @@ func (p *Project) pushReadOnly(ctx context.Context, prev manifest.Manifest, chan
 	return refusal(nil)
 }
 
-// deleteBatch is how many paths one delete job carries (the server takes up to 1000).
-const deleteBatch = 500
+// deleteBatch is how many paths one delete job carries (the server takes up to 400: a HEAD and a DELETE each).
+const deleteBatch = 400
 
 // keepManifest makes m this machine's published manifest (it already is, in the bucket).
 func (p *Project) keepManifest(m manifest.Manifest) error {

@@ -135,6 +135,16 @@ export class S3Bucket implements R2BucketLike {
 		return { bytes, objects };
 	}
 
+	/** An object's size and ETag (HEAD), or null when there is none. */
+	async head(key: string): Promise<{ size: number; etag: string } | null> {
+		this.calls.push(`HEAD ${key}`);
+		const answer = await this.call(this.url(key), { method: "HEAD" });
+		await answer.body?.cancel();
+		if (answer.status === 404) return null;
+		if (!answer.ok) throw new Error(`the storage answered ${answer.status} for a HEAD`);
+		return { size: Number(answer.headers.get("Content-Length") || 0), etag: etagOf(answer) };
+	}
+
 	/** Up to `max` keys under `prefix` with their sizes (one ListObjectsV2 page), and whether there are more. */
 	async keys(prefix: string, max = 1000): Promise<{ keys: { key: string; size: number }[]; more: boolean }> {
 		this.calls.push(`LIST ${prefix}`);

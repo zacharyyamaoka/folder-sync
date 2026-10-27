@@ -531,8 +531,8 @@ async function machineDelete(request: Request, env: Env, deps: Deps, app: App | 
 		return fail(400, "bad_request", "the body is { job, from_seq, paths } and nothing else: the server builds the manifest");
 	}
 	const paths = body.paths;
-	if (!Array.isArray(paths) || !paths.length || paths.length > 1000 || paths.some((p) => typeof p !== "string") || new Set(paths).size !== paths.length) {
-		return fail(400, "bad_paths", "paths is a list of 1 to 1000 distinct file paths");
+	if (!Array.isArray(paths) || !paths.length || paths.length > 400 || paths.some((p) => typeof p !== "string") || new Set(paths).size !== paths.length) {
+		return fail(400, "bad_paths", "paths is a list of 1 to 400 distinct file paths");
 	}
 	if (!Number.isSafeInteger(body.from_seq)) return fail(400, "bad_seq", "from_seq is the seq of the manifest this machine last published");
 	if (typeof body.job !== "string" || !HOST_ID.test(body.job)) return fail(400, "bad_job", "job is a lowercase UUID v4 the machine keeps until it has the answer");

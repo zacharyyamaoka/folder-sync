@@ -497,12 +497,17 @@ async function advance(bucket: WritableBucket, job: DeleteJob, save: (job: Delet
 			return null;
 		}
 	}
+	// WHY fenced (review r4 #1): a cleanup that waited (a failed delete, a restart) can run after the path was written
+	// again; the current manifest listing it, or an object of another size, is someone's newer copy, never deleted
+	const relisted = new Set(current.files.map((e) => e.path));
 	for (const path of [...job.remaining]) {
 		try {
-			await bucket.delete(hostKey(w, path));
+			const object = relisted.has(path) ? null : await bucket.head(hostKey(w, path));
+			if (object && object.size === job.sizes[path]) await bucket.delete(hostKey(w, path));
 		} catch {
 			continue; // still there: the next replay or the alarm tries again
 		}
+		// gone, or overwritten by the newer copy: either way the bytes this job removed no longer exist
 		job.remaining = job.remaining.filter((p) => p !== path);
 		await save(job);
 		await store.addUsage(job.owner, -job.sizes[path], -1);
