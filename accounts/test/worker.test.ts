@@ -373,7 +373,9 @@ test("the web host: trash first, the file, the manifest with If-Match; a 412 sta
 	// overwrite: the old version goes to _trash/ first
 	const second = await (await put("saved/x.json", "two\n")).json();
 	assert.equal(second.seq, 2);
-	assert.equal(s3.text(`${root}_trash/robotparts/${WEB}/${stamp(deps.now())}/saved/x.json`), "one\n");
+	// the trash key is the contract's stamp plus the millisecond and a nonce (review r1 #8), so find it by its stamp
+	const trashed = [...s3.objects.keys()].filter((k) => k.startsWith(`${root}_trash/robotparts/${WEB}/${stamp(deps.now())}-`) && k.endsWith("/saved/x.json"));
+	assert.deepEqual(trashed.map((k) => s3.text(k)), ["one\n"]);
 	assert.equal(s3.text(at("saved/x.json")), "two\n");
 	assert.deepEqual(s3.calls.filter((c) => c.method !== "GET").map((c) => c.method), ["COPY", "PUT", "PUT"]);
 	// the same bytes again: nothing written, same seq

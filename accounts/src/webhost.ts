@@ -57,6 +57,15 @@ export function stamp(now: number): string {
 	return new Date(now).toISOString().replace(/\.\d+Z$/, "Z").replace(/[-:]/g, "");
 }
 
+/** One trash copy's own stamp segment: the contract's UTC stamp, then the millisecond and 8 random hex digits
+ *  (20261026T123456Z-789-1f2e3d4c). WHY unique: two replacements of one path in the same second would otherwise
+ *  copy to the same key, the second overwriting the first (review r1 #8); WHY the contract's stamp first: anything
+ *  that sorts or groups the trash by its second still reads it. */
+export function trashStamp(now: number): string {
+	const nonce = [...crypto.getRandomValues(new Uint8Array(4))].map((b) => b.toString(16).padStart(2, "0")).join("");
+	return `${stamp(now)}-${String(new Date(now).getUTCMilliseconds()).padStart(3, "0")}-${nonce}`;
+}
+
 async function sha256Hex(data: Uint8Array): Promise<string> {
 	const digest = await crypto.subtle.digest("SHA-256", data);
 	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -73,7 +82,7 @@ function hostKey(w: Where, path: string): string {
 }
 
 function trashKey(w: Where, path: string, now: number): string {
-	return `${w.root}_trash/${w.project}/${w.hostId}/${stamp(now)}/${path}`;
+	return `${w.root}_trash/${w.project}/${w.hostId}/${trashStamp(now)}/${path}`;
 }
 
 /** The web host's manifest and the ETag it was read with; an empty seq-0 manifest before the first write. */
