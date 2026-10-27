@@ -1743,3 +1743,166 @@ for (const how of ["fails", "is refused its claim"] as const) {
 		assert.equal(answer.ReadOnly, true, `the review saw read-write keys from the figure taken before the measurement (ReadOnly: ${answer.ReadOnly})`);
 	});
 }
+
+// ------------------------------------------------------------------------------------------------ the hub (PEP 0004)
+
+/** A HUB binding that records what the Worker sends it: the object's name and the request, with its JSON body. */
+function fakeHub(answer: (request: Request) => Promise<unknown> | unknown = () => new Response("hub", { status: 200 })) {
+	const seen: { name: string; method: string; url: string; headers: Headers; body: unknown }[] = [];
+	const binding = {
+		idFromName: (name: string) => name,
+		get: (name: unknown) => ({
+			async fetch(request: Request) {
+				const text = request.method === "POST" ? await request.clone().text() : "";
+				seen.push({ name: name as string, method: request.method, url: request.url, headers: request.headers, body: text ? JSON.parse(text) : null });
+				return (await answer(request)) as Response;
+			},
+		}),
+	};
+	return { binding, seen };
+}
+
+const upgrade = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==" };
+const EVENTS = "/fs/v1/folders/robotparts/events";
+
+test("hub: without Upgrade: websocket the route is 426, signed in or not", async () => {
+	const { binding, seen } = fakeHub();
+	const { deps } = fakeDeps(people());
+	const e = env({ HUB: binding });
+	for (const headers of [{}, cookie(OWNER), { Authorization: "Bearer token-owner-laptop" }]) {
+		const answer = await call(handle, e, deps, EVENTS, { headers });
+		assert.equal(answer.status, 426);
+		assert.equal(answer.headers.get("Upgrade"), "websocket");
+		assert.equal((await answer.json()).error, "upgrade_required");
+	}
+	assert.equal(seen.length, 0);
+	assert.equal((await call(handle, e, deps, EVENTS, { method: "POST", headers: { ...upgrade, ...page(OWNER) } })).status, 405);
+});
+
+test("hub: signed out is 401, a stranger 404, and nothing reaches the hub", async () => {
+	const { binding, seen } = fakeHub();
+	const { deps } = fakeDeps(people());
+	const e = env({ HUB: binding });
+	assert.equal((await call(handle, e, deps, EVENTS, { headers: upgrade })).status, 401);
+	assert.equal((await call(handle, e, deps, `${EVENTS}?owner=${OWNER.userId}`, { headers: upgrade })).status, 401, "a private folder, signed out");
+	assert.equal((await call(handle, e, deps, `${EVENTS}?owner=${OWNER.userId}`, { headers: { ...upgrade, ...cookie(SISTER), Origin: SITE } })).status, 404, "a private folder, a stranger");
+	assert.equal((await call(handle, e, deps, `${EVENTS}?owner=${OWNER.userId}`, { headers: { ...upgrade, Authorization: "Bearer token-sister-laptop" } })).status, 404);
+	assert.equal((await call(handle, e, deps, EVENTS, { headers: { ...upgrade, Authorization: "Bearer nonsense" } })).status, 401);
+	assert.equal((await call(handle, e, deps, "/fs/v1/folders/Bad%20Name/events", { headers: upgrade })).status, 400);
+	assert.equal(seen.length, 0);
+});
+
+test("hub: a cookie socket needs its own site's Origin (cross-site WebSocket hijacking); a bearer needs none", async () => {
+	const { binding, seen } = fakeHub();
+	const { deps } = fakeDeps(people());
+	const e = env({ HUB: binding });
+	for (const [what, origin] of [["another site", "https://evil.example"], ["no Origin", undefined], ["a registered app's other origin", "https://www.robotparts.dev"], ["null", "null"]] as const) {
+		const headers: Record<string, string> = { ...upgrade, ...cookie(OWNER) };
+		if (origin) headers.Origin = origin;
+		const answer = await call(handle, e, deps, EVENTS, { headers });
+		assert.equal(answer.status, 403, what);
+		assert.equal((await answer.json()).error, "origin");
+	}
+	// an origin no app lists gets no cookie session at all: signed out, so 401 on a private folder
+	assert.equal((await call(handle, e, deps, EVENTS, { origin: "https://evil.example", headers: { ...upgrade, ...cookie(OWNER), Origin: "https://evil.example" } })).status, 401);
+	assert.equal(seen.length, 0, "no refused socket reached the hub");
+	assert.equal((await call(handle, e, deps, EVENTS, { headers: { ...upgrade, ...cookie(OWNER), Origin: SITE } })).status, 200, "its own site's page");
+	assert.equal((await call(handle, e, deps, EVENTS, { headers: { ...upgrade, Authorization: "Bearer token-owner-laptop", Origin: "https://evil.example" } })).status, 200, "a bearer is not a browser's ambient credential");
+	assert.equal((await call(handle, e, deps, EVENTS, { headers: { ...upgrade, Authorization: "Bearer token-owner-laptop" } })).status, 200);
+	assert.equal(seen.length, 3);
+});
+
+test("hub: the Worker names the hub by owner/project and forwards the role and kind, never the credentials", async () => {
+	const { binding, seen } = fakeHub();
+	const { deps, store } = fakeDeps(people());
+	const e = env({ HUB: binding });
+	await store.addReader(OWNER.userId, "robotparts", SISTER.email, "2026-10-26T00:00:00Z");
+	const cases: [string, string, Record<string, string>, string, string, string][] = [
+		["the owner's machine", EVENTS, { Authorization: "Bearer token-owner-laptop" }, OWNER.userId, "owner", "machine"],
+		["the owner's page", EVENTS, { ...cookie(OWNER), Origin: SITE }, OWNER.userId, "owner", "page"],
+		["a reader's page, by ?owner=", `${EVENTS}?owner=${OWNER.userId}`, { ...cookie(SISTER), Origin: SITE }, OWNER.userId, "reader", "page"],
+		["a reader's machine, by ?owner=", `${EVENTS}?owner=${OWNER.userId}`, { Authorization: "Bearer token-sister-laptop" }, OWNER.userId, "reader", "machine"],
+		["anyone, a public folder", `/fs/v1/folders/pub/events?owner=${OWNER.userId}`, {}, OWNER.userId, "public", "page"],
+	];
+	for (const [what, path, headers, owner, role, kind] of cases) {
+		seen.length = 0;
+		const answer = await call(handle, e, deps, path, { headers: { ...upgrade, ...headers, "X-Hub-Role": "owner", "X-Hub-Kind": "machine" } });
+		assert.equal(answer.status, 200, what);
+		assert.equal(await answer.text(), "hub", "the hub's answer comes back untouched");
+		assert.equal(seen.length, 1, what);
+		const project = path.includes("/pub/") ? "pub" : "robotparts";
+		assert.equal(seen[0].name, `${owner}/${project}`, what);
+		assert.equal(seen[0].headers.get("X-Hub-Role"), role, `${what}: role (a client's own X-Hub-Role is overwritten)`);
+		assert.equal(seen[0].headers.get("X-Hub-Kind"), kind, `${what}: kind`);
+		assert.equal(seen[0].headers.get("Upgrade"), "websocket", `${what}: the upgrade goes through`);
+		assert.equal(seen[0].headers.get("Cookie"), null, `${what}: no cookie`);
+		assert.equal(seen[0].headers.get("Authorization"), null, `${what}: no token`);
+	}
+});
+
+test("hub: a hub's 101 is returned as it is (re-wrapping it would drop its webSocket), also for a registered origin", async () => {
+	// Node's Response can't hold a 101, so the hub here answers with the shape workerd gives
+	const switching = { status: 101, headers: new Headers(), webSocket: { client: true } };
+	const { binding } = fakeHub(() => switching);
+	const { deps } = fakeDeps(people());
+	const answer = await call(handle, env({ HUB: binding }), deps, EVENTS, { headers: { ...upgrade, ...cookie(OWNER), Origin: SITE } });
+	assert.equal(answer, switching as unknown as Response);
+});
+
+test("hub: no HUB binding is 503, after the person is known", async () => {
+	const { deps } = fakeDeps(people());
+	const answer = await call(handle, env(), deps, EVENTS, { headers: { ...upgrade, ...cookie(OWNER), Origin: SITE } });
+	assert.equal(answer.status, 503);
+	assert.equal((await answer.json()).error, "not_configured");
+	assert.equal((await call(handle, env(), deps, EVENTS, { headers: upgrade })).status, 401, "a stranger learns nothing about the binding");
+});
+
+test("hub: a web write or delete tells the hub (host, seq, web:true); a refused one, or a repeat, tells nothing new", async () => {
+	const { binding, seen } = fakeHub((request) => new Response(null, { status: request.method === "POST" ? 204 : 200 }));
+	const { deps } = fakeDeps(people());
+	const e = env({ HUB: binding });
+	const put = await call(handle, e, deps, "/fs/v1/folders/robotparts/web/saved/n.json", { method: "PUT", headers: page(OWNER), body: "{}\n" });
+	assert.equal(put.status, 200);
+	const written = await put.json();
+	assert.equal(seen.length, 1);
+	assert.equal(seen[0].name, `${OWNER.userId}/robotparts`);
+	assert.equal(seen[0].method, "POST");
+	assert.equal(seen[0].url, "https://hub/notify");
+	assert.deepEqual(seen[0].body, { host: WEB, seq: written.seq, web: true });
+	const gone = await call(handle, e, deps, "/fs/v1/folders/robotparts/web/saved/n.json", { method: "DELETE", headers: page(OWNER) });
+	assert.equal(gone.status, 200);
+	assert.deepEqual(seen[1].body, { host: WEB, seq: (await gone.json()).seq, web: true });
+	assert.equal(seen[1].body && (seen[1].body as { seq: number }).seq, written.seq + 1);
+	// refused (CSRF), over quota, a delete of nothing: the write did not happen, so there is nothing to announce
+	const before = seen.length;
+	assert.equal((await call(handle, e, deps, "/fs/v1/folders/robotparts/web/saved/x.json", { method: "PUT", headers: cookie(OWNER), body: "{}" })).status, 403);
+	assert.equal((await call(handle, env({ HUB: binding, QUOTA_BYTES: "1" }), deps, "/fs/v1/folders/robotparts/web/saved/x.json", { method: "PUT", headers: page(OWNER), body: "{}" })).status, 403);
+	assert.equal((await call(handle, e, deps, "/fs/v1/folders/robotparts/web/saved/never.json", { method: "DELETE", headers: page(OWNER) })).status, 404);
+	assert.equal(seen.length, before);
+});
+
+test("hub: a failing, throwing or silent hub never fails or holds the web write", async () => {
+	const { deps } = fakeDeps(people());
+	const cases: [string, () => unknown][] = [
+		["rejects", () => Promise.reject(new Error("hub down"))],
+		["answers 500", () => new Response("no", { status: 500 })],
+		["throws", () => { throw new Error("boom"); }],
+	];
+	for (const [what, answer] of cases) {
+		const { binding, seen } = fakeHub(answer);
+		const put = await call(handle, env({ HUB: binding }), deps, `/fs/v1/folders/robotparts/web/saved/${what.replace(/\s/g, "")}.json`, { method: "PUT", headers: page(OWNER), body: "{}\n" });
+		assert.equal(put.status, 200, what);
+		assert.equal(seen.length, 1, what);
+	}
+	// a hub that never answers costs the write NOTIFY_MS at most
+	const started = Date.now();
+	const hang = fakeHub(() => new Promise(() => undefined));
+	const put = await call(handle, env({ HUB: hang.binding }), deps, "/fs/v1/folders/robotparts/web/saved/hang.json", { method: "PUT", headers: page(OWNER), body: "{}\n" });
+	assert.equal(put.status, 200);
+	assert.ok(Date.now() - started < 3000, `held ${Date.now() - started} ms`);
+	// and a binding that cannot even name its object
+	const broken = { idFromName() { throw new Error("no such namespace"); }, get() { throw new Error("no"); } };
+	assert.equal((await call(handle, env({ HUB: broken }), deps, "/fs/v1/folders/robotparts/web/saved/broken.json", { method: "PUT", headers: page(OWNER), body: "{}\n" })).status, 200);
+	// no binding at all (the other tests' shape) still writes
+	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/nohub.json", { method: "PUT", headers: page(OWNER), body: "{}\n" })).status, 200);
+});

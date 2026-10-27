@@ -41,6 +41,16 @@ class_name = "WebHostObject"
 tag = "v1"
 new_sqlite_classes = ["WebHostObject"]
 
+# The folder's push hub (PEP 0004 §3): one hibernating-WebSocket Durable Object per (person, project) that says "host H
+# is now at seq N" to the folder's machines and pages (src/hub.ts). A hint only: clients still poll, slower.
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "FolderHub"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["FolderHub"]
+
 [vars]
 ENVIRONMENT = "production"
 # This Worker's own host: the CLI's default server and the account pages (placeholder until the first deploy)

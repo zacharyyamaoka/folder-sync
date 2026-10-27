@@ -15,6 +15,7 @@
 //   GET  /fs/v1/folders/:project/bundle?prefix=   a folder's small UTF-8 files in one answer
 //   GET  /fs/v1/folders/:project/files/:host/<p>  one file's bytes, sha256-checked; Range: one range -> 206 (ranges.ts)
 //   PUT|DELETE /fs/v1/folders/:project/web/<p>    the folder's web host (§3.4); X-Folder-Sync-Keep-Newest: <field>
+//   GET  /fs/v1/folders/:project/events           WebSocket upgrade: the folder's hub says "host H is at seq N" (PEP 0004)
 //   PATCH /fs/v1/folders/:project {visibility}    public or private
 //   POST /fs/v1/folders/:project/readers {email}, DELETE …/readers/:email
 //   GET  /fs/v1/access?project=&owner=            for an app's own server
@@ -57,6 +58,8 @@ export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
 	SIGN_UP_EMAILS?: string;
 	/** The web host's one writer per folder: a Durable Object namespace of webhost-do.ts's WebHostObject. */
 	WEB_HOST?: { idFromName(name: string): unknown; get(id: unknown): { run(op: WebOp): Promise<WebAnswer> } };
+	/** The folder's hub (PEP 0004): a Durable Object namespace of hub.ts's FolderHub. Absent, /events answers 503. */
+	HUB?: { idFromName(name: string): unknown; get(id: unknown): { fetch(request: Request): Promise<Response> } };
 }
 
 /** A signed-in person, as a session proves them. */
@@ -550,6 +553,7 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 	// steps (review r1 #3)
 	// WHY the quota is admitted and charged in there too: one at a time, by what the change really adds (review r2 #6)
 	const answer = await webHostOf(env, deps)(op);
+	if (answer.status === 200) await notifyHub(env, owner, project, answer.body);
 	return json(answer.status, answer.body, answer.headers ?? {});
 }
 
@@ -600,6 +604,62 @@ async function purgeWebTrash(request: Request, env: Env, deps: Deps, app: App | 
 	if (!hostId) return json(200, { purged: 0, bytes: 0, more: false });
 	const answer = await webHostOf(env, deps)({ method: "PURGE_TRASH", owner, project, hostId, path: "", sessionId: who.person.sessionId });
 	return json(answer.status, answer.body, answer.headers ?? {});
+}
+
+// ------------------------------------------------------------------------------------------------ the hub (PEP 0004)
+
+/** The name of a folder's hub (a Durable Object of its own namespace, so it may share webHostName's spelling). */
+function hubName(owner: string, project: string): string {
+	return `${owner}/${project}`;
+}
+
+/** How long a web write waits for the hub before giving up on telling it. */
+const NOTIFY_MS = 1500;
+
+/** Tells the folder's hub that the web host moved. WHY best effort and bounded: the write already succeeded and
+ *  every client still catches up by polling, so a failed or slow notify must never fail or hold the write. */
+async function notifyHub(env: Env, owner: string, project: string, body: unknown): Promise<void> {
+	const hub = env.HUB;
+	const { host, seq } = (body ?? {}) as { host?: unknown; seq?: unknown };
+	if (!hub || typeof host !== "string" || typeof seq !== "number") return;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const send = hub.get(hub.idFromName(hubName(owner, project))).fetch(new Request("https://hub/notify", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ host, seq, web: true }),
+		}));
+		send.catch(() => undefined);
+		await Promise.race([send, new Promise((done) => { timer = setTimeout(done, NOTIFY_MS); })]);
+	} catch {
+		// ignored on purpose
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** GET …/events with Upgrade: websocket: who may connect is decided here (the hub trusts what this forwards). */
+async function events(request: Request, env: Env, deps: Deps, app: App | null, project: string): Promise<Response> {
+	if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return fail(426, "upgrade_required", "this route is a WebSocket: send Upgrade: websocket", { Upgrade: "websocket" });
+	const who = await session(request, deps, app);
+	// WHY the Origin check (PEP 0004 §3): a browser sends its cookie on a WebSocket upgrade from any site, and a socket
+	// is not bound by CORS; so a cookie session connects only from this site's own pages. A bearer can't be attached by
+	// a page, and a signed-out reader has no ambient credential to hijack.
+	if (who?.via === "cookie") {
+		const origin = request.headers.get("Origin");
+		if (!app || !origin || origin !== new URL(request.url).origin || !app.origins.includes(origin)) return fail(403, "origin", "a browser's socket must come from this site's own pages");
+	}
+	const decided = await decide(deps, who?.person ?? null, project, new URL(request.url).searchParams.get("owner"));
+	if (decided instanceof Response) return decided;
+	const hub = env.HUB;
+	if (!hub) return fail(503, "not_configured", "the folder hub (HUB) is not bound on this Worker");
+	// WHY the credentials stay here: the hub needs only who the person is to this folder, never a cookie or a token
+	const forwarded = new Headers(request.headers);
+	forwarded.delete("Cookie");
+	forwarded.delete("Authorization");
+	forwarded.set("X-Hub-Role", decided.role);
+	forwarded.set("X-Hub-Kind", who?.via === "bearer" ? "machine" : "page");
+	return hub.get(hub.idFromName(hubName(decided.owner, project))).fetch(new Request(request, { headers: forwarded }));
 }
 
 export async function jsonBody(request: Request): Promise<Record<string, unknown> | Response> {
@@ -734,7 +794,8 @@ export async function handle(request: Request, env: Env, deps: Deps | null): Pro
 		if (error instanceof Measuring) return fail(503, "measuring", error.message, { "Retry-After": "60" });
 		throw error;
 	});
-	if (!allowed["Access-Control-Allow-Origin"]) return answer;
+	// WHY a 101 is returned as it is: re-wrapping it would drop its webSocket, and a handshake needs no CORS headers
+	if (answer.status === 101 || !allowed["Access-Control-Allow-Origin"]) return answer;
 	const out = new Response(answer.body, answer);
 	for (const [key, value] of Object.entries(allowed)) out.headers.set(key, value);
 	return out;
@@ -797,6 +858,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 		if (method === "PATCH") return patchFolder(request, deps, app, project);
 		return fail(405, "method", "GET or PATCH", { Allow: "GET, HEAD, PATCH" });
 	}
+	if (sub === "events" && more.length === 0) return method === "GET" ? events(request, env, deps, app, project) : fail(405, "method", "GET only", { Allow: "GET" });
 	if (sub === "bundle" && more.length === 0) return read ? bundle(request, env, deps, app, project) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (sub === "files" && more.length >= 2) return read ? file(request, env, deps, app, project, more[0], more.slice(1), head) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (sub === "web" && more.length >= 1) {
