@@ -95,7 +95,8 @@ is refused, `409 wrong_user`, and the page reloads (review r1 #2).
 | `PATCH /fs/v1/folders/:project` `{visibility}` | owner | `"public"` or `"private"` → the folder row |
 | `POST /fs/v1/folders/:project/readers` `{email}` / `DELETE …/readers/:email` | owner | grants / revokes read |
 | `GET /fs/v1/access?project=&owner=` | session | `{ allowed, role: "owner"\|"reader"\|"public"\|null, root }` — for an app's own server |
-| `POST /fs/v1/credentials` | **bearer only** | AWS `credential_process` JSON + `Endpoint`, `Bucket`, `Prefix: "users/<id>/"`, read-write, 5 min (a browser cookie never gets storage keys); `403 over_quota` past the person's quota (§3.7) |
+| `POST /fs/v1/credentials` | **bearer only** | AWS `credential_process` JSON + `Endpoint`, `Bucket`, `Prefix: "users/<id>/"`, read-write, 5 min (a browser cookie never gets storage keys); past the person's quota (§3.7): read-only, with `ReadOnly: true` and `Reason` |
+| `POST /fs/v1/folders/:project/hosts/:host/delete` `{paths, manifest}` | **bearer only**, the host's own person | a machine's deletes while its keys are read-only (§3.7): `manifest` must be exactly the stored one minus `paths` with the next `seq`, else `400`; it is written with `If-Match` (`409` if it moved), then the files are deleted **permanently** (no trash copy) and the usage lowered → `{ seq, deleted }`. Not the web host's (`DELETE …/web/<path>`) |
 
 `:project` matches the contract's `^[a-z0-9][a-z0-9._-]{0,62}$`; `<path>` follows the contract's path rules; anything
 else is 400. The root is always the session's (`users/<id>/`), never a URL's, body's or header's. A public folder's
@@ -152,8 +153,13 @@ the sync engine and keeps every rule.
 
 Anyone may sign up (`SIGN_UP_EMAILS=*`), and an account is a prefix of the operator's bucket, so each person gets at
 most `QUOTA_BYTES` (default 1 GiB) and `QUOTA_OBJECTS` (default 100 000) under `users/<id>/`, `_trash/` included
-(`wrangler.toml` vars; `src/quota.ts`; review r1 #7). Over either, `POST /fs/v1/credentials` and web `PUT`s answer
-`403 over_quota` with the figures; web `DELETE` still works. Usage is measured by listing the root (one subrequest per
+(`wrangler.toml` vars; `src/quota.ts`; review r1 #7). Over either, web `PUT`s answer `403 over_quota` with the figures
+(web `DELETE` still works), and `POST /fs/v1/credentials` answers **read-only** keys with `ReadOnly: true` and the
+figures in `Reason` (review r2 #7): a machine can still pull; it holds its uploads; and it sends its deletes through
+`POST …/hosts/<host>/delete`, which deletes them permanently and lowers the usage, so a person gets back under by
+deleting files, with no operator. WHY permanent and not into the trash: the trash counts (a trash that did not would
+let one file, overwritten again and again, grow without bound for 30 days), so a delete into it would never get a
+person back under. WHY a Worker endpoint: an R2 temporary credential has no delete-only scope. Usage is measured by listing the root (one subrequest per
 1000 files; above ~45 000 files that needs Workers Paid's subrequest limit) when keys or a web write are asked for and
 the last measurement, cached in D1 (`usage`), is older than `QUOTA_RECHECK_S` (300 s). One request at a time measures
 a person: it claims the measurement in D1 for a minute first, so a burst of refreshes costs one listing, and a listing

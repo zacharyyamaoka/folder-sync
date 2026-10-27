@@ -15,7 +15,9 @@
 //   PATCH /fs/v1/folders/:project {visibility}    public or private
 //   POST /fs/v1/folders/:project/readers {email}, DELETE …/readers/:email
 //   GET  /fs/v1/access?project=&owner=            for an app's own server
-//   POST /fs/v1/credentials                       a machine's bearer session -> R2 keys for users/<id>/ (5 min)
+//   POST /fs/v1/credentials                       a machine's bearer session -> R2 keys for users/<id>/ (5 min);
+//                                                 over quota: read-only, with ReadOnly and Reason
+//   POST /fs/v1/folders/:project/hosts/:host/delete  a machine's deletes while its keys are read-only (bearer)
 //
 // The table in PEP 0003 §3.3 is the contract (another app builds against it); errors are
 // { "error": "<code>", "why": "<sentence>" }.
@@ -29,7 +31,7 @@
 
 import { appFor, apps, OWN_APP, type App } from "./apps.ts";
 import { folderPrefix, mint, NotConfigured, PROJECT, ttlOf, USER_ID, userRoot, type CredsEnv } from "./creds.ts";
-import { checkPath, ContractError, Project } from "../../readers/worker/src/folder-sync-read.ts";
+import { checkPath, ContractError, Project, SCHEMA, validateManifest, type Manifest, type ManifestEntry } from "../../readers/worker/src/folder-sync-read.ts";
 import { Measuring, overQuota, quotaOf, usageOf, type QuotaEnv } from "./quota.ts";
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store, Visibility } from "./store.ts";
@@ -304,9 +306,10 @@ async function credentials(request: Request, env: Env, deps: Deps, app: App | nu
 	const person = await deps.person(request, "bearer", app); // fs-mutation: the bearer session
 	if (!person) return fail(401, "signed_out", "this machine is signed out (signed out or revoked): run folder-sync login");
 	// WHY here: a machine writes to R2 directly and R2 scopes a prefix, never a size, so an account over its quota
-	// gets no new keys (review r1 #7); the ones it holds run out within SYNC_CREDENTIAL_TTL_S
+	// gets read-only keys (review r1 #7, r2 #7): it can still pull, its uploads wait, and its deletes go through
+	// POST …/hosts/<host>/delete, which lowers the usage; the read-write keys it holds run out within the TTL
 	const over = await quotaRefusal(env, deps, person.userId);
-	if (over) return fail(403, "over_quota", over);
+	if (over) return json(200, { ...(await mint(env, userRoot(person.userId), "object-read-only", ttlOf(env), deps.now())), ReadOnly: true, Reason: over });
 	const minted = await mint(env, userRoot(person.userId), "object-read-write", ttlOf(env), deps.now()); // fs-mutation: the session's root
 	return json(200, minted);
 }
@@ -478,6 +481,70 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 	// WHY the quota is admitted and charged in there too: one at a time, by what the change really adds (review r2 #6)
 	const answer = await webHostOf(env, deps)(op);
 	return json(answer.status, answer.body, answer.headers ?? {});
+}
+
+/** The parts of a manifest entry a machine's delete must leave exactly as they were. */
+const entryKey = (e: ManifestEntry) => JSON.stringify([e.path, e.size, e.mtime, e.sha256, e.written_at]);
+
+/** A machine's deletes while its keys are read-only (over quota, §3.7, review r2 #7). The machine sends the manifest it
+ *  would have published and the paths it drops; this checks the manifest is exactly the stored one minus those paths
+ *  (and the next seq), writes it (If-Match: the machine is still its host's one writer), then deletes the files
+ *  permanently, with no trash copy, and lowers the person's usage by what went. WHY permanent: the trash still counts,
+ *  so a delete into it would leave the person over quota for its 30 days. WHY bearer only: a machine's own host. */
+async function machineDelete(request: Request, env: Env, deps: Deps, app: App | null, project: string, host: string): Promise<Response> {
+	if (!/^bearer\s+\S/i.test(request.headers.get("Authorization") || "")) return fail(401, "signed_out", "a machine deletes with its own session (folder-sync login)");
+	const person = await deps.person(request, "bearer", app);
+	if (!person) return fail(401, "signed_out", "this machine is signed out (signed out or revoked): run folder-sync login");
+	if (!HOST_ID.test(host)) return fail(400, "bad_host", "a host is its lowercase UUID");
+	if ((await deps.store.webHost(person.userId, project)) === host) return fail(400, "web_host", "the web host's files are deleted with DELETE …/web/<path>");
+	const body = await jsonBody(request);
+	if (body instanceof Response) return body;
+	const paths = body.paths;
+	const sent = body.manifest as Manifest;
+	if (!Array.isArray(paths) || !paths.length || paths.length > 10_000 || paths.some((p) => typeof p !== "string") || new Set(paths).size !== paths.length) {
+		return fail(400, "bad_paths", "paths is a list of one or more distinct file paths");
+	}
+	const owner = person.userId; // WHY: the session's root, never the request's
+	const root = userRoot(owner);
+	const bucket = await bucketFor(env, deps, folderPrefix(owner, project), "object-read-write", READ_TTL_S);
+	const key = (path: string) => `${root}${project}/hosts/${host}/${path}`;
+	const stored = await bucket.get(key("manifest.json"));
+	if (!stored || !("arrayBuffer" in stored)) return fail(404, "not_found", "this person has no such host in this folder");
+	const storedBytes = await stored.arrayBuffer();
+	const old = validateManifest(JSON.parse(new TextDecoder().decode(storedBytes)) as Manifest, project, host);
+	const refuse = (why: string) => fail(400, "bad_manifest_change", why);
+	try {
+		if (!sent || typeof sent !== "object") return refuse("manifest is the host's next manifest");
+		validateManifest(sent, project, host);
+	} catch (error) {
+		return refuse(error instanceof Error ? error.message : String(error));
+	}
+	if (sent.schema !== SCHEMA || sent.host_name !== old.host_name || sent.seq !== old.seq + 1) return refuse("the manifest must be the stored one's next (same host, seq + 1)");
+	const dropped = new Set(paths as string[]);
+	const listed = new Map(old.files.map((e) => [e.path, e]));
+	const missing = (paths as string[]).filter((p) => !listed.has(p));
+	if (missing.length) return refuse(`the manifest does not list ${JSON.stringify(missing.slice(0, 3))}`);
+	const kept = old.files.filter((e) => !dropped.has(e.path)).map(entryKey).sort();
+	if (JSON.stringify(kept) !== JSON.stringify((sent.files ?? []).map(entryKey).sort())) return refuse("the manifest must be exactly the stored one minus these paths");
+	const next = new TextEncoder().encode(`${JSON.stringify({ ...sent, files: [...(sent.files ?? [])] }, null, 2)}\n`);
+	const written = await bucket.put(key("manifest.json"), next, { ifMatch: stored.etag, contentType: "application/json" });
+	if (!written.ok) return fail(409, "manifest_changed", "this host's manifest changed meanwhile: sync again");
+	// the manifest no longer lists them: a delete that fails leaves a stray, which the host's next reconcile moves away
+	let bytes = next.byteLength - storedBytes.byteLength;
+	let objects = 0;
+	const deleted: string[] = [];
+	for (const path of paths as string[]) {
+		try {
+			await bucket.delete(key(path));
+		} catch {
+			continue;
+		}
+		deleted.push(path);
+		bytes -= listed.get(path)!.size;
+		objects -= 1;
+	}
+	await deps.store.addUsage(owner, bytes, objects);
+	return json(200, { seq: sent.seq, deleted });
 }
 
 async function jsonBody(request: Request): Promise<Record<string, unknown> | Response> {
@@ -671,5 +738,8 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 		return method === "PUT" || method === "DELETE" ? web(request, env, deps, app, project, more, method) : fail(405, "method", "PUT or DELETE", { Allow: "PUT, DELETE" });
 	}
 	if (sub === "readers") return readers(request, deps, app, project, more, method);
+	if (sub === "hosts" && more.length === 2 && more[1] === "delete") {
+		return method === "POST" ? machineDelete(request, env, deps, app, project, more[0]) : fail(405, "method", "POST only", { Allow: "POST" });
+	}
 	return fail(404, "not_found", "no such route");
 }

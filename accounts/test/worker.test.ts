@@ -786,11 +786,13 @@ test("review r1 #7: over the per-person quota, no new storage keys and no web wr
 	const sister = bytesUnder(`users/${SISTER.userId}/`);
 	assert.ok(sister + 10 < owner, `the fixture: the owner holds more (${owner}) than the sister (${sister})`);
 	const tight = env({ QUOTA_BYTES: String(sister + 10), QUOTA_OBJECTS: "100000" });
+	// since review r2 #7: over the quota, read-only keys (pull still works) that say why, not none
 	const refused = await keys("token-owner-laptop", tight);
-	assert.equal(refused.status, 403, "over the byte quota: no new keys");
+	assert.equal(refused.status, 200);
 	const body = await refused.json();
-	assert.equal(body.error, "over_quota");
-	assert.match(body.why, /bytes/);
+	assert.equal(body.ReadOnly, true, "over the byte quota: read-only keys");
+	assert.match(body.Reason, /bytes/);
+	assert.equal(claimsOf(body.SessionToken).scope, "object-read-only");
 	assert.equal((await keys("token-sister-laptop", tight)).status, 200, "under it: keys as before");
 	const put = await call(handle, tight, deps, "/fs/v1/folders/robotparts/web/saved/more.json", { method: "PUT", headers: page(OWNER), body: "{}\n" });
 	assert.equal(put.status, 403, "over the quota: no web write");
@@ -799,7 +801,7 @@ test("review r1 #7: over the per-person quota, no new storage keys and no web wr
 	assert.equal((await call(handle, tight, deps, "/fs/v1/folders/robotparts/web/saved/w.json", { method: "DELETE", headers: page(OWNER) })).status, 200, "a delete is always allowed");
 	// the object count counts too (the sister holds two: her manifest and saved/a.json)
 	const few = env({ QUOTA_OBJECTS: "1" });
-	assert.equal((await keys("token-sister-laptop", few)).status, 403, "over the object quota");
+	assert.equal((await (await keys("token-sister-laptop", few)).json()).ReadOnly, true, "over the object quota: read-only keys");
 	// measured by listing the root, cached: no second listing until QUOTA_RECHECK_S has passed
 	const lists = () => s3.calls.filter((c) => c.method === "LIST" && c.prefix === `users/${SISTER.userId}/`).length;
 	const listed = lists();
