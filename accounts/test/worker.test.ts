@@ -1484,3 +1484,18 @@ test("review r4 #6: a measurement that loses its claim never admits writes on a 
 	finishA({ bytes: 0, objects: 0, complete: true });
 	await assert.rejects(a, Measuring, "A lost its claim: no figure young enough, so no write access (the review saw the day-old zero admitted)");
 });
+
+test("the person's usage for a page: GET /fs/v1/usage says over or not, and why (for /saved/'s recovery controls)", async () => {
+	const s3 = people();
+	const { deps } = fakeDeps(s3);
+	const usage = async (e: Env, headers: Record<string, string> = cookie(OWNER)) => call(handle, e, deps, "/fs/v1/usage", { headers });
+	const under = await usage(env());
+	assert.equal(under.status, 200);
+	const ok = await under.json();
+	assert.equal(ok.over, null);
+	assert.deepEqual(ok.quota, { bytes: 1024 ** 3, objects: 100_000 });
+	assert.deepEqual(ok.used, { bytes: stored(s3, OWNER).bytes, objects: stored(s3, OWNER).objects });
+	const tight = await (await usage(env({ QUOTA_BYTES: "10", QUOTA_RECHECK_S: "0" }))).json();
+	assert.match(tight.over, /bytes/, "over: the reason, as the keys' Reason says it");
+	assert.equal((await usage(env(), {})).status, 401, "signed out: nothing");
+});
