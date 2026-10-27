@@ -1238,3 +1238,18 @@ test("review r3 #3: a web-only person deletes their way under quota: a permanent
 	// a cookie purge needs the page's own headers, like any write
 	assert.equal((await call(handle, tight, deps, "/fs/v1/folders/robotparts/web-trash/purge", { method: "POST", headers: cookie(OWNER) })).status, 403);
 });
+
+test("review r3 #6: replacements rolled back leave no uncounted trash copies: the usage stays what is stored", async () => {
+	const s3 = people();
+	const store = new MemoryStore();
+	const { deps } = fakeDeps(s3, store);
+	const put = (body: string) => call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/x.json", { method: "PUT", headers: page(OWNER), body }).catch(() => null);
+	assert.equal((await put("v0".repeat(50)))!.status, 200);
+	const manifestKey = `users/${OWNER.userId}/robotparts/hosts/${WEB}/manifest.json`;
+	s3.fail = (method, key) => method === "PUT" && key === manifestKey;
+	for (let n = 1; n <= 12; n++) await put(`v${n}`.repeat(50)); // each fails at its manifest and is rolled back
+	s3.fail = null;
+	const counted = (await store.usage(OWNER.userId))!;
+	assert.deepEqual({ bytes: counted.bytes, objects: counted.objects }, stored(s3, OWNER), "the review saw 547 bytes / 2 objects counted, 1,747 / 14 stored");
+	assert.deepEqual(mismatched(s3), []);
+});
