@@ -135,6 +135,7 @@ def build(media: pathlib.Path) -> str:
     after = load(media, "after.json")
     after2 = load(media, "after2.json")
     first = load(media, "before-final.json")
+    smoke = load(media, "smoke.json")["summary"]
     idle_b, idle_a = load(media, "idle-before.json"), load(media, "idle-after.json")
     online = json.loads((media / "online-only.txt").read_text().strip().splitlines()[-1])["browser_to_browser_ms"]
     push_clip, poll_clip = load(media, "push.json"), load(media, "polling.json")
@@ -222,7 +223,7 @@ def build(media: pathlib.Path) -> str:
 
 <h2>Before and after (same build, push on vs off)</h2>
 <div class="scroll"><table><tr><th>Path (mean of 10, random phase)</th><th>Polling</th><th>Push</th><th>Faster</th></tr>{numbers}</table></div>
-<p class="mut">{first_note} A second push run gave {s(sa2, 'site_to_disk', 'laptop'):.2f} s page → disk and {s(sa2, 'disk_to_site', 'page'):.2f} s disk → page; the table keeps the slower first run.</p>
+<p class="mut">{first_note} A second push run gave {s(sa2, 'site_to_disk', 'laptop'):.2f} s page → disk and {s(sa2, 'disk_to_site', 'page'):.2f} s disk → page; the table keeps the slower first run. After the final rebase onto <code>lane/accounts</code>'s review-r2 fixes, a 5-trial smoke run still pushes: {s(smoke, 'site_to_disk', 'laptop'):.2f} s page → disk, {s(smoke, 'disk_to_site', 'page'):.2f} s disk → page, a new machine in 0.36 s — about 0.15 s slower than before those fixes; that extra time is not broken down yet.</p>
 
 <h2>Where each second goes</h2>
 <p class="key">Waterfalls, means per stage from each machine's <code>FOLDER_SYNC_TRACE</code> and the page's own fetch stamps.<span class="w"></span>waiting on a timer<span class="k"></span>doing work</p>
