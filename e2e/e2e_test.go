@@ -671,16 +671,33 @@ func TestTwoMachines(t *testing.T) {
 	t.Run("an empty folder never wipes the bucket", func(t *testing.T) {
 		guard := &machine{name: "A-guard", home: a.home, folder: filepath.Join(t.TempDir(), "guard"), env: a.env}
 		os.MkdirAll(guard.folder, 0o755)
+		// a peer of the same folder (as the web host is one): it publishes first, so the guard's first round knows it
+		peer := &machine{name: "B-guard", home: b.home, folder: filepath.Join(t.TempDir(), "guard-peer"), env: b.env}
+		os.MkdirAll(peer.folder, 0o755)
+		writeFile(t, filepath.Join(peer.folder, "peer.md"), "peer\n", time.Time{})
+		w.must(peer, "init", "--project", "guard", "--bucket", bucket)
+		w.must(peer, "sync", "--once")
 		writeFile(t, filepath.Join(guard.folder, "only.md"), "only\n", time.Time{})
 		w.must(guard, "init", "--project", "guard", "--bucket", bucket)
 		w.must(guard, "sync", "--once")
 		os.Remove(filepath.Join(guard.folder, "only.md"))
+		// review r1 #6: while the guard's folder is empty, an edit elsewhere must still reach it
+		writeFile(t, filepath.Join(peer.folder, "edited-elsewhere.md"), "while you were empty\n", time.Time{})
+		w.must(peer, "sync", "--once")
 		out, code := w.run(guard, "sync", "--once")
 		if code == 0 || !strings.Contains(out, "looks empty or unmounted") {
 			t.Fatalf("exit %d: %s", code, out)
 		}
 		if _, ok := w.object("guard/hosts/" + idA + "/only.md"); !ok {
 			t.Fatal("the object was deleted")
+		}
+		pulled := filepath.Join(guard.folder, "hosts", hostID(t, peer), "edited-elsewhere.md")
+		if data, err := os.ReadFile(pulled); err != nil || string(data) != "while you were empty\n" {
+			t.Fatalf("the refused push also stopped the pull: %s: %q %v", pulled, data, err)
+		}
+		status := w.must(guard, "status")
+		if !strings.Contains(status, "FAILED") || !strings.Contains(status, "looks empty or unmounted") {
+			t.Fatalf("status must show the refusal: %s", status)
 		}
 		w.ops.take()
 	})
@@ -749,8 +766,8 @@ func TestTwoMachines(t *testing.T) {
 
 	t.Run("manifests validate against schema/manifest.schema.json", func(t *testing.T) {
 		manifests, _ := filepath.Glob(filepath.Join(w.data, bucket, "*", "hosts", "*", "manifest.json"))
-		if len(manifests) != 3 {
-			t.Fatalf("want 3 manifests (A, B, guard), got %v", manifests)
+		if len(manifests) != 4 {
+			t.Fatalf("want 4 manifests (A, B, guard, guard's peer B), got %v", manifests)
 		}
 		if reason := missingPythonModule("python3", "jsonschema"); reason != "" {
 			t.Skip(reason)
