@@ -58,28 +58,39 @@ export class MemoryStore implements Store {
 		return this.webHosts.get(this.k(owner, project)) ?? null;
 	}
 
-	readonly usageRows = new Map<string, { bytes: number; objects: number; measured_at: string; partial?: boolean }>();
+	readonly usageRows = new Map<string, { bytes: number; objects: number; measured_at: string; partial?: boolean; stale?: boolean }>();
+	readonly mutations = new Map<string, number>();
 
 	async usage(owner: string) {
 		return this.usageRows.get(owner) ?? null;
 	}
 
 	async setUsage(owner: string, bytes: number, objects: number, measuredAt: string, token?: string, partial = false) {
-		if (token !== undefined && this.claims.get(owner)?.token !== token) return false;
-		this.usageRows.set(owner, { bytes, objects, measured_at: measuredAt, partial });
+		const claim = this.claims.get(owner);
+		if (token !== undefined && claim?.token !== token) return false;
+		const crossed = token !== undefined && (this.mutations.get(owner) ?? 0) !== claim!.mutations;
+		this.usageRows.set(owner, { bytes, objects, measured_at: measuredAt, partial, stale: crossed });
+		if (token !== undefined) this.claims.set(owner, { ...claim!, until: 0 });
 		return true;
 	}
 
 	async addUsage(owner: string, bytes: number, objects: number) {
 		const row = this.usageRows.get(owner);
+		if (bytes < 0 || objects < 0) {
+			if (row) {
+				this.usageRows.set(owner, { ...row, stale: true });
+				this.mutations.set(owner, (this.mutations.get(owner) ?? 0) + 1);
+			}
+			return;
+		}
 		if (row) this.usageRows.set(owner, { ...row, bytes: row.bytes + bytes, objects: row.objects + objects });
 	}
 
-	readonly claims = new Map<string, { until: number; token: string }>();
+	readonly claims = new Map<string, { until: number; token: string; mutations: number }>();
 
 	async claimMeasurement(owner: string, now: number, until: number, token: string) {
 		if ((this.claims.get(owner)?.until ?? 0) >= now) return false;
-		this.claims.set(owner, { until, token });
+		this.claims.set(owner, { until, token, mutations: this.mutations.get(owner) ?? 0 });
 		if (!this.usageRows.has(owner)) this.usageRows.set(owner, { bytes: 0, objects: 0, measured_at: "" });
 		return true;
 	}

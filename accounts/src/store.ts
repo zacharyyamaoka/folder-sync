@@ -29,11 +29,13 @@ export interface Store {
 	/** The folder's web host id: `candidate` if this call made the row, else the one already there. */
 	ensureWebHost(owner: string, project: string, candidate: string, now: string): Promise<string>;
 	/** The person's storage as last measured (quota.ts), or null before the first measurement. */
-	usage(owner: string): Promise<{ bytes: number; objects: number; measured_at: string; partial?: boolean } | null>;
+	usage(owner: string): Promise<{ bytes: number; objects: number; measured_at: string; partial?: boolean; stale?: boolean } | null>;
 	/** Stores a measurement; with `token`, only while that claim is still the person's (review r3 #7): false when a
 	 *  newer claim has taken over, and nothing is written. */
 	setUsage(owner: string, bytes: number, objects: number, measuredAt: string, token?: string, partial?: boolean): Promise<boolean>;
-	/** Adds what the web host just wrote to the last measurement (none yet: nothing to add to). */
+	/** Adds what the web host just wrote to the last measurement (none yet: nothing to add to). A credit (anything
+	 *  negative) is never subtracted: it marks the measurement stale and counts a mutation, so the next request measures
+	 *  again (review r5 #2: a credit landing after a complete measurement would count the deletion twice). */
 	addUsage(owner: string, bytes: number, objects: number): Promise<void>;
 	/** Claims the person's next measurement until `until` (ms), as `token`: true for exactly one caller while no claim
 	 *  is live. */
@@ -93,27 +95,33 @@ export function d1Store(db: D1Like): Store {
 			return id;
 		},
 		async usage(owner) {
-			const row = await one<{ bytes: number; objects: number; measured_at: string; partial: number }>('SELECT bytes, objects, measured_at, partial FROM "usage" WHERE owner_id = ?', owner);
-			return row ? { bytes: row.bytes, objects: row.objects, measured_at: row.measured_at, partial: !!row.partial } : null;
+			const row = await one<{ bytes: number; objects: number; measured_at: string; partial: number; stale: number }>('SELECT bytes, objects, measured_at, partial, stale FROM "usage" WHERE owner_id = ?', owner);
+			return row ? { bytes: row.bytes, objects: row.objects, measured_at: row.measured_at, partial: !!row.partial, stale: !!row.stale } : null;
 		},
 		async setUsage(owner, bytes, objects, measuredAt, token, partial = false) {
 			if (token !== undefined) {
-				const done = await run('UPDATE "usage" SET bytes = ?, objects = ?, measured_at = ?, partial = ? WHERE owner_id = ? AND claim_token = ?', bytes, objects, measuredAt, partial ? 1 : 0, owner, token);
+				// stale when a deletion crossed this measurement (its mutation count moved since the claim): measured again
+				// and the claim is released: a stale figure may be measured again at once (a failed listing keeps its minute)
+				const done = await run('UPDATE "usage" SET bytes = ?, objects = ?, measured_at = ?, partial = ?, stale = CASE WHEN mutations = claim_mutations THEN 0 ELSE 1 END, claimed_until = 0 WHERE owner_id = ? AND claim_token = ?', bytes, objects, measuredAt, partial ? 1 : 0, owner, token);
 				return (done.meta?.changes ?? 0) > 0;
 			}
 			await run(
-				'INSERT INTO "usage" (owner_id, bytes, objects, measured_at, partial) VALUES (?, ?, ?, ?, ?) ON CONFLICT (owner_id) DO UPDATE SET bytes = excluded.bytes, objects = excluded.objects, measured_at = excluded.measured_at, partial = excluded.partial',
+				'INSERT INTO "usage" (owner_id, bytes, objects, measured_at, partial) VALUES (?, ?, ?, ?, ?) ON CONFLICT (owner_id) DO UPDATE SET bytes = excluded.bytes, objects = excluded.objects, measured_at = excluded.measured_at, partial = excluded.partial, stale = 0',
 				owner, bytes, objects, measuredAt, partial ? 1 : 0,
 			);
 			return true;
 		},
 		async addUsage(owner, bytes, objects) {
+			if (bytes < 0 || objects < 0) {
+				await run('UPDATE "usage" SET stale = 1, mutations = mutations + 1 WHERE owner_id = ?', owner);
+				return;
+			}
 			await run('UPDATE "usage" SET bytes = bytes + ?, objects = objects + ? WHERE owner_id = ?', bytes, objects, owner);
 		},
 		async claimMeasurement(owner, now, until, token) {
 			// one statement: a first claim inserts an unmeasured row (measured_at ''), a later one moves an expired claim
 			const done = await run(
-				'INSERT INTO "usage" (owner_id, bytes, objects, measured_at, claimed_until, claim_token) VALUES (?, 0, 0, \'\', ?, ?) ON CONFLICT (owner_id) DO UPDATE SET claimed_until = excluded.claimed_until, claim_token = excluded.claim_token WHERE "usage".claimed_until < ?',
+				'INSERT INTO "usage" (owner_id, bytes, objects, measured_at, claimed_until, claim_token) VALUES (?, 0, 0, \'\', ?, ?) ON CONFLICT (owner_id) DO UPDATE SET claimed_until = excluded.claimed_until, claim_token = excluded.claim_token, claim_mutations = "usage".mutations WHERE "usage".claimed_until < ?',
 				owner, until, token, now,
 			);
 			return (done.meta?.changes ?? 0) > 0;

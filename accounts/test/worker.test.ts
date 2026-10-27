@@ -928,6 +928,22 @@ function stored(s3: MemoryS3, who: Person) {
 	return { bytes: entries.reduce((sum, [, v]) => sum + v.byteLength, 0), objects: entries.length };
 }
 
+/** Since review r5 #2 a deletion never subtracts from the measured figure: it marks it stale (an upper bound) and the
+ *  next request measures again. This is that request, and what it leaves: the measured figure. */
+async function measuredAgain(store: MemoryStore, deps: Deps, e: Env = env()) {
+	await call(handle, e, deps, "/fs/v1/usage", { headers: cookie(OWNER) });
+	const u = (await store.usage(OWNER.userId))!;
+	return { bytes: u.bytes, objects: u.objects };
+}
+
+/** After a deletion in an object driven directly (no route to measure through): the figure is stale and never below
+ *  what is stored (review r5 #2). */
+async function staleUpperBound(store: MemoryStore, s3: MemoryS3) {
+	const u = (await store.usage(OWNER.userId))!;
+	const real = stored(s3, OWNER);
+	assert.ok(u.stale && u.bytes >= real.bytes && u.objects >= real.objects, `stale and an upper bound: ${JSON.stringify([u, real])}`);
+}
+
 test("review r2 #6: concurrent web writes are admitted one at a time, and usage counts what is really stored", async () => {
 	const s3 = people();
 	const store = new MemoryStore();
@@ -955,8 +971,8 @@ test("review r2 #6: a write that changes nothing costs nothing; a replacement co
 	const counted = await store.usage(OWNER.userId);
 	assert.deepEqual({ bytes: counted!.bytes, objects: counted!.objects }, stored(s3, OWNER));
 	assert.equal((await call(handle, e, deps, "/fs/v1/folders/robotparts/web/saved/same.json", { method: "DELETE", headers: page(OWNER) })).status, 200);
-	const after = await store.usage(OWNER.userId);
-	assert.deepEqual({ bytes: after!.bytes, objects: after!.objects }, stored(s3, OWNER), "a delete is counted too");
+	// since review r5 #2 a delete marks the figure stale, and the next request measures it again
+	assert.deepEqual(await measuredAgain(store, deps, e), stored(s3, OWNER), "a delete is counted too");
 });
 
 test("review r2 #8: one quota measurement per person at a time, paged as S3 pages it, and a failed one is not retried at once", async () => {
@@ -1042,8 +1058,15 @@ test("the store's SQL runs against the migrations applied in order on SQLite, D1
 	assert.equal(await store.claimMeasurement(OWNER.userId, 61_001, 121_001, "claim-b"), true, "once it has run out");
 	assert.equal(await store.setUsage(OWNER.userId, 0, 0, "2026-10-26T11:00:00.000Z", "claim-a"), false, "the outlived claim's result is fenced off (review r3 #7)");
 	assert.equal(await store.setUsage(OWNER.userId, 100, 2, "2026-10-26T12:00:00.000Z", "claim-b"), true);
+	await store.addUsage(OWNER.userId, 40, 1);
+	assert.deepEqual({ ...(await store.usage(OWNER.userId)) }, { bytes: 140, objects: 3, measured_at: "2026-10-26T12:00:00.000Z", partial: false, stale: false });
 	await store.addUsage(OWNER.userId, -40, -1);
-	assert.deepEqual({ ...(await store.usage(OWNER.userId)) }, { bytes: 60, objects: 1, measured_at: "2026-10-26T12:00:00.000Z", partial: false });
+	assert.deepEqual({ ...(await store.usage(OWNER.userId)) }, { bytes: 140, objects: 3, measured_at: "2026-10-26T12:00:00.000Z", partial: false, stale: true },
+		"a credit marks the figure stale, never subtracts (review r5 #2)");
+	assert.equal(await store.claimMeasurement(OWNER.userId, 200_000, 260_000, "claim-c"), true);
+	await store.addUsage(OWNER.userId, -1, 0); // a deletion while claim-c lists
+	assert.equal(await store.setUsage(OWNER.userId, 100, 2, "2026-10-26T12:02:00.000Z", "claim-c"), true);
+	assert.equal((await store.usage(OWNER.userId))!.stale, true, "a measurement a deletion crossed is stored stale");
 	await store.setUsage(OWNER.userId, 1000, 1000, "2026-10-26T12:01:00.000Z", undefined, true);
 	assert.equal((await store.usage(OWNER.userId))!.partial, true, "a lower bound reads back as one (review r4 #5)");
 	assert.equal(await store.ensureWebHost(OWNER.userId, "robotparts", WEB, "2026-10-26"), WEB);
@@ -1103,8 +1126,7 @@ test("review r2 #7: a machine deletes through the Worker: exactly its manifest m
 	assert.equal(s3.objects.has(`${base}cad/bracket.step`), false, "deleted");
 	assert.ok(![...s3.objects.keys()].some((k) => k.includes("_trash/") && k.endsWith("cad/bracket.step")), "permanently: no trash copy");
 	assert.deepEqual(JSON.parse(s3.text(`${base}manifest.json`)!).files.map((f: { path: string }) => f.path), ["saved/a.json"]);
-	const counted = await store.usage(OWNER.userId);
-	assert.deepEqual({ bytes: counted!.bytes, objects: counted!.objects }, stored(s3, OWNER), "the usage went down by what was deleted, manifest included");
+	assert.deepEqual(await measuredAgain(store, deps), stored(s3, OWNER), "the usage went down by what was deleted, manifest included");
 });
 
 // ------------------------------------------------------------------------------------------------ round-3 review
@@ -1162,7 +1184,7 @@ test("review r3 #1: the delete endpoint builds the next manifest itself: the rev
 	assert.equal(written.generated_at, "2026-10-26T12:34:56.000Z", "the server's clock");
 	assert.deepEqual(written.files, old.files.filter((f: { path: string }) => f.path !== "cad/bracket.step"));
 	assert.deepEqual(answer.manifest, written, "the answer carries the manifest, for the machine to keep");
-	assert.ok((await store.usage(OWNER.userId))!.bytes < usedBefore, "and the usage went down");
+	assert.ok((await measuredAgain(store, deps, env({ QUOTA_BYTES: "1" }))).bytes < usedBefore, "and the usage went down");
 });
 
 
@@ -1189,8 +1211,7 @@ test("review r3 #2: a delete cut off after its manifest commits is finished late
 	assert.deepEqual([done.seq, done.deleted, done.pending], [old.seq + 1, ["cad/bracket.step"], []]);
 	assert.deepEqual(done.manifest.files.map((f: { path: string }) => f.path), ["saved/a.json"]);
 	assert.equal(s3.objects.has(`${base}cad/bracket.step`), false);
-	const counted = await store.usage(OWNER.userId);
-	assert.deepEqual({ bytes: counted!.bytes, objects: counted!.objects }, stored(s3, OWNER), "the usage is what is stored: charged once");
+	assert.deepEqual(await measuredAgain(store, deps), stored(s3, OWNER), "the usage is what is stored: charged once");
 	assert.equal((await (await del(request)).json()).seq, old.seq + 1, "a done job still answers");
 	assert.equal((await del({ ...request, paths: ["saved/a.json"] })).status, 409, "the same job id with other paths is refused");
 });
@@ -1223,8 +1244,7 @@ test("review r3 #3: a web-only person deletes their way under quota: a permanent
 	assert.equal((await web("web/saved/big.json", { method: "PUT", headers: page(OWNER), body: big })).status, 200);
 	assert.equal((await web("web/saved/old.json", { method: "PUT", headers: page(OWNER), body: big })).status, 200);
 	assert.equal((await web("web/saved/old.json", { method: "DELETE", headers: page(OWNER) })).status, 200, "an ordinary delete: into the trash");
-	const counted = async () => { const u = (await store.usage(OWNER.userId))!; return { bytes: u.bytes, objects: u.objects }; };
-	const before = await counted();
+	const before = await measuredAgain(store, deps); // what is stored (the delete above left the cached figure stale)
 	// over quota now (read-only keys), and the person has only a browser
 	const tight = env({ QUOTA_BYTES: String(before.bytes - 1) });
 	assert.equal((await (await call(handle, tight, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } })).json()).ReadOnly, true);
@@ -1235,7 +1255,7 @@ test("review r3 #3: a web-only person deletes their way under quota: a permanent
 	const purge = await call(handle, tight, deps, "/fs/v1/folders/robotparts/web-trash/purge", { method: "POST", headers: page(OWNER) });
 	assert.equal(purge.status, 200, "the web host's trash, purged");
 	assert.ok(![...s3.objects.keys()].some((k) => k.startsWith(`users/${OWNER.userId}/_trash/robotparts/${WEB}/`)));
-	const after = await counted();
+	const after = await measuredAgain(store, deps, tight);
 	assert.deepEqual(after, stored(s3, OWNER), "the usage is what is stored");
 	assert.ok(after.bytes < before.bytes - 20_000 && after.objects < before.objects, `bytes and objects really dropped: ${JSON.stringify([before, after])}`);
 	assert.equal((await (await call(handle, tight, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } })).json()).ReadOnly, undefined, "back under: read-write keys");
@@ -1377,8 +1397,7 @@ test("review r4 #1: a delete's pending cleanup never erases a later replacement 
 	await core.alarm();
 	assert.equal(s3.text(key), "replacement\n", "the review saw the alarm delete the replacement");
 	assert.deepEqual(mismatched(s3), []);
-	const counted = (await store.usage(OWNER.userId))!;
-	assert.deepEqual({ bytes: counted.bytes, objects: counted.objects }, stored(s3, OWNER));
+	await staleUpperBound(store, s3);
 });
 
 test("review r4 #2: a purge never destroys a backup a cut-off change still needs; a restore from nothing is no restore", async () => {
@@ -1440,7 +1459,7 @@ test("review r4 #7: a backup that cannot be removed after an undo is charged unt
 	assert.deepEqual(await counted(), stored(s3, OWNER), "the backups left behind are charged (the review saw 1,728 / 8 counted, 3,228 / 13 stored)");
 	await core.alarm();
 	assert.ok(![...s3.objects.keys()].some((k) => k.includes("/_trash/robotparts/" + WEB + "/")), "the alarm removed them");
-	assert.deepEqual(await counted(), stored(s3, OWNER), "and credited them");
+	await staleUpperBound(store, s3); // credited: since review r5 #2 a credit marks the figure stale for measuring again
 	assert.deepEqual(mismatched(s3), []);
 });
 

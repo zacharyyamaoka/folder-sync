@@ -174,7 +174,11 @@ listing may write its result, so one that outlives its minute cannot overwrite a
 measuring`, reads and deletes as usual (review r3 #7; `0004_usage_claim_token.sql`). A measurement that stops early, once it has
 seen the person over (it saves listing all of a large root), is stored as a lower bound (`partial`,
 `0005_usage_partial.sql`): it counts as over whatever deletes have been credited since, and is never fresh, so the
-next request measures again; only a complete measurement puts a person back under (review r4 #5). A web write is admitted and
+next request measures again; only a complete measurement puts a person back under (review r4 #5). A deletion (a machine's
+delete job, a permanent web delete, a purge, a stray backup removed) never subtracts from the measured figure: it marks
+it stale, an upper bound, and counts a mutation; the next request measures again, and a measurement a deletion crossed
+is stored stale too (`0006_usage_stale.sql`; review r5 #2: a credit landing after a complete measurement counted the
+deletion twice and re-granted writes). A successful measurement releases its claim, so that can happen at once. A web write is admitted and
 charged inside the folder's Durable Object, one at a time, by its net change to what is stored: the new bytes, one
 object, and the manifest's growth (a write that changes nothing costs nothing; a delete moves the file to `_trash/`,
 which still counts, and charges only the manifest's change) (review r2 #6). Two folders of one person have two
