@@ -85,7 +85,7 @@ is refused, `409 wrong_user`, and the page reloads (review r1 #2).
 | `GET /fs/device` | browser | approve a machine's code (RFC 8628 verification page) |
 | `GET /fs/dev/mailbox?email=` | loopback + dev only | `{ email, code }`, the last sign-in code |
 | `GET /fs/v1/me` | session | `{ user: {id,email,name,image}, root: "users/<id>/", app: {id, project} \| null }` |
-| `GET /fs/v1/usage` | session | `{ used: {bytes, objects}, quota: {bytes, objects}, over: "<reason>" \| null, partial }`: what a page needs to offer the ways back under quota (§3.7) |
+| `GET /fs/v1/usage` | session | `{ owner, used: {bytes, objects}, quota: {bytes, objects}, over: "<reason>" \| null, partial }`: what a page needs to offer the ways back under quota (§3.7) |
 | `POST /fs/v1/sign-out` | session | ends this session (cookie cleared, or the bearer's session deleted) |
 | `GET /fs/v1/folders` | session | `{ folders: [{project, visibility, hosts}], readable: [{owner, project, role}] }` |
 | `GET /fs/v1/folders/:project[?owner=<id>]` | owner, reader, or anyone if public | the union view: `{ project, owner, visibility, hosts: [{id, name, seq, generatedAt, web}], files: [{host, path, size, sha256, mtime, writtenAt}] }` |

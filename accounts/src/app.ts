@@ -315,7 +315,8 @@ async function usage(request: Request, env: Env, deps: Deps, app: App | null): P
 		used = known ?? { bytes: 0, objects: 0 };
 		over = error instanceof TooOld ? error.message : null;
 	}
-	return json(200, { used: { bytes: used.bytes, objects: used.objects }, quota: { bytes: quota.bytes, objects: quota.objects }, over, partial: !!used.partial });
+	// owner: whose figures these are (review r5 #1), so a page drops an answer for someone who signed in meanwhile
+	return json(200, { owner: who.person.userId, used: { bytes: used.bytes, objects: used.objects }, quota: { bytes: quota.bytes, objects: quota.objects }, over, partial: !!used.partial });
 }
 
 async function signOut(request: Request, deps: Deps, app: App | null): Promise<Response> {
