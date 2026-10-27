@@ -65,11 +65,13 @@ export async function usageOf(store: Store, owner: string, quota: Quota, now: nu
 	// WHY a partial one is never fresh (review r4 #5): only a complete measurement may say the person is back under
 	if (known && !known.partial && now - Date.parse(known.measured_at) < quota.recheckS * 1000) return known;
 	// WHY a bound (review r3 #7): without one, a listing that keeps failing would admit writes on a figure of any age
-	const fallback = (why: string): Usage => {
-		if (known && now - Date.parse(known.measured_at) <= quota.maxAgeS * 1000) return known;
-		if (known) throw new TooOld(`this account's storage was last measured ${Math.round((now - Date.parse(known.measured_at)) / 60_000)} min ago and ${why}: reads and deletes go on, writes wait`);
+	// WHY every return path goes through this (review r4 #6): a figure older than QUOTA_MAX_AGE_S never admits writes
+	const judged = (usage: Usage | null, why: string): Usage => {
+		if (usage && now - Date.parse(usage.measured_at) <= quota.maxAgeS * 1000) return usage;
+		if (usage) throw new TooOld(`this account's storage was last measured ${Math.round((now - Date.parse(usage.measured_at)) / 60_000)} min ago and ${why}: reads and deletes go on, writes wait`);
 		throw new Measuring(`this account's storage ${why}; try again in a minute`);
 	};
+	const fallback = (why: string): Usage => judged(known, why);
 	const token = crypto.randomUUID();
 	if (!(await store.claimMeasurement(owner, now, now + CLAIM_MS, token))) return fallback("is being measured (or could not be, just now)");
 	let counted: { bytes: number; objects: number; complete?: boolean };
@@ -82,8 +84,9 @@ export async function usageOf(store: Store, owner: string, quota: Quota, now: nu
 	// WHY fenced by the claim's token (review r3 #7): a listing that outlived its claim must not overwrite the newer
 	// measurement of whoever claimed after it; that one stands
 	if (!(await store.setUsage(owner, measured.bytes, measured.objects, measured.measured_at, token, measured.partial))) {
+		// another claim took over: its stored figure counts, and only if it is young enough; this one never does
 		const newer = await store.usage(owner);
-		return newer && newer.measured_at ? newer : measured;
+		return judged(newer && newer.measured_at ? newer : null, "is being measured again");
 	}
 	return measured;
 }
