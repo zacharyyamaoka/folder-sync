@@ -560,9 +560,10 @@ export class WebHostCore {
 		const { storage } = this;
 		return {
 			get: async () => (await storage.get<Pending>("pending")) ?? null,
+			// WHY one step (review r4 #3): issued together, a Durable Object commits the journal and its alarm at once,
+			// before the change touches the bucket, so a restart never leaves a change with no alarm to settle it
 			put: async (pending) => {
-				await storage.put("pending", pending);
-				await this.rearm();
+				await Promise.all([storage.put("pending", pending), storage.setAlarm(this.clock() + SETTLE_AFTER_MS)]);
 			},
 			delete: async () => {
 				await storage.delete("pending");
@@ -611,7 +612,8 @@ export class WebHostCore {
 				if (missing.length) return refuse(400, "bad_paths", `the manifest does not list ${JSON.stringify(missing.slice(0, 3))}`);
 				job = { id: op.job!, owner: op.owner, where, fromSeq: stored.seq, toSeq: stored.seq + 1, generatedAt: new Date(this.clock()).toISOString(), paths,
 					sizes: Object.fromEntries(paths.map((p) => [p, listed.get(p)!.size])), remaining: [...paths], committed: false, at: this.clock() };
-				await this.storage.put(`job:${job.id}`, job);
+				// the job and its alarm together, before the first bucket write (review r4 #3)
+				await Promise.all([this.storage.put(`job:${job.id}`, job), this.storage.setAlarm(this.clock() + SETTLE_AFTER_MS)]);
 			}
 			const manifest = await this.job(env, job);
 			if (!manifest) return refuse(409, "manifest_changed", "this host's manifest moved on: sync again");
