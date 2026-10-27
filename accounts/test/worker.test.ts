@@ -1711,3 +1711,35 @@ test("review r6 #3: an unchanged partial measurement is not taken again at once;
 	assert.equal((await keys()).ReadOnly, true);
 	assert.ok(lists() > before, "measured again after the deletion");
 });
+
+for (const how of ["fails", "is refused its claim"] as const) {
+	test(`review r7 #1: a measurement that ${how} after writes were charged answers with the stored figure: read-only past the quota`, async () => {
+		const s3 = people();
+		const store = new MemoryStore();
+		let now = Date.parse("2026-10-27T12:00:00Z");
+		const { deps } = fakeDeps(s3, store, { now: () => now });
+		const tight = env({ QUOTA_BYTES: String(stored(s3, OWNER).bytes + 10_000) });
+		const keys = async () => (await call(handle, tight, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } })).json();
+		assert.equal((await keys()).ReadOnly, undefined, "measured under the quota: read-write");
+		now += 301_000; // past QUOTA_RECHECK_S: the next request measures again
+		// as that request claims, web writes are charged past the line: WHY written and charged here, not through a route,
+		// the review's trigger was two folders' objects each admitting a write on the same figure (PEP 0003 §3.7's
+		// disclosed overlap), which one test process cannot interleave on demand
+		const real = store.claimMeasurement.bind(store);
+		let charged = false;
+		store.claimMeasurement = async (...args: Parameters<MemoryStore["claimMeasurement"]>) => {
+			charged = true;
+			const claimed = how === "fails" ? await real(...args) : false;
+			s3.put(`users/${OWNER.userId}/notes/hosts/${WEB}/late.bin`, "l".repeat(14_000));
+			await store.addUsage(OWNER.userId, 14_000, 1);
+			if (how === "fails") s3.fail = (method) => method === "LIST"; // and the measurement's listing then fails
+			return claimed;
+		};
+		const answer = await keys();
+		s3.fail = null;
+		assert.ok(charged);
+		const limit = Number(tight.QUOTA_BYTES);
+		assert.ok(stored(s3, OWNER).bytes > limit && (await store.usage(OWNER.userId))!.bytes > limit, "stored past the quota, and the stored figure says so");
+		assert.equal(answer.ReadOnly, true, `the review saw read-write keys from the figure taken before the measurement (ReadOnly: ${answer.ReadOnly})`);
+	});
+}
