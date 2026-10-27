@@ -36,19 +36,15 @@ const PROJECT = "robotparts";
 const PEOPLE = { A: "maker@example.com", B: "stranger@example.com" };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// WHY: step 9b restarts the stack, and Node's fetch keeps sockets to the old server in its pool; a request sent on one
-// dies at once with UND_ERR_SOCKET ("other side closed": it never reached a server) and the socket is dropped. Such a
-// request is sent again, up to five times; any other failure is the proof's to report.
-const firstFetch = globalThis.fetch;
-globalThis.fetch = async (input, init) => {
-	for (let attempt = 1; ; attempt++) {
-		try {
-			return await firstFetch(input, init);
-		} catch (error) {
-			if (error?.cause?.code !== "UND_ERR_SOCKET" || attempt === 5) throw error;
-		}
-	}
-};
+/** After a restart (step 9b): Node's fetch keeps sockets to the old server in its pool, and a request sent on one dies
+ *  before reaching anything. WHY a fresh dispatcher and not a retry: a retry could replay a request the server did
+ *  get; dropping the pool means nothing is ever sent twice. */
+async function freshConnections() {
+	const key = Symbol.for("undici.globalDispatcher.1");
+	const old = globalThis[key];
+	globalThis[key] = new old.constructor();
+	await old.destroy();
+}
 
 const checks = [];
 function check(name, ok, detail = "") {
@@ -309,6 +305,7 @@ async function run(stack, cli) {
 	const wPut = await a.write(`/fs/v1/folders/${PROJECT}/web/saved/w.json`, { method: "PUT", body: wText, raw: true, headers: { "Content-Type": "application/json" } });
 	dev("down");
 	dev("up", { QUOTA_BYTES: "1" });
+	await freshConnections();
 	// the machine's cached read-write keys would run out within their lifetime (5 min); the proof drops them instead
 	rmSync(join(homeA, ".folder-sync", "session.json"), { force: true });
 	const ro = fsync(cli, homeA, site, ["credentials"]);
@@ -336,6 +333,7 @@ async function run(stack, cli) {
 	check("over quota the round still pulls: the web file it had not seen is on disk", existsSync(join(folderA, "hosts", webHost || "none", "saved", "w.json")) && readFileSync(join(folderA, "hosts", webHost || "none", "saved", "w.json"), "utf8") === wText);
 	dev("down");
 	dev("up");
+	await freshConnections();
 	rmSync(join(homeA, ".folder-sync", "session.json"), { force: true }); // likewise its read-only ones
 	const backUnder = fsync(cli, homeA, site, ["sync", "--once", "--dir", folderA]);
 	check("back under the quota, the held file goes", backUnder.code === 0 && existsSync(machineKey("saved/held.json")), (backUnder.out + backUnder.err).trim().split("\n").slice(-1)[0]);
