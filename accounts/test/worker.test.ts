@@ -744,3 +744,25 @@ test("review r1 #4: with X-Folder-Sync-Keep-Newest: at, an older heart arriving 
 	assert.equal(JSON.parse(s3.text(key)!).at, "2000-01-01T00:00:00Z");
 	assert.deepEqual(mismatched(s3), []);
 });
+
+test("review r1 #2: a cookie write names the user its page shows (X-Folder-Sync-User); another user's tab is refused", async () => {
+	const s3 = people();
+	const { deps } = fakeDeps(s3);
+	const sisterWeb = `users/${SISTER.userId}/robotparts/hosts/`;
+	const before = [...s3.objects.keys()].filter((k) => k.startsWith(sisterWeb)).length;
+	// tab 1 still shows the owner; the browser's cookie is now the sister's (signed out and in again in tab 2)
+	const stale = { ...cookie(SISTER), Origin: SITE, "X-Folder-Sync": "1", "X-Folder-Sync-User": OWNER.userId };
+	const put = await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/a.json", { method: "PUT", headers: stale, body: '{"part": "a", "saved": true, "at": "2026-10-26T12:00:00Z"}' });
+	assert.equal(put.status, 409);
+	assert.equal((await put.json()).error, "wrong_user");
+	const patch = await call(handle, env(), deps, "/fs/v1/folders/robotparts", { method: "PATCH", headers: { ...stale, "Content-Type": "application/json" }, body: '{"visibility":"public"}' });
+	assert.equal(patch.status, 409);
+	// a page that does not say who it is signed in as is refused too
+	const unnamed = { ...cookie(SISTER), Origin: SITE, "X-Folder-Sync": "1" };
+	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/a.json", { method: "PUT", headers: unnamed, body: "{}" })).status, 409);
+	assert.equal([...s3.objects.keys()].filter((k) => k.startsWith(sisterWeb)).length, before, "nothing landed in the sister's folder");
+	assert.equal((await deps.store.folder(SISTER.userId, "robotparts")), null, "and her folder was not published");
+	// the sister's own page, naming her, writes; a machine's bearer needs no such header (its token is one person)
+	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/a.json", { method: "PUT", headers: { ...unnamed, "X-Folder-Sync-User": SISTER.userId }, body: "{}" })).status, 200);
+	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts", { origin: OWN, method: "PATCH", headers: { Authorization: "Bearer token-sister-laptop", "Content-Type": "application/json" }, body: '{"visibility":"private"}' })).status, 200);
+});
