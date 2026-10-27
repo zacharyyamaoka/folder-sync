@@ -482,6 +482,9 @@ export interface DeleteJob {
 	sizes: Record<string, number>;
 	remaining: string[];
 	committed: boolean;
+	/** Saved true before the manifest write is first tried: until then the job cannot have committed (review r6 #1).
+	 *  Absent on a job saved before this field existed: treated as tried. */
+	committing?: boolean;
 	at: number;
 }
 
@@ -511,6 +514,10 @@ async function advance(bucket: WritableBucket, job: DeleteJob, save: (job: Delet
 		if (stored.seq === job.fromSeq) {
 			const next = jobManifest(job, stored);
 			const body = manifestBytes(next);
+			if (!job.committing) {
+				job.committing = true;
+				await save(job);
+			}
 			if (!(await writeManifest(bucket, w, next, object.etag))) {
 				await drop();
 				return null;
@@ -521,8 +528,12 @@ async function advance(bucket: WritableBucket, job: DeleteJob, save: (job: Delet
 			// again), never charges it twice
 			await store.addUsage(job.owner, body.byteLength - bytes.byteLength, 0);
 			current = next;
-		} else if (stored.seq === job.toSeq) {
-			job.committed = true; // committed before a restart cut the job off
+		} else if (stored.seq >= job.toSeq && job.committing !== false) {
+			// the manifest write was tried and the seq is at or past the job's: it committed before a restart cut the job
+			// off, maybe with later changes on top. WHY kept (review r6 #1): dropped, its files would stay stored and
+			// counted with nothing left to delete them; and should the write not have landed after all, the fence below
+			// never deletes a path the current manifest lists
+			job.committed = true;
 			await save(job);
 		} else {
 			await drop();
@@ -636,7 +647,7 @@ export class WebHostCore {
 				const missing = paths.filter((p) => !listed.has(p));
 				if (missing.length) return refuse(400, "bad_paths", `the manifest does not list ${JSON.stringify(missing.slice(0, 3))}`);
 				job = { id: op.job!, owner: op.owner, where, fromSeq: stored.seq, toSeq: stored.seq + 1, generatedAt: new Date(this.clock()).toISOString(), paths,
-					sizes: Object.fromEntries(paths.map((p) => [p, listed.get(p)!.size])), remaining: [...paths], committed: false, at: this.clock() };
+					sizes: Object.fromEntries(paths.map((p) => [p, listed.get(p)!.size])), remaining: [...paths], committed: false, committing: false, at: this.clock() };
 				// the job and its alarm together, before the first bucket write (review r4 #3)
 				await Promise.all([this.storage.put(`job:${job.id}`, job), this.storage.setAlarm(this.clock() + SETTLE_AFTER_MS)]);
 			}
