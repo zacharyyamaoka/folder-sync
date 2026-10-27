@@ -12,10 +12,14 @@ package e2e
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -349,6 +353,118 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 		a2.env = append(a2.env[:len(a2.env)-1], "FOLDER_SYNC_CREDENTIAL_PROCESS="+process(rootA))
 	})
 
+	t.Run("over quota: read-only keys hold uploads, deletes go through the accounts server, pull still works", func(t *testing.T) {
+		// review r2 #7. A1's credential process answers read-only keys with ReadOnly and Reason, as the accounts Worker
+		// does past a person's quota; A1 is signed in (account.json) to a stand-in for the Worker's delete endpoint,
+		// which applies exactly what folder-sync sends with A's own read-write key.
+		minted := func(scope string) map[string]any {
+			out, err := exec.Command(standin, "mint", "--account", account, "--parent", parentID+":"+parentSecret,
+				"--endpoint", endpoint, "--bucket", scopedBucket, "--prefix", rootA, "--scope", scope, "--ttl", "15m").Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var c map[string]any
+			json.Unmarshal(out, &c)
+			return c
+		}
+		send := func(method, key string, body []byte) int {
+			c := minted("object-read-write")
+			req, _ := http.NewRequest(method, endpoint+"/"+scopedBucket+"/"+key, bytes.NewReader(body))
+			sum := sha256.Sum256(body)
+			s3.SignWithToken(req, fmt.Sprint(c["AccessKeyId"]), fmt.Sprint(c["SecretAccessKey"]), fmt.Sprint(c["SessionToken"]), "auto", time.Now(), hex.EncodeToString(sum[:]))
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			return resp.StatusCode
+		}
+		var calls []map[string]any
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Paths    []string        `json:"paths"`
+				Manifest json.RawMessage `json:"manifest"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			calls = append(calls, map[string]any{"path": r.URL.Path, "auth": r.Header.Get("Authorization"), "paths": body.Paths, "manifest": string(body.Manifest)})
+			if r.Method != "POST" || r.URL.Path != "/fs/v1/folders/home/hosts/"+idA1+"/delete" || r.Header.Get("Authorization") != "Bearer tok-a1" {
+				w.WriteHeader(404)
+				return
+			}
+			send("PUT", rootA+"home/hosts/"+idA1+"/manifest.json", body.Manifest)
+			for _, path := range body.Paths {
+				send("DELETE", rootA+"home/hosts/"+idA1+"/"+path, nil)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"seq":0,"deleted":%s}`, mustJSON(body.Paths))
+		}))
+		defer server.Close()
+		accountJSON := filepath.Join(a1.home, ".folder-sync", "account.json")
+		os.WriteFile(accountJSON, []byte(`{"schema":"folder-sync-account/1","server":"`+server.URL+`","token":"tok-a1","user":{"id":"aaa","email":"a@example.com"}}`), 0o600)
+		defer os.Remove(accountJSON)
+		script := filepath.Join(work, "read-only.sh")
+		os.WriteFile(script, []byte("#!/bin/sh\n"+standin+" mint --account "+account+" --parent "+parentID+":"+parentSecret+" --endpoint "+endpoint+
+			" --bucket "+scopedBucket+" --prefix "+rootA+" --scope object-read-only --ttl 15m | sed '1s/^{/{\"ReadOnly\":true,\"Reason\":\"this account holds 2 GiB of its 1 GiB (test)\",/'\n"), 0o755)
+		argv, _ := json.Marshal([]string{script})
+		normal := a1.env[len(a1.env)-1]
+		a1.env = append(a1.env[:len(a1.env)-1], "FOLDER_SYNC_CREDENTIAL_PROCESS="+string(argv))
+
+		// meanwhile A2 (under no such limit) writes a file A1 should still receive
+		writeFile(t, filepath.Join(a2.folder, "tracks", "while-over.md"), "written while A1 was over quota\n", time.Time{})
+		w.must(a2, "sync", "--once")
+		writeFile(t, filepath.Join(a1.folder, "tracks", "new.md"), "a new file, held\n", time.Time{})
+		os.Remove(filepath.Join(a1.folder, "tracks", "a.md"))
+		gateBefore := len(readGateLog(t, gateLog))
+		out, code := w.run(a1, "sync", "--once", "--discover")
+		if code == 0 || !strings.Contains(out, "this account holds 2 GiB of its 1 GiB (test)") || !strings.Contains(out, "held") {
+			t.Fatalf("a round over quota must fail naming the reason and the held upload: exit %d: %s", code, out)
+		}
+		for _, e := range readGateLog(t, gateLog)[gateBefore:] {
+			if !e.Allowed {
+				t.Errorf("the round tried something its read-only keys may not do: %+v", e)
+			}
+		}
+		if len(calls) != 1 || fmt.Sprint(calls[0]["paths"]) != "[tracks/a.md]" {
+			t.Fatalf("the delete goes to the accounts server, once: %v", calls)
+		}
+		var sent struct {
+			Seq   int `json:"seq"`
+			Files []struct {
+				Path string `json:"path"`
+			} `json:"files"`
+		}
+		json.Unmarshal([]byte(calls[0]["manifest"].(string)), &sent)
+		for _, f := range sent.Files {
+			if f.Path == "tracks/a.md" || f.Path == "tracks/new.md" {
+				t.Fatalf("the manifest sent must be the last one minus the delete, the held upload not in it: %s", calls[0]["manifest"])
+			}
+		}
+		if _, ok := w.object(rootA + "home/hosts/" + idA1 + "/tracks/a.md"); ok {
+			t.Fatal("the deleted file is still in the bucket")
+		}
+		if _, ok := w.object(rootA + "home/hosts/" + idA1 + "/tracks/new.md"); ok {
+			t.Fatal("an upload went through with read-only keys")
+		}
+		for _, key := range w.objects(rootA + "_trash/home/" + idA1) {
+			if content, _ := w.object(key); content == "A's track, edited\n" {
+				t.Fatalf("the delete went to the trash, which still counts: %s", key)
+			}
+		}
+		if got, err := os.ReadFile(filepath.Join(a1.folder, "hosts", idA2, "tracks", "while-over.md")); err != nil || string(got) != "written while A1 was over quota\n" {
+			t.Fatalf("over quota, A1 must still pull: %v %q\n%s", err, got, out)
+		}
+		status := w.must(a1, "status")
+		if !strings.Contains(status, "FAILED") || !strings.Contains(status, "this account holds 2 GiB") {
+			t.Fatalf("status must show why: %s", status)
+		}
+		// back under the quota: read-write keys again, and the held upload goes
+		a1.env = append(a1.env[:len(a1.env)-1], normal)
+		w.must(a1, "sync", "--once")
+		if _, ok := w.object(rootA + "home/hosts/" + idA1 + "/tracks/new.md"); !ok {
+			t.Fatal("the held upload did not go once the keys could write")
+		}
+	})
+
 	t.Run("signed out: exit 4 and the cached keys are dropped", func(t *testing.T) {
 		script := filepath.Join(work, "signed-out.sh")
 		os.WriteFile(script, []byte("#!/bin/sh\necho 'this machine is signed out' >&2\nexit 3\n"), 0o755)
@@ -365,4 +481,9 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 			t.Fatal("session.json survived a signed-out answer")
 		}
 	})
+}
+
+func mustJSON(v any) string {
+	data, _ := json.Marshal(v)
+	return string(data)
 }
