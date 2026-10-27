@@ -1441,3 +1441,29 @@ test("review r4 #7: a backup that cannot be removed after an undo is charged unt
 	assert.deepEqual(await counted(), stored(s3, OWNER), "and credited them");
 	assert.deepEqual(mismatched(s3), []);
 });
+
+test("review r4 #5: a measurement that stopped early is a lower bound: deletion credits never make it 'under quota'", async () => {
+	const s3 = people();
+	// 999 tiny files that sort before everything else of the owner's but the trash, then a 10,000-byte file of A's machine
+	for (let n = 0; n < 999; n++) s3.put(`users/${OWNER.userId}/a-bulk/${String(n).padStart(4, "0")}`, "x");
+	const base = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/`;
+	const m = JSON.parse(s3.text(`${base}manifest.json`)!);
+	const big = "b".repeat(10_000);
+	m.files.push({ path: "cad/big.bin", size: big.length, mtime: "2026-10-26T11:00:00Z", sha256: createHash("sha256").update(big).digest("hex"), written_at: "2026-10-26T12:00:00Z" });
+	s3.put(`${base}cad/big.bin`, big);
+	s3.put(`${base}manifest.json`, JSON.stringify(m));
+	let now = Date.parse("2026-10-26T12:34:56Z");
+	const store = new MemoryStore();
+	const { deps } = fakeDeps(s3, store, { now: () => now });
+	const tight = env({ QUOTA_BYTES: "900" });
+	const keys = async () => (await call(handle, tight, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } })).json();
+	assert.equal((await keys()).ReadOnly, true, "over: the first page alone exceeds 900 bytes");
+	const del = await call(handle, tight, deps, `/fs/v1/folders/robotparts/hosts/${MACHINE}/delete`, { origin: OWN, method: "POST",
+		headers: { Authorization: "Bearer token-owner-laptop", "Content-Type": "application/json" }, body: JSON.stringify({ job: JOB, from_seq: m.seq, paths: ["cad/big.bin"] }) });
+	assert.equal(del.status, 200);
+	assert.ok(stored(s3, OWNER).bytes > 900, "still over: a thousand small files remain");
+	for (const later of [0, 601_000, 1_202_000]) {
+		now = Date.parse("2026-10-26T12:34:56Z") + later;
+		assert.equal((await keys()).ReadOnly, true, `at +${later / 1000} s: still read-only (the review saw read-write keys on a negative usage)`);
+	}
+});
