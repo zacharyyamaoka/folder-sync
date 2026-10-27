@@ -494,27 +494,37 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 	return json(answer.status, answer.body, answer.headers ?? {});
 }
 
-/** The parts of a manifest entry a machine's delete must leave exactly as they were. */
-const entryKey = (e: ManifestEntry) => JSON.stringify([e.path, e.size, e.mtime, e.sha256, e.written_at]);
+/** The largest body POST …/hosts/<host>/delete takes: a list of paths, nothing else. */
+const DELETE_BODY_MAX = 256 * 1024;
 
-/** A machine's deletes while its keys are read-only (over quota, §3.7, review r2 #7). The machine sends the manifest it
- *  would have published and the paths it drops; this checks the manifest is exactly the stored one minus those paths
- *  (and the next seq), writes it (If-Match: the machine is still its host's one writer), then deletes the files
- *  permanently, with no trash copy, and lowers the person's usage by what went. WHY permanent: the trash still counts,
- *  so a delete into it would leave the person over quota for its 30 days. WHY bearer only: a machine's own host. */
+/** A machine's deletes while its keys are read-only (over quota, §3.7, review r2 #7). The machine sends only the seq of
+ *  the manifest it last published and the paths it drops; the server builds the next manifest itself from the stored
+ *  one: those entries removed, seq + 1, the server's time (review r3 #1: a manifest from the caller would be an upload
+ *  channel past the quota). It writes it (If-Match), then deletes the files permanently, with no trash copy, and
+ *  lowers the person's usage. WHY permanent: the trash still counts. WHY bearer only: a machine's own host. */
 async function machineDelete(request: Request, env: Env, deps: Deps, app: App | null, project: string, host: string): Promise<Response> {
 	if (!/^bearer\s+\S/i.test(request.headers.get("Authorization") || "")) return fail(401, "signed_out", "a machine deletes with its own session (folder-sync login)");
 	const person = await deps.person(request, "bearer", app);
 	if (!person) return fail(401, "signed_out", "this machine is signed out (signed out or revoked): run folder-sync login");
 	if (!HOST_ID.test(host)) return fail(400, "bad_host", "a host is its lowercase UUID");
+	if (Number(request.headers.get("Content-Length") || 0) > DELETE_BODY_MAX) return fail(413, "too_large", "a delete is a list of paths, at most 256 KiB");
+	const raw = await request.arrayBuffer();
+	if (raw.byteLength > DELETE_BODY_MAX) return fail(413, "too_large", "a delete is a list of paths, at most 256 KiB");
 	if ((await deps.store.webHost(person.userId, project)) === host) return fail(400, "web_host", "the web host's files are deleted with DELETE …/web/<path>");
-	const body = await jsonBody(request);
-	if (body instanceof Response) return body;
+	let body: Record<string, unknown>;
+	try {
+		body = JSON.parse(new TextDecoder().decode(raw));
+	} catch {
+		return fail(400, "bad_request", "the body is not JSON");
+	}
+	if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((k) => k !== "from_seq" && k !== "paths")) {
+		return fail(400, "bad_request", "the body is { from_seq, paths } and nothing else: the server builds the manifest");
+	}
 	const paths = body.paths;
-	const sent = body.manifest as Manifest;
 	if (!Array.isArray(paths) || !paths.length || paths.length > 10_000 || paths.some((p) => typeof p !== "string") || new Set(paths).size !== paths.length) {
 		return fail(400, "bad_paths", "paths is a list of one or more distinct file paths");
 	}
+	if (!Number.isSafeInteger(body.from_seq)) return fail(400, "bad_seq", "from_seq is the seq of the manifest this machine last published");
 	const owner = person.userId; // WHY: the session's root, never the request's
 	const root = userRoot(owner);
 	const bucket = await bucketFor(env, deps, folderPrefix(owner, project), "object-read-write", READ_TTL_S);
@@ -523,25 +533,25 @@ async function machineDelete(request: Request, env: Env, deps: Deps, app: App | 
 	if (!stored || !("arrayBuffer" in stored)) return fail(404, "not_found", "this person has no such host in this folder");
 	const storedBytes = await stored.arrayBuffer();
 	const old = validateManifest(JSON.parse(new TextDecoder().decode(storedBytes)) as Manifest, project, host);
-	const refuse = (why: string) => fail(400, "bad_manifest_change", why);
-	try {
-		if (!sent || typeof sent !== "object") return refuse("manifest is the host's next manifest");
-		validateManifest(sent, project, host);
-	} catch (error) {
-		return refuse(error instanceof Error ? error.message : String(error));
-	}
-	if (sent.schema !== SCHEMA || sent.host_name !== old.host_name || sent.seq !== old.seq + 1) return refuse("the manifest must be the stored one's next (same host, seq + 1)");
-	const dropped = new Set(paths as string[]);
+	if (old.seq !== body.from_seq) return fail(409, "manifest_changed", `this host's manifest is at seq ${old.seq}, not ${body.from_seq}: sync again`);
 	const listed = new Map(old.files.map((e) => [e.path, e]));
 	const missing = (paths as string[]).filter((p) => !listed.has(p));
-	if (missing.length) return refuse(`the manifest does not list ${JSON.stringify(missing.slice(0, 3))}`);
-	const kept = old.files.filter((e) => !dropped.has(e.path)).map(entryKey).sort();
-	if (JSON.stringify(kept) !== JSON.stringify((sent.files ?? []).map(entryKey).sort())) return refuse("the manifest must be exactly the stored one minus these paths");
-	const next = new TextEncoder().encode(`${JSON.stringify({ ...sent, files: [...(sent.files ?? [])] }, null, 2)}\n`);
-	const written = await bucket.put(key("manifest.json"), next, { ifMatch: stored.etag, contentType: "application/json" });
+	if (missing.length) return fail(400, "bad_paths", `the manifest does not list ${JSON.stringify(missing.slice(0, 3))}`);
+	const dropped = new Set(paths as string[]);
+	const next: Manifest = {
+		schema: SCHEMA,
+		project,
+		host_id: host,
+		host_name: old.host_name,
+		seq: old.seq + 1,
+		generated_at: new Date(deps.now()).toISOString(),
+		files: old.files.filter((e) => !dropped.has(e.path)),
+	};
+	const nextBytes = new TextEncoder().encode(`${JSON.stringify(next, null, 2)}\n`);
+	const written = await bucket.put(key("manifest.json"), nextBytes, { ifMatch: stored.etag, contentType: "application/json" });
 	if (!written.ok) return fail(409, "manifest_changed", "this host's manifest changed meanwhile: sync again");
 	// the manifest no longer lists them: a delete that fails leaves a stray, which the host's next reconcile moves away
-	let bytes = next.byteLength - storedBytes.byteLength;
+	let bytes = nextBytes.byteLength - storedBytes.byteLength;
 	let objects = 0;
 	const deleted: string[] = [];
 	for (const path of paths as string[]) {
@@ -555,7 +565,7 @@ async function machineDelete(request: Request, env: Env, deps: Deps, app: App | 
 		objects -= 1;
 	}
 	await deps.store.addUsage(owner, bytes, objects);
-	return json(200, { seq: sent.seq, deleted });
+	return json(200, { seq: next.seq, deleted, manifest: next });
 }
 
 async function jsonBody(request: Request): Promise<Record<string, unknown> | Response> {

@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -367,7 +368,7 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 			json.Unmarshal(out, &c)
 			return c
 		}
-		send := func(method, key string, body []byte) int {
+		send := func(method, key string, body []byte) []byte {
 			c := minted("object-read-write")
 			req, _ := http.NewRequest(method, endpoint+"/"+scopedBucket+"/"+key, bytes.NewReader(body))
 			sum := sha256.Sum256(body)
@@ -376,27 +377,47 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			resp.Body.Close()
-			return resp.StatusCode
+			defer resp.Body.Close()
+			data, _ := io.ReadAll(resp.Body)
+			return data
 		}
 		var calls []map[string]any
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// the protocol of the Worker's endpoint (review r3 #1): { from_seq, paths } in, the server's own manifest out
 			var body struct {
-				Paths    []string        `json:"paths"`
-				Manifest json.RawMessage `json:"manifest"`
+				FromSeq int64    `json:"from_seq"`
+				Paths   []string `json:"paths"`
 			}
 			json.NewDecoder(r.Body).Decode(&body)
-			calls = append(calls, map[string]any{"path": r.URL.Path, "auth": r.Header.Get("Authorization"), "paths": body.Paths, "manifest": string(body.Manifest)})
+			calls = append(calls, map[string]any{"path": r.URL.Path, "auth": r.Header.Get("Authorization"), "paths": body.Paths, "from_seq": body.FromSeq})
 			if r.Method != "POST" || r.URL.Path != "/fs/v1/folders/home/hosts/"+idA1+"/delete" || r.Header.Get("Authorization") != "Bearer tok-a1" {
 				w.WriteHeader(404)
 				return
 			}
-			send("PUT", rootA+"home/hosts/"+idA1+"/manifest.json", body.Manifest)
+			var stored map[string]any
+			json.Unmarshal(send("GET", rootA+"home/hosts/"+idA1+"/manifest.json", nil), &stored)
+			if int64(stored["seq"].(float64)) != body.FromSeq {
+				w.WriteHeader(409)
+				return
+			}
+			gone := map[string]bool{}
+			for _, path := range body.Paths {
+				gone[path] = true
+			}
+			var files []any
+			for _, f := range stored["files"].([]any) {
+				if !gone[f.(map[string]any)["path"].(string)] {
+					files = append(files, f)
+				}
+			}
+			stored["files"], stored["seq"], stored["generated_at"] = files, body.FromSeq+1, time.Now().UTC().Format(time.RFC3339)
+			next, _ := json.Marshal(stored)
+			send("PUT", rootA+"home/hosts/"+idA1+"/manifest.json", next)
 			for _, path := range body.Paths {
 				send("DELETE", rootA+"home/hosts/"+idA1+"/"+path, nil)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"seq":0,"deleted":%s}`, mustJSON(body.Paths))
+			fmt.Fprintf(w, `{"seq":%d,"deleted":%s,"pending":[],"manifest":%s}`, body.FromSeq+1, mustJSON(body.Paths), next)
 		}))
 		defer server.Close()
 		accountJSON := filepath.Join(a1.home, ".folder-sync", "account.json")
@@ -427,16 +448,15 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 		if len(calls) != 1 || fmt.Sprint(calls[0]["paths"]) != "[tracks/a.md]" {
 			t.Fatalf("the delete goes to the accounts server, once: %v", calls)
 		}
-		var sent struct {
-			Seq   int `json:"seq"`
+		var kept struct {
 			Files []struct {
 				Path string `json:"path"`
 			} `json:"files"`
 		}
-		json.Unmarshal([]byte(calls[0]["manifest"].(string)), &sent)
-		for _, f := range sent.Files {
+		json.Unmarshal([]byte(send("GET", rootA+"home/hosts/"+idA1+"/manifest.json", nil)), &kept)
+		for _, f := range kept.Files {
 			if f.Path == "tracks/a.md" || f.Path == "tracks/new.md" {
-				t.Fatalf("the manifest sent must be the last one minus the delete, the held upload not in it: %s", calls[0]["manifest"])
+				t.Fatalf("the published manifest must be the last one minus the delete, the held upload not in it: %v", kept.Files)
 			}
 		}
 		if _, ok := w.object(rootA + "home/hosts/" + idA1 + "/tracks/a.md"); ok {

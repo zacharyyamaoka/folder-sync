@@ -222,7 +222,7 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 	}
 
 	if p.Creds.ReadOnly {
-		return p.pushReadOnly(ctx, prev, changed, deleted, now, result)
+		return p.pushReadOnly(ctx, prev, changed, deleted, result)
 	}
 
 	remoteRoot := rclone.Path(p.Config.Bucket, p.HostPrefix(p.Host.ID))
@@ -293,52 +293,73 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 	return nil
 }
 
+// DeleteAnswer is the accounts server's answer to a delete: the manifest it built and published for this host, the
+// paths whose objects are gone, and (review r3 #2) the ones it will still delete.
+type DeleteAnswer struct {
+	Seq      int64             `json:"seq"`
+	Deleted  []string          `json:"deleted"`
+	Pending  []string          `json:"pending"`
+	Manifest manifest.Manifest `json:"manifest"`
+}
+
 // pushReadOnly is a push with read-only keys (review r2 #7): nothing is uploaded; deletes go through the accounts server,
-// which checks the manifest is exactly the last one minus them, deletes them permanently and lowers the usage; the
-// last manifest minus the deletes is then this machine's. WHY the last one and not next: next would list the uploads
-// it holds, and the server takes nothing but deletes.
-func (p *Project) pushReadOnly(ctx context.Context, prev manifest.Manifest, changed, deleted []string, now string, result *Result) error {
+// which builds the next manifest from the published one minus them (review r3 #1), deletes them permanently and lowers
+// the usage. The manifest it answers becomes this machine's, once checked to be exactly that.
+func (p *Project) pushReadOnly(ctx context.Context, prev manifest.Manifest, changed, deleted []string, result *Result) error {
 	if len(deleted) > 0 {
 		if p.RemoteDelete == nil {
 			return fmt.Errorf("the storage keys are read-only (%s) and this machine is not signed in to an accounts server to delete through", p.Creds.Reason)
 		}
-		gone := make(map[string]bool, len(deleted))
-		for _, path := range deleted {
-			gone[path] = true
-		}
-		var files []manifest.Entry
-		for _, e := range prev.Files {
-			if !gone[e.Path] {
-				files = append(files, e)
-			}
-		}
-		name := prev.HostName // WHY the last one's: the server takes the manifest only as exactly the last one minus the deletes
-		if name == "" {
-			name = p.Host.Name
-		}
-		m := manifest.Manifest{Schema: manifest.Schema, Project: p.Config.Project, HostID: p.Host.ID, HostName: name,
-			Seq: prev.Seq + 1, GeneratedAt: now, Files: files}
-		m.Sort()
-		if err := m.Validate(); err != nil {
-			return fmt.Errorf("refusing to publish an invalid manifest: %w", err)
-		}
-		if err := p.RemoteDelete(ctx, deleted, m); err != nil {
+		answer, err := p.RemoteDelete(ctx, prev.Seq, deleted)
+		if err != nil {
 			return fmt.Errorf("deleting through the accounts server: %w", err)
 		}
+		if err := checkDeleteAnswer(prev, deleted, answer.Manifest, p.Host.ID, p.Config.Project); err != nil {
+			return fmt.Errorf("the accounts server's manifest: %w", err)
+		}
 		pending := p.statePath("manifest.pending.json")
-		if err := manifest.Save(pending, m); err != nil {
+		if err := manifest.Save(pending, answer.Manifest); err != nil {
 			return err
 		}
 		if err := os.Rename(pending, p.statePath("manifest.json")); err != nil {
 			return err
 		}
-		result.Deleted = deleted
+		result.Deleted = answer.Deleted
 		result.ManifestWritten = true
-		p.say("%d deleted permanently through the accounts server (over quota: no trash copy)", len(deleted))
+		p.say("%d deleted permanently through the accounts server (over quota: no trash copy)", len(answer.Deleted))
 	}
 	if len(changed) > 0 {
 		result.HeldUploads = changed
 		return &ReadOnlyError{Reason: p.Creds.Reason, Held: len(changed)}
+	}
+	return nil
+}
+
+// checkDeleteAnswer: the server's manifest is this host's, the next seq, and exactly prev minus the deleted paths.
+func checkDeleteAnswer(prev manifest.Manifest, deleted []string, next manifest.Manifest, hostID, project string) error {
+	if err := next.Validate(); err != nil {
+		return err
+	}
+	if next.HostID != hostID || next.Project != project || next.Seq != prev.Seq+1 {
+		return fmt.Errorf("it is %s/%s seq %d, not this host's seq %d", next.Project, next.HostID, next.Seq, prev.Seq+1)
+	}
+	gone := make(map[string]bool, len(deleted))
+	for _, path := range deleted {
+		gone[path] = true
+	}
+	want := map[string]manifest.Entry{}
+	for _, e := range prev.Files {
+		if !gone[e.Path] {
+			want[e.Path] = e
+		}
+	}
+	if len(want) != len(next.Files) {
+		return fmt.Errorf("it lists %d files, not %d", len(next.Files), len(want))
+	}
+	for _, e := range next.Files {
+		if w, ok := want[e.Path]; !ok || w != e {
+			return fmt.Errorf("it changes %s", e.Path)
+		}
 	}
 	return nil
 }

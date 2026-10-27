@@ -1067,33 +1067,33 @@ test("review r2 #7: over quota, a machine still gets keys: read-only, saying why
 });
 
 test("review r2 #7: a machine deletes through the Worker: exactly its manifest minus those paths, permanently, usage down", async () => {
+	// since review r3 #1 the request is { from_seq, paths } and the server builds the manifest
 	const s3 = people();
 	const store = new MemoryStore();
 	const { deps } = fakeDeps(s3, store);
 	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/w.json", { method: "PUT", headers: page(OWNER), body: "{}\n" })).status, 200);
 	const base = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/`;
 	const old = JSON.parse(s3.text(`${base}manifest.json`)!);
-	const minus = (paths: string[], extra: Record<string, unknown> = {}) => ({ ...old, seq: old.seq + 1, generated_at: "2026-10-26T13:00:00Z", files: old.files.filter((f: { path: string }) => !paths.includes(f.path)), ...extra });
 	const del = (body: unknown, headers: Record<string, string> = { Authorization: "Bearer token-owner-laptop" }, host = MACHINE) =>
 		call(handle, env(), deps, `/fs/v1/folders/robotparts/hosts/${host}/delete`, { origin: OWN, method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
 	const before = new Map(s3.objects);
 	for (const [what, answer, status] of [
-		["a browser's cookie", del({ paths: ["cad/bracket.step"], manifest: minus(["cad/bracket.step"]) }, page(OWNER)), 401],
-		["a manifest that also drops another file", del({ paths: ["cad/bracket.step"], manifest: minus(["cad/bracket.step", "saved/a.json"]) }), 400],
-		["a manifest that also changes another file", del({ paths: ["cad/bracket.step"], manifest: { ...minus(["cad/bracket.step"]), files: minus(["cad/bracket.step"]).files.map((f: { path: string }) => ({ ...f, sha256: "0".repeat(64) })) } }), 400],
-		["a path the manifest does not list", del({ paths: ["nope.md"], manifest: minus([]) }), 400],
-		["a seq that is not the next", del({ paths: ["cad/bracket.step"], manifest: minus(["cad/bracket.step"], { seq: old.seq + 2 }) }), 400],
-		["the web host (its deletes are DELETE …/web/<path>)", del({ paths: ["saved/w.json"], manifest: {} }, undefined, WEB), 400],
-		["a host this person does not have", del({ paths: ["saved/a.json"], manifest: {} }, undefined, SISTER_MACHINE), 404],
+		["a browser's cookie", del({ from_seq: old.seq, paths: ["cad/bracket.step"] }, page(OWNER)), 401],
+		["a path the manifest does not list", del({ from_seq: old.seq, paths: ["nope.md"] }), 400],
+		["a from_seq that is not the stored one", del({ from_seq: old.seq - 1, paths: ["cad/bracket.step"] }), 409],
+		["the web host (its deletes are DELETE …/web/<path>)", del({ from_seq: 1, paths: ["saved/w.json"] }, undefined, WEB), 400],
+		["a host this person does not have", del({ from_seq: 1, paths: ["saved/a.json"] }, undefined, SISTER_MACHINE), 404],
 	] as const) {
 		assert.equal((await answer).status, status, what);
 		assert.deepEqual([...s3.objects.keys()].sort(), [...before.keys()].sort(), `${what}: nothing changed`);
 	}
 	// measured first (a machine's keys measure the person), then the delete
 	await call(handle, env(), deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } });
-	const ok = await del({ paths: ["cad/bracket.step"], manifest: minus(["cad/bracket.step"]) });
+	const ok = await del({ from_seq: old.seq, paths: ["cad/bracket.step"] });
 	assert.equal(ok.status, 200);
-	assert.deepEqual(await ok.json(), { seq: old.seq + 1, deleted: ["cad/bracket.step"] });
+	const answer = await ok.json();
+	assert.equal(answer.seq, old.seq + 1);
+	assert.deepEqual(answer.deleted, ["cad/bracket.step"]);
 	assert.equal(s3.objects.has(`${base}cad/bracket.step`), false, "deleted");
 	assert.ok(![...s3.objects.keys()].some((k) => k.includes("_trash/") && k.endsWith("cad/bracket.step")), "permanently: no trash copy");
 	assert.deepEqual(JSON.parse(s3.text(`${base}manifest.json`)!).files.map((f: { path: string }) => f.path), ["saved/a.json"]);

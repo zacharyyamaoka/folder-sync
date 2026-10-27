@@ -27,7 +27,6 @@ import (
 	"folder-sync/internal/creds"
 	"folder-sync/internal/host"
 	"folder-sync/internal/layout"
-	"folder-sync/internal/manifest"
 	"folder-sync/internal/rclone"
 	"folder-sync/internal/rclonebin"
 	"folder-sync/internal/s3"
@@ -392,8 +391,16 @@ func openProject(dir string, out io.Writer) (*syncer.Project, error) {
 	}
 	// signed in: the accounts server takes this machine's deletes while its keys are read-only (over quota, PEP 0003 §3.7)
 	if a, client, err := signedIn(l); err == nil {
-		p.RemoteDelete = func(ctx context.Context, paths []string, next manifest.Manifest) error {
-			return client.DeleteFiles(ctx, a.Token, p.Config.Project, p.Host.ID, paths, next)
+		p.RemoteDelete = func(ctx context.Context, fromSeq int64, paths []string) (syncer.DeleteAnswer, error) {
+			data, err := client.DeleteFiles(ctx, a.Token, p.Config.Project, p.Host.ID, fromSeq, paths)
+			if err != nil {
+				return syncer.DeleteAnswer{}, err
+			}
+			var answer syncer.DeleteAnswer
+			if err := json.Unmarshal(data, &answer); err != nil {
+				return syncer.DeleteAnswer{}, fmt.Errorf("the accounts server's answer is not JSON")
+			}
+			return answer, nil
 		}
 	}
 	return p, nil
