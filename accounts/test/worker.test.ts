@@ -1348,3 +1348,33 @@ test("review r3 #9: the device page never shows folder-sync login as the way in;
 	assert.ok(pages.some((html) => /desktop app \(coming\)/.test(html)), "a machine syncs through the desktop app (coming)");
 	assert.ok(pages.some((html) => /<details[\s\S]*folder-sync login[\s\S]*<\/details>/.test(html)), "the CLI is still there, for developers");
 });
+
+// ------------------------------------------------------------------------------------------------ round-4 review
+
+/** One folder's object over in-memory storage, as the Durable Object runs it, with ops for the owner's web host. */
+async function folderObject(s3: MemoryS3, store = new MemoryStore(), e: Env = env()) {
+	const { WebHostCore } = (await import("../src/webhost.ts")) as Record<string, any>;
+	const storage = objectStorage();
+	const core = new WebHostCore(e, s3.fetch, storage, () => Date.parse("2026-10-26T12:34:56Z"), store);
+	const op = (method: string, path: string, extra: Record<string, unknown> = {}) => core.run({ method, owner: OWNER.userId, project: "robotparts", hostId: WEB, path, ...extra });
+	const put = (path: string, text: string) => op("PUT", path, { data: new TextEncoder().encode(text) });
+	return { core, storage, store, op, put };
+}
+
+test("review r4 #1: a delete's pending cleanup never erases a later replacement of the same path", async () => {
+	const s3 = people();
+	const { core, store, op, put } = await folderObject(s3);
+	const key = `users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/x.json`;
+	assert.equal((await put("saved/x.json", "old\n")).status, 200);
+	s3.fail = (method, k) => method === "DELETE" && k === key;
+	const gone = await op("DELETE", "saved/x.json", { permanent: true });
+	assert.equal(gone.status, 200);
+	assert.deepEqual(gone.body.pending, ["saved/x.json"], "committed; the object still to delete");
+	s3.fail = null;
+	assert.equal((await put("saved/x.json", "replacement\n")).status, 200);
+	await core.alarm();
+	assert.equal(s3.text(key), "replacement\n", "the review saw the alarm delete the replacement");
+	assert.deepEqual(mismatched(s3), []);
+	const counted = (await store.usage(OWNER.userId))!;
+	assert.deepEqual({ bytes: counted.bytes, objects: counted.objects }, stored(s3, OWNER));
+});
