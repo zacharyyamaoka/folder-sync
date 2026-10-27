@@ -107,13 +107,16 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 		if err := p.refreshCreds(); err != nil {
 			return err
 		}
-		if opts.ForceReconcile || ReconcileDue(last, started) {
+		// WHY no reconcile with read-only keys (review r2 #7): it moves strays to the trash, a write; peers are still
+		// looked for, so the pull below finds them
+		reconcile := opts.ForceReconcile || ReconcileDue(last, started)
+		if reconcile && !p.Creds.ReadOnly {
 			if err := p.Reconcile(ctx, stamp, &result); err != nil {
 				return fmt.Errorf("reconcile: %w", err)
 			}
 			last.LastReconcile = p.Now().UTC().Format(time.RFC3339Nano)
 			last.LastDiscover = last.LastReconcile
-		} else if opts.ForceDiscover || due(last.LastDiscover, DiscoverEvery, started) {
+		} else if reconcile || opts.ForceDiscover || due(last.LastDiscover, DiscoverEvery, started) {
 			if err := p.Discover(ctx); err != nil {
 				return fmt.Errorf("discover peers: %w", err)
 			}
@@ -122,9 +125,11 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 		// WHY an empty folder still pulls (review r1 #6): the refusal guards this machine's files in the bucket, not
 		// its copies of the others'; an edit on another machine or the web must still arrive. The round still
 		// fails with the refusal, so `status` and the watch loop show it.
+		// and so does a push whose read-only keys (over quota) held its uploads (review r2 #7)
 		var refused error
 		var empty *EmptyFolderError
-		if err := p.Push(ctx, stamp, &result); errors.As(err, &empty) {
+		var readOnly *ReadOnlyError
+		if err := p.Push(ctx, stamp, &result); errors.As(err, &empty) || errors.As(err, &readOnly) {
 			refused = fmt.Errorf("push: %w", err)
 		} else if err != nil {
 			return fmt.Errorf("push: %w", err)

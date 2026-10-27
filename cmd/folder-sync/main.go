@@ -27,6 +27,7 @@ import (
 	"folder-sync/internal/creds"
 	"folder-sync/internal/host"
 	"folder-sync/internal/layout"
+	"folder-sync/internal/manifest"
 	"folder-sync/internal/rclone"
 	"folder-sync/internal/rclonebin"
 	"folder-sync/internal/s3"
@@ -385,7 +386,17 @@ func openProject(dir string, out io.Writer) (*syncer.Project, error) {
 	if err != nil {
 		return nil, err
 	}
-	return syncer.Open(folder, l, credentialEnv(l, os.Getenv, os.Executable), bin, out)
+	p, err := syncer.Open(folder, l, credentialEnv(l, os.Getenv, os.Executable), bin, out)
+	if err != nil {
+		return nil, err
+	}
+	// signed in: the accounts server takes this machine's deletes while its keys are read-only (over quota, PEP 0003 §3.7)
+	if a, client, err := signedIn(l); err == nil {
+		p.RemoteDelete = func(ctx context.Context, paths []string, next manifest.Manifest) error {
+			return client.DeleteFiles(ctx, a.Token, p.Config.Project, p.Host.ID, paths, next)
+		}
+	}
+	return p, nil
 }
 
 func cmdSync(args []string, out io.Writer) error {

@@ -3,6 +3,7 @@
 package syncer
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -109,6 +110,9 @@ type Project struct {
 	Log      io.Writer // round log (~/.folder-sync/logs/<key>.log)
 	Out      io.Writer // what the user sees
 	Now      func() time.Time
+	// RemoteDelete deletes this machine's files through the accounts server while its keys are read-only (an account
+	// over its storage quota, docs/peps/0003 §3.7): next is the manifest without them. Nil when not signed in.
+	RemoteDelete func(ctx context.Context, paths []string, next manifest.Manifest) error
 
 	// reportedSkips are the names last round already reported, so --watch says each once.
 	reportedSkips map[string]bool

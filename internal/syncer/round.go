@@ -55,6 +55,7 @@ type Result struct {
 	Uploaded        []string        `json:"uploaded"`
 	Deleted         []string        `json:"deleted"`
 	HeldDeletes     []string        `json:"held_deletes"`
+	HeldUploads     []string        `json:"held_uploads"` // read-only keys (over quota): not uploaded this round
 	ManifestWritten bool            `json:"manifest_written"`
 	Skipped         []names.Skipped `json:"skipped"`
 	Peers           []PeerResult    `json:"peers"`
@@ -126,6 +127,21 @@ type EmptyFolderError struct {
 
 func (e *EmptyFolderError) Error() string {
 	return fmt.Sprintf("%s looks empty or unmounted (0 files, the last manifest had %d); refusing to delete them all", e.Folder, e.Had)
+}
+
+// ReadOnlyError is a push with read-only keys (the account is over its storage quota, docs/peps/0003 §3.7) that had
+// uploads to hold: the round still pulls, and reports this.
+type ReadOnlyError struct {
+	Reason string
+	Held   int
+}
+
+func (e *ReadOnlyError) Error() string {
+	why := e.Reason
+	if why == "" {
+		why = "the storage keys are read-only"
+	}
+	return fmt.Sprintf("this account is over its storage quota (%s): %d upload(s) held until it is back under; deleting files frees space", why, e.Held)
 }
 
 // Push uploads this machine's changes, moves overwritten and deleted objects to
@@ -205,6 +221,10 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		deleted = nil
 	}
 
+	if p.Creds.ReadOnly {
+		return p.pushReadOnly(ctx, prev, changed, deleted, now, result)
+	}
+
 	remoteRoot := rclone.Path(p.Config.Bucket, p.HostPrefix(p.Host.ID))
 	trash := rclone.Path(p.Config.Bucket, p.TrashPrefix(stamp))
 	if len(changed) > 0 {
@@ -270,6 +290,56 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 	}
 	os.Remove(p.statePath("manifest.missing"))
 	result.ManifestWritten = true
+	return nil
+}
+
+// pushReadOnly is a push with read-only keys (review r2 #7): nothing is uploaded; deletes go through the accounts server,
+// which checks the manifest is exactly the last one minus them, deletes them permanently and lowers the usage; the
+// last manifest minus the deletes is then this machine's. WHY the last one and not next: next would list the uploads
+// it holds, and the server takes nothing but deletes.
+func (p *Project) pushReadOnly(ctx context.Context, prev manifest.Manifest, changed, deleted []string, now string, result *Result) error {
+	if len(deleted) > 0 {
+		if p.RemoteDelete == nil {
+			return fmt.Errorf("the storage keys are read-only (%s) and this machine is not signed in to an accounts server to delete through", p.Creds.Reason)
+		}
+		gone := make(map[string]bool, len(deleted))
+		for _, path := range deleted {
+			gone[path] = true
+		}
+		var files []manifest.Entry
+		for _, e := range prev.Files {
+			if !gone[e.Path] {
+				files = append(files, e)
+			}
+		}
+		name := prev.HostName // WHY the last one's: the server takes the manifest only as exactly the last one minus the deletes
+		if name == "" {
+			name = p.Host.Name
+		}
+		m := manifest.Manifest{Schema: manifest.Schema, Project: p.Config.Project, HostID: p.Host.ID, HostName: name,
+			Seq: prev.Seq + 1, GeneratedAt: now, Files: files}
+		m.Sort()
+		if err := m.Validate(); err != nil {
+			return fmt.Errorf("refusing to publish an invalid manifest: %w", err)
+		}
+		if err := p.RemoteDelete(ctx, deleted, m); err != nil {
+			return fmt.Errorf("deleting through the accounts server: %w", err)
+		}
+		pending := p.statePath("manifest.pending.json")
+		if err := manifest.Save(pending, m); err != nil {
+			return err
+		}
+		if err := os.Rename(pending, p.statePath("manifest.json")); err != nil {
+			return err
+		}
+		result.Deleted = deleted
+		result.ManifestWritten = true
+		p.say("%d deleted permanently through the accounts server (over quota: no trash copy)", len(deleted))
+	}
+	if len(changed) > 0 {
+		result.HeldUploads = changed
+		return &ReadOnlyError{Reason: p.Creds.Reason, Held: len(changed)}
+	}
 	return nil
 }
 

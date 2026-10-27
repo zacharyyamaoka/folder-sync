@@ -410,6 +410,24 @@ type Folder struct {
 }
 
 // SetVisibility makes a project "public" or "private" (PATCH /fs/v1/folders/<project>).
+// DeleteFiles deletes a host's files through the server while this machine's storage keys are read-only (its account
+// is over its quota, docs/peps/0003 §3.7): POST /fs/v1/folders/<project>/hosts/<host>/delete with the paths and the
+// host's next manifest (exactly the last one minus them). The server deletes them permanently and lowers the usage.
+func (c *Client) DeleteFiles(ctx context.Context, token, project, host string, paths []string, next any) error {
+	status, data, err := c.call(ctx, http.MethodPost, "/fs/v1/folders/"+url.PathEscape(project)+"/hosts/"+url.PathEscape(host)+"/delete",
+		map[string]any{"paths": paths, "manifest": next}, token)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusUnauthorized {
+		return ErrSignedOut
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("%s did not delete them: %v", c.Server, serverError(status, data))
+	}
+	return nil
+}
+
 func (c *Client) SetVisibility(ctx context.Context, token, project, visibility string) (Folder, error) {
 	status, data, err := c.call(ctx, http.MethodPatch, "/fs/v1/folders/"+url.PathEscape(project), map[string]string{"visibility": visibility}, token)
 	if err != nil {
