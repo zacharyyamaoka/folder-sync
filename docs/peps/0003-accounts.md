@@ -131,7 +131,9 @@ the sync engine and keeps every rule.
 - `folder-sync login --key` keeps v0's stored bucket key (and the key in the environment still wins, unchanged).
 - `folder-sync credentials` prints the credential-process JSON from `POST /fs/v1/credentials` (exit 3 when signed out
   or revoked). **When `account.json` exists and no `FOLDER_SYNC_CREDENTIAL_PROCESS` or key is set, folder-sync uses
-  itself as the credential process**, so 0002's cache, refresh, exit codes and root rules apply unchanged.
+  itself as the credential process**, so 0002's cache, refresh, exit codes and root rules apply unchanged. Its argv
+  names the sign-in (`credentials --account <user id>@<server>`), so `session.json`'s cache, keyed by the argv, is that
+  sign-in's alone; `credentials` exits 3 for any other, and `login` and `logout` delete `session.json` (review r1 #1).
 - `folder-sync logout` (deletes the session on the server, then the file), `folder-sync whoami`.
 - `folder-sync publish --public | --private` sets the folder's visibility through `PATCH`; `publish --viewer` is unchanged.
 

@@ -192,7 +192,8 @@ func TestCredentialsFromItselfIsWhatSyncRuns(t *testing.T) {
 	}
 	signIn(t, l, "http://127.0.0.1:1")
 	env := credentialEnv(l, getenv(map[string]string{"HOME": "/x"}), self)
-	if got := env(creds.EnvCredentialProcess); got != `["/opt/folder-sync/bin/folder-sync","credentials"]` {
+	// the argv names the sign-in, so its cache is that sign-in's alone (review r1 #1)
+	if got := env(creds.EnvCredentialProcess); got != `["/opt/folder-sync/bin/folder-sync","credentials","--account","ownerABC123@http://127.0.0.1:1"]` {
 		t.Fatalf("signed in: %q", got)
 	}
 	if env("HOME") != "/x" {

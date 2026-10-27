@@ -27,6 +27,9 @@ import (
 // WHY through the credential process and not a second code path: PEP 0002's cache, refresh, exit codes and root rules
 // then apply unchanged (internal/creds/process.go). WHY the environment's key still wins: PEP 0003 §3.5 keeps it
 // first, so a cloud agent's explicit key is never overridden by a stale sign-in.
+// WHY --account <who> in the argv (review r1 #1): session.json's cache is keyed by the argv, so the keys cached for
+// A's sign-in are never handed out once account.json is B's; and `credentials` itself refuses an --account that is
+// not account.json's (exit 3, which drops the cache).
 func credentialEnv(l layout.Layout, getenv func(string) string, executable func() (string, error)) func(string) string {
 	if getenv(creds.EnvCredentialProcess) != "" || getenv(creds.EnvAccessKeyID) != "" || getenv(creds.EnvSecretAccessKey) != "" {
 		return getenv
@@ -38,7 +41,11 @@ func credentialEnv(l layout.Layout, getenv func(string) string, executable func(
 	if err != nil {
 		return getenv
 	}
-	argv, err := json.Marshal([]string{self, "credentials"})
+	args := []string{self, "credentials"}
+	if a, err := account.Load(l.Account); err == nil {
+		args = append(args, "--account", a.Identity())
+	}
+	argv, err := json.Marshal(args)
 	if err != nil {
 		return getenv
 	}
@@ -106,6 +113,10 @@ func loginDevice(serverFlag string, out io.Writer) error {
 	if err := account.Save(l.Account, account.Account{Server: server, Token: token, User: user, SignedIn: time.Now().UTC().Format(time.RFC3339)}); err != nil {
 		return err
 	}
+	// WHY: keys cached for whoever was signed in before are never this person's (review r1 #1)
+	if err := os.Remove(l.Session); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	fmt.Fprintf(out, "Signed in as %s at %s (account root %s); kept in %s (mode 0600).\n", user.Email, server, root, l.Account)
 	if _, ok, _ := creds.FromEnv(os.Getenv); ok {
 		fmt.Fprintf(out, "Note: a bucket key is set in the environment; it still wins over this sign-in.\n")
@@ -140,6 +151,10 @@ func cmdLogout(args []string, out io.Writer) error {
 	if err := os.Remove(l.Account); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// the keys this sign-in cached go with it (review r1 #1)
+	if err := os.Remove(l.Session); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	fmt.Fprintf(out, "Signed out: %s deleted, and %s.\n", l.Account, remote)
 	return nil
 }
@@ -169,10 +184,12 @@ func cmdWhoami(args []string, out io.Writer) error {
 }
 
 // cmdCredentials prints this machine's short-lived keys in the credential-process shape (PEP 0002): exit 0, or 3
-// signed out or revoked, or 1 for anything transient. folder-sync runs it itself (credentialEnv).
+// signed out or revoked, or 1 for anything transient. folder-sync runs it itself (credentialEnv), with --account
+// naming the sign-in it expects: another one is exit 3 too.
 func cmdCredentials(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("credentials", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	expected := fs.String("account", "", "only for this sign-in (<user id>@<server>); another one exits 3")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -182,6 +199,10 @@ func cmdCredentials(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	a, client, err := signedIn(l)
+	if err == nil && *expected != "" && *expected != a.Identity() {
+		fmt.Fprintf(stderr, "folder-sync credentials: this machine is signed in as %s now, not %s: the cached keys are dropped\n", a.Identity(), *expected)
+		return creds.ExitSignedOut
+	}
 	if err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()

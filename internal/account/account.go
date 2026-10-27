@@ -65,6 +65,10 @@ type Account struct {
 	SignedIn string `json:"signed_in_at"`
 }
 
+// Identity is who this sign-in is: "<user id>@<server>". The credential process folder-sync runs for itself carries
+// it, so keys cached for one sign-in are never handed to another (review r1 #1).
+func (a Account) Identity() string { return a.User.ID + "@" + a.Server }
+
 // Load reads account.json; ErrNotSignedIn when there is none.
 func Load(path string) (Account, error) {
 	data, err := os.ReadFile(path)
