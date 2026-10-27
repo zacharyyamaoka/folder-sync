@@ -178,7 +178,10 @@ next request measures again; only a complete measurement puts a person back unde
 delete job, a permanent web delete, a purge, a stray backup removed) never subtracts from the measured figure: it marks
 it stale, an upper bound, and counts a mutation; the next request measures again, and a measurement a deletion crossed
 is stored stale too (`0006_usage_stale.sql`; review r5 #2: a credit landing after a complete measurement counted the
-deletion twice and re-granted writes). A successful measurement releases its claim, so that can happen at once. A web write is admitted and
+deletion twice and re-granted writes). A successful measurement releases its claim, so that can happen at once. What web
+writes charge while a measurement lists is stored on top of its listing (`0007_usage_charged.sql`; review r6 #2: a listing
+taken before two writes landed erased their charges and re-granted writes): a write the listing did see is then counted
+twice, high until the next measurement, never low; and the request that measured answers with that stored figure. A web write is admitted and
 charged inside the folder's Durable Object, one at a time, by its net change to what is stored: the new bytes, one
 object, and the manifest's growth (a write that changes nothing costs nothing; a delete moves the file to `_trash/`,
 which still counts, and charges only the manifest's change) (review r2 #6). Two folders of one person have two

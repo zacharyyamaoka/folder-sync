@@ -92,7 +92,9 @@ export async function usageOf(store: Store, owner: string, quota: Quota, now: nu
 		const newer = await store.usage(owner);
 		return judged(newer && newer.measured_at ? newer : null, "is being measured again");
 	}
-	return measured;
+	// WHY the stored figure, not the listing (review r6 #2): it adds what writes charged while the listing ran
+	const accepted = await store.usage(owner);
+	return accepted && accepted.measured_at ? accepted : measured;
 }
 
 /** Why `usage` plus what is about to be added is over `quota`, or null when it is not. */

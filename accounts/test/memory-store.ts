@@ -60,6 +60,8 @@ export class MemoryStore implements Store {
 
 	readonly usageRows = new Map<string, { bytes: number; objects: number; measured_at: string; partial?: boolean; stale?: boolean }>();
 	readonly mutations = new Map<string, number>();
+	/** What writes charged since the current claim (review r6 #2): stored on top of the claim's listing. */
+	readonly charged = new Map<string, { bytes: number; objects: number }>();
 
 	async usage(owner: string) {
 		return this.usageRows.get(owner) ?? null;
@@ -69,7 +71,8 @@ export class MemoryStore implements Store {
 		const claim = this.claims.get(owner);
 		if (token !== undefined && claim?.token !== token) return false;
 		const crossed = token !== undefined && (this.mutations.get(owner) ?? 0) !== claim!.mutations;
-		this.usageRows.set(owner, { bytes, objects, measured_at: measuredAt, partial, stale: crossed });
+		const since = token !== undefined ? (this.charged.get(owner) ?? { bytes: 0, objects: 0 }) : { bytes: 0, objects: 0 };
+		this.usageRows.set(owner, { bytes: bytes + since.bytes, objects: objects + since.objects, measured_at: measuredAt, partial, stale: crossed });
 		if (token !== undefined) this.claims.set(owner, { ...claim!, until: 0 });
 		return true;
 	}
@@ -83,7 +86,10 @@ export class MemoryStore implements Store {
 			}
 			return;
 		}
-		if (row) this.usageRows.set(owner, { ...row, bytes: row.bytes + bytes, objects: row.objects + objects });
+		if (!row) return;
+		this.usageRows.set(owner, { ...row, bytes: row.bytes + bytes, objects: row.objects + objects });
+		const since = this.charged.get(owner) ?? { bytes: 0, objects: 0 };
+		this.charged.set(owner, { bytes: since.bytes + bytes, objects: since.objects + objects });
 	}
 
 	readonly claims = new Map<string, { until: number; token: string; mutations: number }>();
@@ -91,6 +97,7 @@ export class MemoryStore implements Store {
 	async claimMeasurement(owner: string, now: number, until: number, token: string) {
 		if ((this.claims.get(owner)?.until ?? 0) >= now) return false;
 		this.claims.set(owner, { until, token, mutations: this.mutations.get(owner) ?? 0 });
+		this.charged.set(owner, { bytes: 0, objects: 0 });
 		if (!this.usageRows.has(owner)) this.usageRows.set(owner, { bytes: 0, objects: 0, measured_at: "" });
 		return true;
 	}

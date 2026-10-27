@@ -5,5 +5,6 @@
 	"0003_usage_claim.sql": "a5b3a4187615da170632d2c77fa5926a1b5faaa2158b75fe005b5bf651256b6b",
 	"0004_usage_claim_token.sql": "6be6b7aae26392fc8e4bf96ca8c2e89df9bb4aa414a992377d3e7f0b32e4882d",
 	"0005_usage_partial.sql": "19074bd2c33a56e85d418dde51becc1442ede2a912ce14373e76f6ad3d68dfe1",
-	"0006_usage_stale.sql": "f24843dd5ed8160acbdca7ed57b5dd09b6b1d42b23407a81ca7cd649296999e8"
+	"0006_usage_stale.sql": "f24843dd5ed8160acbdca7ed57b5dd09b6b1d42b23407a81ca7cd649296999e8",
+	"0007_usage_charged.sql": "7d7cbe771c1e3b72a9c4e2c7b90b872725678c07a04543dd1735b28a04fd8849"
 }

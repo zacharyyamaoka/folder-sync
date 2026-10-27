@@ -100,9 +100,11 @@ export function d1Store(db: D1Like): Store {
 		},
 		async setUsage(owner, bytes, objects, measuredAt, token, partial = false) {
 			if (token !== undefined) {
-				// stale when a deletion crossed this measurement (its mutation count moved since the claim): measured again
-				// and the claim is released: a stale figure may be measured again at once (a failed listing keeps its minute)
-				const done = await run('UPDATE "usage" SET bytes = ?, objects = ?, measured_at = ?, partial = ?, stale = CASE WHEN mutations = claim_mutations THEN 0 ELSE 1 END, claimed_until = 0 WHERE owner_id = ? AND claim_token = ?', bytes, objects, measuredAt, partial ? 1 : 0, owner, token);
+				// stale when a deletion crossed this measurement (its mutation count moved since the claim): measured again.
+				// WHY plus what was charged since the claim (review r6 #2): a write that landed after the listing is not in
+				// it, so its charge stays (one that landed before is counted twice: high until the next measurement, never low).
+				// The claim is released: a stale figure may be measured again at once (a failed listing keeps its minute)
+				const done = await run('UPDATE "usage" SET bytes = ? + charged_bytes, objects = ? + charged_objects, measured_at = ?, partial = ?, stale = CASE WHEN mutations = claim_mutations THEN 0 ELSE 1 END, claimed_until = 0 WHERE owner_id = ? AND claim_token = ?', bytes, objects, measuredAt, partial ? 1 : 0, owner, token);
 				return (done.meta?.changes ?? 0) > 0;
 			}
 			await run(
@@ -116,12 +118,12 @@ export function d1Store(db: D1Like): Store {
 				await run('UPDATE "usage" SET stale = 1, mutations = mutations + 1 WHERE owner_id = ?', owner);
 				return;
 			}
-			await run('UPDATE "usage" SET bytes = bytes + ?, objects = objects + ? WHERE owner_id = ?', bytes, objects, owner);
+			await run('UPDATE "usage" SET bytes = bytes + ?, objects = objects + ?, charged_bytes = charged_bytes + ?, charged_objects = charged_objects + ? WHERE owner_id = ?', bytes, objects, bytes, objects, owner);
 		},
 		async claimMeasurement(owner, now, until, token) {
 			// one statement: a first claim inserts an unmeasured row (measured_at ''), a later one moves an expired claim
 			const done = await run(
-				'INSERT INTO "usage" (owner_id, bytes, objects, measured_at, claimed_until, claim_token) VALUES (?, 0, 0, \'\', ?, ?) ON CONFLICT (owner_id) DO UPDATE SET claimed_until = excluded.claimed_until, claim_token = excluded.claim_token, claim_mutations = "usage".mutations WHERE "usage".claimed_until < ?',
+				'INSERT INTO "usage" (owner_id, bytes, objects, measured_at, claimed_until, claim_token) VALUES (?, 0, 0, \'\', ?, ?) ON CONFLICT (owner_id) DO UPDATE SET claimed_until = excluded.claimed_until, claim_token = excluded.claim_token, claim_mutations = "usage".mutations, charged_bytes = 0, charged_objects = 0 WHERE "usage".claimed_until < ?',
 				owner, until, token, now,
 			);
 			return (done.meta?.changes ?? 0) > 0;
