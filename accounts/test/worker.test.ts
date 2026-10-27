@@ -916,3 +916,40 @@ test("review r2 #5: keep-newest settles an exact tie the same whichever write ar
 	const b = await stored([false, true], false);
 	assert.equal(a.saved, b.saved, "the review saw false one way round and true the other");
 });
+
+/** What is really stored under a person's root: bytes and objects. */
+function stored(s3: MemoryS3, who: Person) {
+	const entries = [...s3.objects].filter(([k]) => k.startsWith(`users/${who.userId}/`));
+	return { bytes: entries.reduce((sum, [, v]) => sum + v.byteLength, 0), objects: entries.length };
+}
+
+test("review r2 #6: concurrent web writes are admitted one at a time, and usage counts what is really stored", async () => {
+	const s3 = people();
+	const store = new MemoryStore();
+	const { deps } = fakeDeps(s3, store);
+	const quota = stored(s3, OWNER).bytes + 1000;
+	const e = env({ QUOTA_BYTES: String(quota), QUOTA_RECHECK_S: "3600" });
+	const answers = await Promise.all(Array.from({ length: 25 }, (_, n) =>
+		call(handle, e, deps, `/fs/v1/folders/robotparts/web/saved/p${n}.json`, { method: "PUT", headers: page(OWNER), body: "x".repeat(100) })));
+	const statuses = answers.map((a) => a.status);
+	assert.ok(statuses.includes(200) && statuses.includes(403), `some admitted, the rest refused: ${statuses}`);
+	const real = stored(s3, OWNER);
+	assert.ok(real.bytes <= quota, `stored ${real.bytes} bytes, over the ${quota} quota (the review saw all 25 admitted)`);
+	const counted = await store.usage(OWNER.userId);
+	assert.deepEqual({ bytes: counted!.bytes, objects: counted!.objects }, real, "the count is what is stored, manifest included");
+});
+
+test("review r2 #6: a write that changes nothing costs nothing; a replacement costs its trash copy and the manifest's change", async () => {
+	const s3 = people();
+	const store = new MemoryStore();
+	const { deps } = fakeDeps(s3, store);
+	const e = env({ QUOTA_BYTES: String(stored(s3, OWNER).bytes + 2000), QUOTA_RECHECK_S: "3600" });
+	const put = (body: string) => call(handle, e, deps, "/fs/v1/folders/robotparts/web/saved/same.json", { method: "PUT", headers: page(OWNER), body });
+	for (let n = 0; n < 11; n++) assert.equal((await put("y".repeat(100))).status, 200, `identical write ${n + 1} (the review saw the 11th refused)`);
+	assert.equal((await put("z".repeat(100))).status, 200);
+	const counted = await store.usage(OWNER.userId);
+	assert.deepEqual({ bytes: counted!.bytes, objects: counted!.objects }, stored(s3, OWNER));
+	assert.equal((await call(handle, e, deps, "/fs/v1/folders/robotparts/web/saved/same.json", { method: "DELETE", headers: page(OWNER) })).status, 200);
+	const after = await store.usage(OWNER.userId);
+	assert.deepEqual({ bytes: after!.bytes, objects: after!.objects }, stored(s3, OWNER), "a delete is counted too");
+});
