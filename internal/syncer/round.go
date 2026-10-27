@@ -410,8 +410,8 @@ func (p *Project) pushReadOnly(ctx context.Context, prev manifest.Manifest, chan
 		}
 		deleted = rest
 	}
-	for start := 0; start < len(deleted); start += deleteBatch {
-		job := deleteJob{Job: newJobID(), FromSeq: prev.Seq, Paths: deleted[start:min(start+deleteBatch, len(deleted))]}
+	for _, batch := range deleteBatches(deleted) {
+		job := deleteJob{Job: newJobID(), FromSeq: prev.Seq, Paths: batch}
 		data, _ := json.Marshal(job)
 		if err := os.WriteFile(jobPath, data, 0o600); err != nil {
 			return refusal(err)
@@ -423,8 +423,39 @@ func (p *Project) pushReadOnly(ctx context.Context, prev manifest.Manifest, chan
 	return refusal(nil)
 }
 
-// deleteBatch is how many paths one delete job carries (the server takes up to 400: a HEAD and a DELETE each).
-const deleteBatch = 400
+// deleteBatch is how many paths one delete job carries (the server takes up to 400: a HEAD and a DELETE each), and
+// deleteBodyMax how many bytes its request body may be (the server takes up to 256 KiB; the margin is for the seq).
+const (
+	deleteBatch   = 400
+	deleteBodyMax = 250 * 1024
+)
+
+// deleteBatches splits paths into jobs that each fit the server: at most deleteBatch paths and deleteBodyMax bytes of
+// {"from_seq":…,"job":"<uuid>","paths":[…]} as encoded. WHY bytes too (review r5 #3): 400 long paths were a 285 KB
+// request, refused with 413, and the job was kept and refused again for good.
+func deleteBatches(paths []string) [][]string {
+	envelope := len(`{"from_seq":9223372036854775807,"job":"00000000-0000-4000-8000-000000000000","paths":[]}`)
+	var batches [][]string
+	var batch []string
+	size := envelope
+	for _, path := range paths {
+		encoded, _ := json.Marshal(path)
+		cost := len(encoded) + 1 // the comma
+		if len(batch) > 0 && (len(batch) == deleteBatch || size+cost > deleteBodyMax) {
+			batches = append(batches, batch)
+			batch, size = nil, envelope
+		}
+		batch = append(batch, path)
+		size += cost
+	}
+	if len(batch) > 0 {
+		batches = append(batches, batch)
+	}
+	return batches
+}
+
+// ErrTooLarge: the accounts server refused a delete's request body as too large (413), before doing anything.
+var ErrTooLarge = errors.New("the delete request is too large")
 
 // keepManifest makes m this machine's published manifest (it already is, in the bucket).
 func (p *Project) keepManifest(m manifest.Manifest) error {

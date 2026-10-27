@@ -397,6 +397,9 @@ func openProject(dir string, out io.Writer) (*syncer.Project, error) {
 			if errors.As(err, &refused) && refused.Code == "manifest_changed" {
 				return syncer.DeleteAnswer{}, fmt.Errorf("%w: %v", syncer.ErrManifestChanged, err)
 			}
+			if errors.As(err, &refused) && refused.Status == 413 {
+				return syncer.DeleteAnswer{}, fmt.Errorf("%w: %v", syncer.ErrTooLarge, err)
+			}
 			if err != nil {
 				return syncer.DeleteAnswer{}, err
 			}
