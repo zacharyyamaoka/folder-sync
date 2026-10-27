@@ -88,12 +88,18 @@
   window.FSSignIn = { render, post, esc, session, AUTH };
 
   // /fs/signin itself (the device page draws its own card with device.js)
-  const box = document.querySelector('[data-testid="fs-page"] .fs-card');
-  if (box && !document.querySelector('script[src="/fs/site/device.js"]')) {
+  // WHY on DOMContentLoaded (desktop app proof, 2026-10-27): this script runs before the parser reaches device.js's
+  // <script> tag, so checking for it at once never found it; on the device page this boot then ran too, and a
+  // signed-in person was sent to /fs/device (its fs-return) without ?user_code= — over and over, a reload loop.
+  const boot = () => {
+    const box = document.querySelector('[data-testid="fs-page"] .fs-card');
+    if (!box || document.querySelector('script[src="/fs/site/device.js"]')) return;
     const back = meta('fs-return') || '/';
     session().then((current) => {
       if (current && current.user) return location.replace(back);
       render(box, { lead: 'Sign in to continue.', back: new URL(back, location.origin).href });
     });
-  }
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
 })();
