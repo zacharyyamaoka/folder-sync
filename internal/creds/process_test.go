@@ -333,3 +333,27 @@ func TestSessionTokenNeverShows(t *testing.T) {
 		t.Fatal(s)
 	}
 }
+
+// Review r2 #7: over its quota, an account's keys are read-only, and the process says so (ReadOnly, Reason); the
+// cached copy says so too, so a round from the cache still holds its uploads.
+func TestProcessReadOnlyKeysSaySoAndWhy(t *testing.T) {
+	f := newFake(t)
+	f.output(strings.Replace(goodOutput, `"Version":1,`, `"Version":1,"ReadOnly":true,"Reason":"this account holds 2 GiB of its 1 GiB",`, 1))
+	r := f.resolver(nil)
+	c, err := r.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.ReadOnly || c.Reason != "this account holds 2 GiB of its 1 GiB" {
+		t.Fatalf("read-only keys: %+v", c)
+	}
+	f.now = clockStart.Add(time.Minute)
+	if again, err := r.Current(); err != nil || f.runs() != 1 || !again.ReadOnly || again.Reason != c.Reason {
+		t.Fatalf("from the cache: %+v runs=%d %v", again, f.runs(), err)
+	}
+	f.output(goodOutput)
+	f.now = clockStart.Add(14 * time.Minute) // refresh due
+	if back, err := r.Current(); err != nil || back.ReadOnly || back.Reason != "" {
+		t.Fatalf("back under the quota: %+v %v", back, err)
+	}
+}
