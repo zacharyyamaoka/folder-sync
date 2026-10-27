@@ -45,6 +45,10 @@ type Creds struct {
 	Expiration   time.Time `json:"-"` // zero: the process gave none
 	Prefix       string    `json:"-"` // the account root every key starts with ("" or "users/AbC123/")
 	Bucket       string    `json:"-"` // the only bucket these credentials can use ("" = any)
+	// ReadOnly: the keys only read (an account over its storage quota, docs/peps/0003 §3.7): a round pulls, holds its
+	// uploads and sends its deletes through the accounts server. Reason says why, for the person.
+	ReadOnly bool   `json:"-"`
+	Reason   string `json:"-"`
 }
 
 // FromEnv reads the key from the environment. ok is false when no key is set.

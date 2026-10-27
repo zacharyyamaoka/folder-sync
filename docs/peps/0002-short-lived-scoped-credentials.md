@@ -21,6 +21,11 @@
      sign-in (vt) is the only thing that can refresh them; folder-sync stays ignorant of any app.
    - **WHY AWS's shape:** it is the stock convention every S3 tool already knows; folder-sync adds three fields an app
      needs to tell it (where, which bucket, which root), and ignores the rest.
+   - **`ReadOnly` and `Reason`** (optional, review r2 #7): `"ReadOnly": true` says the keys only read, as the accounts
+     Worker issues them to an account over its storage quota (PEP 0003 §3.7), and `Reason` says why, in a sentence
+     folder-sync prints. A round with read-only keys skips the reconcile, holds its uploads (the round fails, naming
+     them and the reason), sends its deletes to the accounts server (`POST …/hosts/<host>/delete`, which deletes them
+     permanently and lowers the usage), and still pulls. Absent, the keys read and write, as before.
 2. **A session token** is signed on every request, folder-sync's own (`x-amz-security-token` as a signed header) and
    rclone's (`RCLONE_CONFIG_FSREMOTE_SESSION_TOKEN`).
 3. **An account root.** When the keys carry a `Prefix` (`users/<id>/`), every key folder-sync reads or writes starts

@@ -102,6 +102,8 @@ type processOutput struct {
 	Prefix          string `json:"Prefix,omitempty"`
 	Region          string `json:"Region,omitempty"`
 	Provider        string `json:"Provider,omitempty"`
+	ReadOnly        bool   `json:"ReadOnly,omitempty"` // the keys only read (over quota); Reason says why
+	Reason          string `json:"Reason,omitempty"`
 }
 
 // sessionFile is ~/.folder-sync/session.json.
@@ -219,7 +221,7 @@ func (r *Resolver) build(out processOutput) (Creds, error) {
 	}
 	c := Creds{Schema: Schema, AccessKeyID: out.AccessKeyID, SecretAccessKey: out.SecretAccessKey,
 		SessionToken: out.SessionToken, Endpoint: out.Endpoint, Provider: out.Provider, Region: out.Region,
-		Prefix: out.Prefix, Bucket: out.Bucket, Source: "process"}
+		Prefix: out.Prefix, Bucket: out.Bucket, Source: "process", ReadOnly: out.ReadOnly, Reason: printable(out.Reason)}
 	if out.Expiration != "" {
 		t, err := time.Parse(time.RFC3339, out.Expiration)
 		if err != nil {
@@ -357,6 +359,20 @@ func errorKind(err error) string {
 		return execErr.Err.Error()
 	}
 	return "start failed"
+}
+
+// printable is a server's sentence as folder-sync prints it: control characters dropped, cut to 300 runes.
+func printable(text string) string {
+	text = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(text))
+	if runes := []rune(text); len(runes) > 300 {
+		text = string(runes[:300]) + "…"
+	}
+	return text
 }
 
 // capped is a stdout buffer that stops accepting bytes past max.
