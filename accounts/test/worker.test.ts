@@ -1121,3 +1121,36 @@ test("review r3 #4: a read whose folder cannot be settled answers 503 recovering
 	assert.equal(bundle.status, 200);
 	assert.ok((await bundle.json()).files.some((f: { host: string; text: string }) => f.host === WEB && f.text === '{"v": "one"}\n'));
 });
+
+test("review r3 #1: the delete endpoint builds the next manifest itself: the review's 1 MiB padding is no upload channel", async () => {
+	const s3 = people();
+	const store = new MemoryStore();
+	const { deps } = fakeDeps(s3, store);
+	const base = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/`;
+	const old = JSON.parse(s3.text(`${base}manifest.json`)!);
+	const del = (body: unknown) => call(handle, env({ QUOTA_BYTES: "1" }), deps, `/fs/v1/folders/robotparts/hosts/${MACHINE}/delete`,
+		{ origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+	await call(handle, env({ QUOTA_BYTES: "1" }), deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } });
+	const usedBefore = (await store.usage(OWNER.userId))!.bytes;
+	const before = new Map(s3.objects);
+	// the review: a one-byte quota, a delete carrying a manifest with a 1 MiB padding field
+	const padded = { ...old, seq: old.seq + 1, files: old.files.filter((f: { path: string }) => f.path !== "cad/bracket.step"), padding: "x".repeat(1 << 20) };
+	const exploit = await del({ from_seq: old.seq, paths: ["cad/bracket.step"], manifest: padded });
+	assert.equal(exploit.status, 413, "a body over the cap is refused before it is read (the review saw 200)");
+	// a small body with anything but from_seq and paths is refused too: the server builds the manifest
+	assert.equal((await del({ from_seq: old.seq, paths: ["cad/bracket.step"], manifest: { padding: "x" } })).status, 400);
+	assert.equal((await del({ from_seq: old.seq, paths: ["cad/bracket.step"], note: "x" })).status, 400);
+	assert.deepEqual([...s3.objects.keys()].sort(), [...before.keys()].sort(), "nothing changed");
+	assert.equal((await store.usage(OWNER.userId))!.bytes, usedBefore);
+	// the real delete: from_seq and paths only; the stored manifest is the server's own build
+	const ok = await del({ from_seq: old.seq, paths: ["cad/bracket.step"] });
+	assert.equal(ok.status, 200);
+	const answer = await ok.json();
+	const written = JSON.parse(s3.text(`${base}manifest.json`)!);
+	assert.deepEqual(Object.keys(written).sort(), ["files", "generated_at", "host_id", "host_name", "project", "schema", "seq"], "no field the caller made up");
+	assert.equal(written.seq, old.seq + 1);
+	assert.equal(written.generated_at, "2026-10-26T12:34:56.000Z", "the server's clock");
+	assert.deepEqual(written.files, old.files.filter((f: { path: string }) => f.path !== "cad/bracket.step"));
+	assert.deepEqual(answer.manifest, written, "the answer carries the manifest, for the machine to keep");
+	assert.ok((await store.usage(OWNER.userId))!.bytes < usedBefore, "and the usage went down");
+});
