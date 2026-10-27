@@ -20,6 +20,7 @@ import { appFor, apps } from "../src/apps.ts";
 import { handle, rawPath, returnPath, segments, type Deps, type Env, type Person } from "../src/app.ts";
 import { claimsOf, mint, ttlOf, userRoot } from "../src/creds.ts";
 import { signUpAllowed } from "../src/signup.ts";
+import { quotaOf, usageOf } from "../src/quota.ts";
 import { checkWebPath, deleteWebFile, memoryJournal, settle, stamp, writeWebFile } from "../src/webhost.ts";
 import { S3Bucket } from "../src/s3-bucket.ts";
 import { MemoryS3 } from "./memory-s3.ts";
@@ -1252,4 +1253,37 @@ test("review r3 #6: replacements rolled back leave no uncounted trash copies: th
 	const counted = (await store.usage(OWNER.userId))!;
 	assert.deepEqual({ bytes: counted.bytes, objects: counted.objects }, stored(s3, OWNER), "the review saw 547 bytes / 2 objects counted, 1,747 / 14 stored");
 	assert.deepEqual(mismatched(s3), []);
+});
+
+test("review r3 #7: a measurement that outlives its claim cannot overwrite a newer one", async () => {
+	const store = new MemoryStore();
+	const quota = quotaOf({ QUOTA_RECHECK_S: "300" });
+	const t0 = Date.parse("2026-10-26T12:00:00Z");
+	let finishA!: (value: { bytes: number; objects: number }) => void;
+	const a = usageOf(store, OWNER.userId, quota, t0, () => new Promise((done) => { finishA = done; }));
+	await new Promise((done) => setTimeout(done, 0)); // A holds the claim, its listing still running
+	const b = await usageOf(store, OWNER.userId, quota, t0 + 61_000, async () => ({ bytes: 2000, objects: 3 }));
+	assert.equal(b.bytes, 2000, "B claimed after A's claim ran out, and measured");
+	finishA({ bytes: 0, objects: 0 });
+	await a;
+	assert.equal((await store.usage(OWNER.userId))!.bytes, 2000, "A's late result is fenced off (the review saw it overwrite B with 0)");
+});
+
+test("review r3 #7: a measurement too old to trust gives read-only keys and refuses web writes; reads still work", async () => {
+	const s3 = people();
+	const store = new MemoryStore();
+	const now = Date.parse("2026-10-27T12:00:00Z");
+	const { deps } = fakeDeps(s3, store, { now: () => now });
+	await store.setUsage(OWNER.userId, 0, 0, "2026-10-26T12:00:00.000Z"); // a day old, and zero
+	s3.fail = (method) => method === "LIST";
+	const keys = await call(handle, env(), deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } });
+	assert.equal(keys.status, 200);
+	const body = await keys.json();
+	assert.equal(body.ReadOnly, true, "no write access on a day-old measurement (the review saw it renew write access)");
+	assert.match(body.Reason, /measured/);
+	const put = await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/n.json", { method: "PUT", headers: page(OWNER), body: "{}" });
+	assert.equal(put.status, 503);
+	assert.equal((await put.json()).error, "measuring");
+	s3.fail = null;
+	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts/bundle?prefix=saved/", { headers: cookie(OWNER) })).status, 200, "reads still work");
 });
