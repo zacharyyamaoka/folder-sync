@@ -314,7 +314,7 @@ async function run(stack, cli) {
 	check("over quota, folder-sync credentials prints read-only keys that say why", wPut.status === 200 && ro.code === 0 && roKeys?.ReadOnly === true && /bytes/.test(roKeys?.Reason || ""), roKeys ? { ReadOnly: roKeys.ReadOnly, Reason: roKeys.Reason } : ro.err);
 	const usage = () => {
 		const q = spawnSync(process.execPath, [join(ACCOUNTS, "node_modules", "wrangler", "bin", "wrangler.js"), "d1", "execute", "DB", "--local", "--persist-to", join(STATE, "d1"),
-			"--config", join(ACCOUNTS, "wrangler.toml"), "--json", "--command", `SELECT bytes, objects FROM usage WHERE owner_id = '${meA.user.id}'`], { cwd: ACCOUNTS, encoding: "utf8", env: { ...process.env, CI: "1", WRANGLER_SEND_METRICS: "false" } });
+			"--config", join(ACCOUNTS, "wrangler.toml"), "--json", "--command", `SELECT bytes, objects, stale FROM usage WHERE owner_id = '${meA.user.id}'`], { cwd: ACCOUNTS, encoding: "utf8", env: { ...process.env, CI: "1", WRANGLER_SEND_METRICS: "false" } });
 		try { return JSON.parse(q.stdout)[0].results[0] ?? null; } catch { return null; }
 	};
 	const usedBefore = usage();
@@ -328,8 +328,14 @@ async function run(stack, cli) {
 	check("a round over quota fails naming the quota and its held upload", overRound.code !== 0 && /over its storage quota/.test(overText) && /held/.test(overText), overText.trim().split("\n").slice(-2).join(" · "));
 	check("y.json is deleted through the Worker, permanently: gone from the bucket, no trash copy", !existsSync(machineKey("saved/y.json")) && trashOf().length === trashBefore);
 	check("held.json was not uploaded with read-only keys", !existsSync(machineKey("saved/held.json")));
-	const usedAfter = usage();
-	check("the usage went down by at least y.json", !!usedBefore && !!usedAfter && usedAfter.bytes <= usedBefore.bytes - Buffer.byteLength(yText) && usedAfter.objects === usedBefore.objects - 1, { before: usedBefore, after: usedAfter });
+	// WHY stale, then measured (review r5 #2): a deletion no longer subtracts from a figure a concurrent measurement may
+	// already have taken it out of; it marks the cached figure an upper bound, and the next request measures again
+	const cachedAfter = usage();
+	const measured = await (await a.fetch("/fs/v1/usage")).json();
+	const usedAfter = measured?.used;
+	check("the deletion marks the cached usage stale, and the next measurement is down by at least y.json",
+		cachedAfter?.stale === 1 && !!usedBefore && !!usedAfter && usedAfter.bytes <= usedBefore.bytes - Buffer.byteLength(yText) && usedAfter.objects === usedBefore.objects - 1,
+		{ before: usedBefore, cached: cachedAfter, measured: usedAfter });
 	check("over quota the round still pulls: the web file it had not seen is on disk", existsSync(join(folderA, "hosts", webHost || "none", "saved", "w.json")) && readFileSync(join(folderA, "hosts", webHost || "none", "saved", "w.json"), "utf8") === wText);
 	dev("down");
 	dev("up");
