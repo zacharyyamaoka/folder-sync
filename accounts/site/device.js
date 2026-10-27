@@ -1,5 +1,6 @@
 /* folder-sync accounts · approve a machine (PEP 0003 §3.5): the verification page of the device authorization grant
-   (RFC 8628). `folder-sync login` shows a code and this address; the person signs in here and approves. Better Auth's
+   (RFC 8628). A machine (the desktop app, coming; `folder-sync login` for developers) shows a code and this address;
+   the person signs in here and approves. Better Auth's
    own endpoints, on this origin's /fs/ mount (moved from Vibe Tracks' worker/site/device.js):
 
      GET  /fs/api/auth/device?user_code=…     claims the pending code for the signed-in person; its status
@@ -15,12 +16,17 @@
   const params = new URLSearchParams(location.search);
   const tidy = (code) => String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   const shown = (code) => (code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code);
+  // WHY the CLI only behind a disclosure (review r3 #9): a person with a browser never meets a terminal; syncing a
+  // folder to a computer is the desktop app's (coming), and the command line is for developers and cloud agents
+  const DESKTOP = '<p class="fs-small">To sync your folder to a computer, use the folder-sync desktop app (coming).</p>';
+  const DEVELOPERS = '<details class="fs-small"><summary>For developers</summary><p>A machine without the app signs in with '
+    + '<code>folder-sync login</code>, which shows a code to enter here; run it again for a new code.</p></details>';
 
   function askCode(note) {
-    box.innerHTML = '<h1>Sign in a machine</h1><p>Enter the code your machine shows (<code>folder-sync login</code>).</p>'
+    box.innerHTML = '<h1>Sign in a machine</h1><p>Enter the code your machine shows.</p>'
       + '<input data-testid="fs-device-code" autocomplete="off" spellcheck="false" placeholder="ABCD-EFGH">'
       + '<button class="fs-primary" data-testid="fs-device-continue">Continue</button>'
-      + (note ? `<p class="fs-error">${esc(note)}</p>` : '');
+      + (note ? `<p class="fs-error">${esc(note)}</p>` : '') + DESKTOP + DEVELOPERS;
     const input = box.querySelector('[data-testid="fs-device-code"]');
     const go = () => { const code = tidy(input.value); if (code) step(code); };
     box.querySelector('[data-testid="fs-device-continue"]').onclick = go;
@@ -36,10 +42,10 @@
       if (!r.ok) throw new Error((data && (data.error_description || data.message)) || `HTTP ${r.status}`);
       status = data.status;
     } catch (e) {
-      return askCode(`That code didn't work: ${(e && e.message) || e}. Codes last 15 minutes; run folder-sync login again for a new one.`);
+      return askCode(`That code didn't work: ${(e && e.message) || e}. Codes last 15 minutes; ask the machine for a new one.`);
     }
     if (status === 'approved') return done('This machine is already signed in.');
-    if (status === 'denied') return askCode('That request was denied. Run folder-sync login again for a new code.');
+    if (status === 'denied') return askCode('That request was denied. Ask the machine for a new code.');
     box.innerHTML = '<h1>Sign in a machine?</h1>'
       + `<p>A machine asks to sync your folders${user ? ` as <b>${esc(user.email)}</b>` : ''}. Its code:</p>`
       + `<p class="fs-device-code" data-testid="fs-device-shown">${esc(shown(code))}</p>`
