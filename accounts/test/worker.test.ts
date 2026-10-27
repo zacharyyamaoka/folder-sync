@@ -1318,3 +1318,33 @@ test("review r3 #8: production email codes, when delivery is configured: the rou
 	const auth = readFileSync(fileURLToPath(new URL("../src/auth.ts", import.meta.url)), "utf-8");
 	assert.match(auth, /emailSender\(env, \(request\) => fetch\(request\)\)/, "auth.ts sends production codes through it");
 });
+
+test("review r3 #9: the device page never shows folder-sync login as the way in; the CLI is behind 'For developers'", async () => {
+	const { runInNewContext } = await import("node:vm");
+	const script = readFileSync(fileURLToPath(new URL("../site/device.js", import.meta.url)), "utf-8");
+	const pages: string[] = [];
+	const element = () => ({ onclick: null, onkeydown: null, value: "", hidden: true, textContent: "", focus() {} });
+	const box = {
+		set innerHTML(html: string) { pages.push(html); },
+		get innerHTML() { return pages.at(-1) ?? ""; },
+		querySelector: () => element(),
+	};
+	const render = async (search: string, fetchAnswer: () => Promise<Response>) => {
+		const window: Record<string, unknown> = {
+			FSSignIn: { render: () => undefined, post: async () => ({}), esc: (s: string) => String(s), session: async () => ({ user: { email: "a@example.com" } }), AUTH: "/fs/api/auth" },
+		};
+		runInNewContext(script, { window, document: { querySelector: () => box }, location: { search, href: `https://robotparts.dev/fs/device${search}` }, URLSearchParams, fetch: fetchAnswer });
+		await new Promise((done) => setTimeout(done, 10));
+	};
+	await render("", async () => new Response("{}"));
+	await render("?user_code=ABCDEFGH", async () => new Response('{"message":"expired"}', { status: 400 }));
+	await render("?user_code=ABCDEFGH", async () => new Response('{"status":"denied"}', { status: 200 }));
+	assert.ok(pages.length >= 3, `the page drew ${pages.length} times`);
+	for (const html of pages) {
+		const shown = html.replace(/<details[\s\S]*?<\/details>/g, "");
+		assert.doesNotMatch(shown, /folder-sync login/, `outside a disclosure: ${shown}`);
+		for (const disclosure of html.match(/<details[\s\S]*?<\/details>/g) ?? []) assert.match(disclosure, /<summary>For developers<\/summary>/);
+	}
+	assert.ok(pages.some((html) => /desktop app \(coming\)/.test(html)), "a machine syncs through the desktop app (coming)");
+	assert.ok(pages.some((html) => /<details[\s\S]*folder-sync login[\s\S]*<\/details>/.test(html)), "the CLI is still there, for developers");
+});
