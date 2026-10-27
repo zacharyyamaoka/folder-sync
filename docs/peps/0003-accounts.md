@@ -87,7 +87,7 @@ cannot set a header).
 | `GET /fs/v1/folders/:project[?owner=<id>]` | owner, reader, or anyone if public | the union view: `{ project, owner, visibility, hosts: [{id, name, seq, generatedAt, web}], files: [{host, path, size, sha256, mtime, writtenAt}] }` |
 | `GET /fs/v1/folders/:project/bundle?prefix=<p>[&owner=]` | same | `{ files: [{host, path, mtime, sha256, text}] }`, UTF-8 files under `prefix`, ≤ 256 KB each, ≤ 2 MB total (one request for an app's small files) |
 | `GET /fs/v1/folders/:project/files/:host/<path>[?owner=]` | same | the bytes (`ETag: "<sha256>"`, `Cache-Control: private, no-store` unless public) |
-| `PUT /fs/v1/folders/:project/web/<path>` | owner | writes `<path>` into the folder's web host (§3.4) → `{ host, path, sha256, seq }` |
+| `PUT /fs/v1/folders/:project/web/<path>` | owner | writes `<path>` into the folder's web host (§3.4) → `{ host, path, sha256, seq }`. With `X-Folder-Sync-Keep-Newest: <field>` (e.g. `at`), the body must be a JSON object whose `<field>` is an RFC 3339 instant, and a write older than the stored version's is refused, `409 stale`, nothing written: so writes arriving out of order keep the newest (robotparts' hearts) |
 | `DELETE /fs/v1/folders/:project/web/<path>` | owner | removes it from the web host (moved to `_trash/`) → `{ host, path, seq }` |
 | `PATCH /fs/v1/folders/:project` `{visibility}` | owner | `"public"` or `"private"` → the folder row |
 | `POST /fs/v1/folders/:project/readers` `{email}` / `DELETE …/readers/:email` | owner | grants / revokes read |

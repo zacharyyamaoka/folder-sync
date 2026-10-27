@@ -11,7 +11,7 @@
 //   GET  /fs/v1/folders/:project[?owner=]         the union view of a folder's hosts
 //   GET  /fs/v1/folders/:project/bundle?prefix=   a folder's small UTF-8 files in one answer
 //   GET  /fs/v1/folders/:project/files/:host/<p>  one file's bytes
-//   PUT|DELETE /fs/v1/folders/:project/web/<p>    the folder's web host (§3.4)
+//   PUT|DELETE /fs/v1/folders/:project/web/<p>    the folder's web host (§3.4); X-Folder-Sync-Keep-Newest: <field>
 //   PATCH /fs/v1/folders/:project {visibility}    public or private
 //   POST /fs/v1/folders/:project/readers {email}, DELETE …/readers/:email
 //   GET  /fs/v1/access?project=&owner=            for an app's own server
@@ -32,7 +32,7 @@ import { folderPrefix, mint, NotConfigured, PROJECT, ttlOf, USER_ID, userRoot, t
 import { checkPath, ContractError, Project } from "../../readers/worker/src/folder-sync-read.ts";
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store, Visibility } from "./store.ts";
-import { localWebHost, type WebAnswer, type WebOp } from "./webhost.ts";
+import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhost.ts";
 
 export interface Env extends CredsEnv {
 	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
@@ -428,8 +428,10 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 		if (declared > WEB_FILE_MAX) return fail(413, "too_large", `the web host takes files up to ${WEB_FILE_MAX >> 20} MiB`);
 		const data = new Uint8Array(await request.arrayBuffer());
 		if (data.byteLength > WEB_FILE_MAX) return fail(413, "too_large", `the web host takes files up to ${WEB_FILE_MAX >> 20} MiB`);
+		const keepNewest = request.headers.get("X-Folder-Sync-Keep-Newest") || undefined;
+		if (keepNewest !== undefined && !NEWEST_FIELD.test(keepNewest)) return fail(400, "bad_header", "X-Folder-Sync-Keep-Newest names one JSON field, like at");
 		const hostId = await deps.store.ensureWebHost(owner, project, deps.uuid(), new Date(deps.now()).toISOString());
-		op = { method: "PUT", owner, project, hostId, path, data };
+		op = { method: "PUT", owner, project, hostId, path, data, keepNewest };
 	} else {
 		const hostId = await deps.store.webHost(owner, project);
 		if (!hostId) return fail(404, "not_found", "this folder has no web host yet");
@@ -585,7 +587,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 		if (!allowed["Access-Control-Allow-Origin"]) return fail(403, "cors", "this origin is not a registered app");
 		return new Response(null, {
 			status: 204,
-			headers: headers({ ...allowed, "Access-Control-Allow-Methods": "GET, HEAD, PUT, PATCH, POST, DELETE", "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Folder-Sync", "Access-Control-Max-Age": "600" }),
+			headers: headers({ ...allowed, "Access-Control-Allow-Methods": "GET, HEAD, PUT, PATCH, POST, DELETE", "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Folder-Sync, X-Folder-Sync-Keep-Newest", "Access-Control-Max-Age": "600" }),
 		});
 	}
 	if (first === "api" && rest[0] === "auth") {

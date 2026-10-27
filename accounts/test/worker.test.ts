@@ -737,6 +737,7 @@ test("review r1 #4: with X-Folder-Sync-Keep-Newest: at, an older heart arriving 
 	const before = s3.text(key);
 	const bare = await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/gim.json", { method: "PUT", headers: page(OWNER, { "X-Folder-Sync-Keep-Newest": "at" }), body: '{"saved": true}' });
 	assert.equal(bare.status, 400);
+	assert.equal((await bare.json()).error, "bad_body");
 	assert.equal(s3.text(key), before);
 	// without the header the web host stays a plain file host: the last write wins, as before
 	assert.equal((await heart(false, "2000-01-01T00:00:00Z", {})).status, 200);

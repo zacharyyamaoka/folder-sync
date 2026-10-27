@@ -36,6 +36,25 @@ export interface WritableBucket extends R2BucketLike {
 export class BadPath extends Error {}
 /** Another writer kept moving the manifest (answered 503: try again). */
 export class Busy extends Error {}
+/** The web host already holds a newer version of the path (keepNewest; answered 409). */
+export class Stale extends Error {}
+/** The body lacks what the write asked to be compared (keepNewest's field; answered 400). */
+export class BadBody extends Error {}
+
+/** A JSON field name a write may ask the web host to keep the newest of (X-Folder-Sync-Keep-Newest). */
+export const NEWEST_FIELD = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+
+/** The instant in `data`'s JSON field `field` (an RFC 3339 string), or null when there is none. */
+export function instantOf(data: Uint8Array, field: string): number | null {
+	try {
+		const doc = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data));
+		const value = doc && typeof doc === "object" && !Array.isArray(doc) ? doc[field] : undefined;
+		const time = typeof value === "string" ? Date.parse(value) : NaN;
+		return Number.isFinite(time) ? time : null;
+	} catch {
+		return null;
+	}
+}
 
 const WINDOWS_RESERVED_CHARS = /[<>:"|?*\\]/;
 const WINDOWS_RESERVED_NAMES = new Set([
@@ -182,10 +201,14 @@ async function change(bucket: WritableBucket, w: Where, journal: Journal, pendin
 	return committed;
 }
 
-/** Writes `path` into the web host: trash copy of the old version, the file, then the manifest (If-Match). */
-export async function writeWebFile(bucket: WritableBucket, w: Where, path: string, data: Uint8Array, clock: () => number, journal: Journal = memoryJournal()): Promise<{ host: string; path: string; sha256: string; seq: number }> {
+/** Writes `path` into the web host: trash copy of the old version, the file, then the manifest (If-Match).
+ *  `keepNewest` names a JSON field (an RFC 3339 instant): then a write older than the stored version is refused
+ *  (Stale), so two tabs' writes arriving out of order keep the newest (review r1 #4: newest heart wins). */
+export async function writeWebFile(bucket: WritableBucket, w: Where, path: string, data: Uint8Array, clock: () => number, journal: Journal = memoryJournal(), keepNewest?: string): Promise<{ host: string; path: string; sha256: string; seq: number }> {
 	checkWebPath(path);
 	const sha256 = await sha256Hex(data);
+	const mine = keepNewest ? instantOf(data, keepNewest) : null;
+	if (keepNewest && mine === null) throw new BadBody(`the body is not a JSON object with an RFC 3339 ${JSON.stringify(keepNewest)}, which X-Folder-Sync-Keep-Newest names`);
 	await settle(bucket, w, journal);
 	for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
 		const now = clock();
@@ -194,6 +217,12 @@ export async function writeWebFile(bucket: WritableBucket, w: Where, path: strin
 		if (old && old.sha256 === sha256 && old.size === data.byteLength) return { host: w.hostId, path, sha256, seq: manifest.seq };
 		const twin = manifest.files.find((e) => e.path !== path && e.path.toLowerCase() === path.toLowerCase());
 		if (twin) throw new BadPath(`${JSON.stringify(path)} and ${JSON.stringify(twin.path)} differ only by case, which Windows and macOS cannot hold`);
+		if (keepNewest && old && mine !== null) {
+			// WHY the stored bytes are the manifest's: this runs in the folder's one queue, after settle()
+			const stored = await bucket.get(hostKey(w, path));
+			const theirs = stored && "arrayBuffer" in stored ? instantOf(new Uint8Array(await stored.arrayBuffer()), keepNewest) : null;
+			if (theirs !== null && theirs > mine) throw new Stale(`the web host already holds a newer ${keepNewest} (${new Date(theirs).toISOString()}) for ${JSON.stringify(path)}`);
+		}
 		const restore = old ? trashKey(w, path, now) : null;
 		if (restore) await bucket.copy(hostKey(w, path), restore);
 		const iso = new Date(now).toISOString();
@@ -255,6 +284,8 @@ export interface WebOp {
 	hostId: string;
 	path: string;
 	data?: Uint8Array;
+	/** X-Folder-Sync-Keep-Newest: the JSON field whose newest instant the web host keeps for this path. */
+	keepNewest?: string;
 }
 
 /** The answer to send: a status, a JSON body (an error is { error, why }) and extra headers. */
@@ -279,12 +310,14 @@ export async function runWebOp(env: CredsEnv, s3: FetchLike, op: WebOp, journal:
 		const root = userRoot(op.owner);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, clock()), s3);
 		const w = { root, project: op.project, hostId: op.hostId };
-		if (op.method === "PUT") return { status: 200, body: await writeWebFile(bucket, w, op.path, op.data ?? new Uint8Array(), clock, journal) };
+		if (op.method === "PUT") return { status: 200, body: await writeWebFile(bucket, w, op.path, op.data ?? new Uint8Array(), clock, journal, op.keepNewest) };
 		const gone = await deleteWebFile(bucket, w, op.path, clock, journal);
 		return gone ? { status: 200, body: gone } : { status: 404, body: { error: "not_found", why: "the web host does not hold that file" } };
 	} catch (error) {
 		if (error instanceof BadPath) return { status: 400, body: { error: "bad_path", why: error.message } };
 		if (error instanceof Busy) return { status: 503, body: { error: "busy", why: error.message }, headers: { "Retry-After": "1" } };
+		if (error instanceof Stale) return { status: 409, body: { error: "stale", why: error.message } };
+		if (error instanceof BadBody) return { status: 400, body: { error: "bad_body", why: error.message } };
 		if (error instanceof NotConfigured) return { status: 503, body: { error: "not_configured", why: "folder storage is not set up on this Worker yet" } };
 		if (error instanceof Denied) return { status: 404, body: { error: "not_found", why: "no such file" } };
 		if (error instanceof ContractError) return { status: 502, body: { error: "bad_manifest", why: "a host's manifest breaks the contract" } };
