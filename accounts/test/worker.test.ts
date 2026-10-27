@@ -895,3 +895,24 @@ test("review r2 #2: the folder's Durable Object settles a cut-off write on its o
 	assert.equal(storage.data.get("pending"), undefined);
 	assert.equal(storage.alarm, null);
 });
+
+test("review r2 #5: keep-newest settles an exact tie the same whichever write arrives first", async () => {
+	const T = "2026-10-26T12:00:00Z";
+	const stored = async (order: boolean[], prefer: boolean) => {
+		const s3 = people();
+		const { deps } = fakeDeps(s3);
+		const statuses = [];
+		for (const saved of order) {
+			const headers = page(OWNER, { "X-Folder-Sync-Keep-Newest": "at", ...(prefer ? { "X-Folder-Sync-Tie-Prefers": "saved" } : {}) });
+			statuses.push((await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/gim.json", { method: "PUT", headers, body: `${JSON.stringify({ part: "gim", saved, at: T })}\n` })).status);
+		}
+		return { saved: JSON.parse(s3.text(`users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/gim.json`)!).saved, statuses };
+	};
+	// robotparts' rule (X-Folder-Sync-Tie-Prefers: saved): a heart wins an exact tie, in either order
+	assert.deepEqual(await stored([true, false], true), { saved: true, statuses: [200, 409] });
+	assert.deepEqual(await stored([false, true], true), { saved: true, statuses: [200, 200] });
+	// with no preference, still one answer whatever the order (the larger sha256)
+	const a = await stored([true, false], false);
+	const b = await stored([false, true], false);
+	assert.equal(a.saved, b.saved, "the review saw false one way round and true the other");
+});
