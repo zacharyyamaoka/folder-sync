@@ -1,7 +1,9 @@
 # 0006 · A downloadable app: sign in, and your folder is just there
 
 - **Date:** 2026-10-26
-- **Status:** draft design note. Nothing is built; this says what the prototype would need.
+- **Status:** prototype built on `lane/desktop` (2026-10-27): Tauri 2.11.5 app in `app/`, Linux `.deb` and AppImage,
+  proven headlessly against the local accounts stack (`app/scripts/proof_linux.py`). §8 records what was built and
+  where it departs from §4. macOS and Windows are written down in `app/README.md`, not built.
 - **Source:** Zach, 2026-10-26: "I don't want any CLI logins for this. I want it to feel like Obsidian: I download it as
   a standalone, fully integrated, complete app and don't need to think about how anything is happening in the
   backend. I just sign in and it works. Everything across all the things is the same." "When I download the app I
@@ -90,3 +92,21 @@ same pieces.
   app owns its file formats and its project; one app can host several later.
 - **Ship the no-shell tracer first?** Default: yes — the service + tray works without a new toolchain, and the Tauri
   app wraps the same sidecar.
+
+## 8. What was built (lane/desktop, 2026-10-27)
+
+- **The token never touches the disk.** §4's `login --json` would have written `account.json` (plain text, mode 0600).
+  The app instead runs `login --json --print-token`: the session arrives on the pipe and goes straight into the OS
+  keychain (`keyring` 3.6.3). The engine gets it back through a new hook, `FOLDER_SYNC_ACCOUNT_PROCESS` (the app's own
+  `--account-process`: print the folder-sync-account/1 document, exit 3 when signed out), used everywhere account.json
+  was: `credentials`, the push hub's bearer, `logout`, `whoami`. WHY a program and not an environment variable with
+  the token: the environment of every helper process would carry it, and a sign-out would not reach a running engine.
+- **The tray reads events, not text.** `sync --watch --events` prints one folder-sync-event/1 JSON line per round
+  (`watching`, `round_start`, `round` with `ok` or `kind` = `signed_out` / `over_quota` / `offline` / `error` and its
+  `why`, `hub`, `stopped`); human lines move to stderr. `credentials` names a 403 `over_quota` with a fixed
+  `over quota: <why>` prefix so the round's error carries the server's reason to the tray.
+- **One engine.** The app shells out to the same binary for sign-in, init, sync and sign-out; Rust holds no HTTP client.
+- **Not done yet:** the updater plugin and signing (both need a build host and Zach's certificates), a download page,
+  the deep link, and `folder-sync serve` for offline reads. The rclone the engine needs is downloaded and sha256-checked
+  on first `init` (`~/.folder-sync/bin`), as for the CLI; bundling it as a second sidecar (85 MB) is the alternative.
+

@@ -8,3 +8,7 @@
 # Python / Node leftovers
 __pycache__/
 node_modules/
+# Desktop app (app/): Rust build output, the engine copied in as Tauri's sidecar, generated schemas
+/app/src-tauri/target/
+/app/src-tauri/binaries/
+/app/src-tauri/gen/

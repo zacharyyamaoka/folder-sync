@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>folder-sync</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<main>
+  <header>
+    <img src="icon.png" alt="" width="40" height="40">
+    <div>
+      <h1>folder-sync</h1>
+      <p class="muted" id="server"></p>
+    </div>
+  </header>
+
+  <section class="card" id="status-card" data-state="signed_out">
+    <div class="status-row"><span class="dot" aria-hidden="true"></span><span id="headline" data-testid="headline">…</span></div>
+    <p id="detail" class="detail" data-testid="detail" hidden></p>
+    <p id="who" class="muted" data-testid="who" hidden></p>
+  </section>
+
+  <section id="step-signin" class="step" hidden>
+    <p>Sign in once. Your browser opens; approve this computer there. No code to type.</p>
+    <button class="primary" data-action="sign_in" data-testid="sign-in">Sign in</button>
+  </section>
+
+  <section id="step-waiting" class="step" hidden>
+    <p>Approve <b id="code" data-testid="code"></b> in your browser. This window updates by itself.</p>
+    <div class="row">
+      <button data-action="reopen_link">Open the page again</button>
+      <button class="quiet" data-action="cancel_sign_in">Cancel</button>
+    </div>
+  </section>
+
+  <section id="step-folder" class="step" hidden>
+    <p>Where should your folder live? The app makes it for you.</p>
+    <button class="primary" data-action="create_folder" data-testid="create-folder">Create <span id="default-folder"></span></button>
+    <button data-action="choose_folder" data-testid="choose-folder">Choose a folder…</button>
+  </section>
+
+  <section id="step-running" class="step" hidden>
+    <p class="folder"><span class="muted">Folder</span> <code id="folder" data-testid="folder"></code></p>
+    <div class="row">
+      <button class="primary" data-action="open_folder" data-testid="open-folder">Open folder</button>
+      <button data-action="open_site">Open robotparts.dev</button>
+    </div>
+    <div class="row">
+      <button id="pause" data-action="pause" data-testid="pause">Pause sync</button>
+      <button class="quiet" data-action="choose_folder">Change folder…</button>
+    </div>
+  </section>
+
+  <footer>
+    <label class="check"><input type="checkbox" id="autostart" data-testid="autostart"> Start at login</label>
+    <span class="grow"></span>
+    <button class="quiet" id="sign-out" data-action="sign_out" data-testid="sign-out" hidden>Sign out</button>
+    <button class="quiet" data-action="quit">Quit</button>
+  </footer>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
