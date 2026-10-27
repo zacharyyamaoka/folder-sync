@@ -20,7 +20,7 @@ import { appFor, apps } from "../src/apps.ts";
 import { handle, rawPath, returnPath, segments, type Deps, type Env, type Person } from "../src/app.ts";
 import { claimsOf, mint, ttlOf, userRoot } from "../src/creds.ts";
 import { signUpAllowed } from "../src/signup.ts";
-import { checkWebPath, deleteWebFile, stamp, writeWebFile } from "../src/webhost.ts";
+import { checkWebPath, deleteWebFile, memoryJournal, settle, stamp, writeWebFile } from "../src/webhost.ts";
 import { S3Bucket } from "../src/s3-bucket.ts";
 import { MemoryS3 } from "./memory-s3.ts";
 import { MemoryStore } from "./memory-store.ts";
@@ -710,10 +710,13 @@ test("review r1 #3: a write cut off between its bytes and its manifest is undone
 	await assert.rejects(at("saved/x.json", "two\n"));
 	s3.fail = null;
 	assert.deepEqual(mismatched(s3), [], "rolled back at once");
-	// the manifest PUT and the roll-back both fail (the storage is down): the next write puts it right first
-	s3.fail = (method, key) => (method === "PUT" && key === manifestKey) || method === "COPY" || method === "DELETE";
+	// the manifest PUT and the roll-back both fail: the next write puts it right first. WHY only the undo's COPY (into
+	// hosts/, from _trash/): the trash copy before the write must succeed, or no bytes would have changed (review r2)
+	const xKey = `users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/x.json`;
+	s3.fail = (method, key) => (method === "PUT" && key === manifestKey) || (method === "COPY" && key === xKey);
 	await assert.rejects(at("saved/x.json", "three\n"));
 	s3.fail = null;
+	assert.deepEqual(mismatched(s3), ["saved/x.json"], "the undo really failed: the file holds the uncommitted bytes");
 	assert.equal((await at("saved/y.json", "why\n")).status, 200);
 	assert.deepEqual(mismatched(s3), [], "the next write settled the cut-off one first");
 	assert.equal(s3.text(`users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/x.json`), "one\n");
@@ -806,4 +809,31 @@ test("review r1 #7: over the per-person quota, no new storage keys and no web wr
 	// a short credential lifetime bounds how far past the quota one window can go
 	assert.equal(ttlOf({}), 300);
 	assert.equal(new Date((await (await keys("token-sister-laptop", env())).json()).Expiration).getTime() - Math.floor(now / 1000) * 1000, 300_000);
+});
+
+// ------------------------------------------------------------------------------------------------ round-2 review
+
+test("review r2 #3: a failed undo stops the write and keeps its journal, so the file can still be put back", async () => {
+	const s3 = people();
+	const { deps } = fakeDeps(s3);
+	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/x.json", { method: "PUT", headers: page(OWNER), body: "old\n" })).status, 200);
+	sixWriters(s3);
+	const xKey = `users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/x.json`;
+	let undos = 0;
+	// the first undo (a COPY from _trash/ back over the file) answers 500, as in the review
+	s3.fail = (method, key) => method === "COPY" && key === xKey && ++undos === 1;
+	const where = { root: `users/${OWNER.userId}/`, project: "robotparts", hostId: WEB };
+	const bucket = await ownerBucket(s3);
+	const journal = memoryJournal();
+	await assert.rejects(writeWebFile(bucket, where, "saved/x.json", new TextEncoder().encode("new\n"), deps.now, journal));
+	const pending = await journal.get();
+	assert.ok(pending, "the journal still names the cut-off write (the review found it null)");
+	assert.equal(pending.restoreSha256, createHash("sha256").update("old\n").digest("hex"), "and the bytes the manifest lists, not the new ones");
+	assert.equal(undos, 1, "no retry after the failed undo");
+	s3.fail = null;
+	s3.beforeConditional = null;
+	await settle(bucket, where, journal);
+	assert.deepEqual(mismatched(s3), []);
+	assert.equal(s3.text(xKey), "old\n");
+	assert.equal(await journal.get(), null);
 });
