@@ -1,0 +1,3 @@
+# wrangler's local state and the walkthrough's scratch: never committed
+.wrangler/
+.state/

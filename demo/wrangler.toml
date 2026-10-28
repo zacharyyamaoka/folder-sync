@@ -1,0 +1,24 @@
+# folder-sync's demo site (PEP 0007 §6): site/ (one page, no build) and /fs/* forwarded to folder-sync-accounts through
+# a service binding, the integration every app uses (PEP 0003 §3.2). Signed in, you see your own folders and how long
+# each sync took. Deploying is Zach's call (never from an agent), after the accounts Worker is deployed with apps.json's
+# "demo" entry:
+#   npx --prefix accounts wrangler deploy --config demo/wrangler.toml
+name = "folder-sync-demo"
+main = "worker.ts"
+compatibility_date = "2026-10-01"
+
+# WHY workers.dev and no domain (PEP 0007 §10.5): folder-sync-demo.zach-yamaoka.workers.dev until there is a name
+workers_dev = true
+preview_urls = false
+
+[assets]
+directory = "./site"
+binding = "ASSETS"
+# WHY only /fs/*: the page and its files never run Worker code; sign-in and the folder API do
+run_worker_first = ["/fs/*"]
+
+# WHY a service binding (PEP 0003 §3.2): the accounts Worker answers on this origin's /fs/ itself, so the session cookie
+# is host-only here and the page calls only its own origin. No secrets and no vars: this Worker holds none.
+[[services]]
+binding = "FOLDER_SYNC"
+service = "folder-sync-accounts"
