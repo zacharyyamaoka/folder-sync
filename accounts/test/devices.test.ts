@@ -347,6 +347,8 @@ function bytes(n: number): Uint8Array {
 }
 
 /** The owner's private robotparts, published by one machine: a log and some videos (one of them 3 MiB). */
+const md5Of = (data: Uint8Array) => createHash("md5").update(data).digest("hex");
+
 function media(): MemoryS3 {
 	const s3 = new MemoryS3(ENDPOINT, BUCKET);
 	const files: Record<string, Uint8Array> = {
@@ -360,7 +362,8 @@ function media(): MemoryS3 {
 	const base = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/`;
 	s3.put(`${base}manifest.json`, JSON.stringify({
 		schema: "folder-sync-manifest/1", project: "robotparts", host_id: MACHINE, host_name: "ws", seq: 3, generated_at: "2026-10-26T12:00:00Z",
-		files: Object.entries(files).map(([path, data]) => ({ path, size: data.byteLength, mtime: "2026-10-26T11:00:00Z", sha256: createHash("sha256").update(data).digest("hex"), written_at: "2026-10-26T12:00:00Z" })),
+		// the videos carry object_etag (docs/CONTRACT.md: the stored object's ETag, here the stand-in's MD5); the log does not
+		files: Object.entries(files).map(([path, data]) => ({ path, size: data.byteLength, mtime: "2026-10-26T11:00:00Z", sha256: createHash("sha256").update(data).digest("hex"), written_at: "2026-10-26T12:00:00Z", ...(path.startsWith("media/") ? { object_etag: md5Of(data) } : {}) })),
 	}));
 	for (const [path, data] of Object.entries(files)) s3.put(`${base}${path}`, data);
 	return s3;
@@ -437,7 +440,7 @@ test("…/files/ Range: 206 with Content-Range for one range, 416 past the end, 
 	assert.equal((await call(handle, env(), deps, `${fileUrl("logs/run.log")}?owner=${OWNER.userId}`, { headers: { ...cookie("tok-sister-browser"), Range: "bytes=0-3" } })).status, 404);
 });
 
-test("a large video: a seek is a 206 slice of the whole object, read and sha256-checked first (judge r1 #2: no storage identity to bind a ranged read to)", async () => {
+test("a large video: a seek reads only the asked-for bytes from storage, of exactly the manifest's version, never the whole object", async () => {
 	const s3 = media();
 	const { deps } = fakeDeps(s3);
 	const key = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/media/big.mp4`;
@@ -449,8 +452,91 @@ test("a large video: a seek is a 206 slice of the whole object, read and sha256-
 	assert.equal(answer.headers.get("Content-Range"), `bytes 1048576-1049599/${BIG}`);
 	assert.equal(answer.headers.get("ETag"), shaOf(whole));
 	assert.deepEqual(new Uint8Array(await answer.arrayBuffer()), whole.slice(1048576, 1049600));
-	// WHY the whole object: a manifest entry names its bytes by sha256 only, which a range cannot be checked against
-	assert.deepEqual(s3.calls.filter((c) => c.key === key).map((c) => ({ range: c.range, sent: c.sent })), [{ range: undefined, sent: BIG }]);
+	const reads = s3.calls.filter((c) => c.key === key);
+	assert.deepEqual(reads.map((c) => ({ method: c.method, range: c.range, sent: c.sent, ifMatch: c.ifMatch })), [{ method: "GET", range: "bytes=1048576-1049599", sent: 1024, ifMatch: `"${md5Of(whole)}"` }], "the reader was asked for exactly that range, of exactly that version");
+	// Chrome's first request for a <video>: bytes=0-, answered 206 and streamed from storage as a range too
+	s3.calls.length = 0;
+	const first = await call(handle, env(), deps, fileUrl("media/big.mp4"), { headers: { ...cookie("tok-owner-browser"), Range: "bytes=0-" } });
+	assert.equal(first.status, 206);
+	assert.equal(first.headers.get("Content-Range"), `bytes 0-${BIG - 1}/${BIG}`);
+	assert.equal(first.headers.get("Content-Length"), String(BIG));
+	const reader = first.body!.getReader();
+	assert.ok((await reader.read()).value!.byteLength > 0);
+	await reader.cancel();
+	assert.deepEqual(s3.calls.filter((c) => c.key === key).map((c) => c.range), [`bytes=0-${BIG - 1}`]);
+	// HEAD, a matching If-None-Match and a range past the end are answered from the manifest: no object read at all
+	s3.calls.length = 0;
+	const head = await call(handle, env(), deps, fileUrl("media/big.mp4"), { method: "HEAD", headers: { ...cookie("tok-owner-browser"), Range: "bytes=0-9" } });
+	assert.equal(head.status, 206);
+	assert.equal(head.headers.get("Content-Range"), `bytes 0-9/${BIG}`);
+	assert.equal((await call(handle, env(), deps, fileUrl("media/big.mp4"), { headers: { ...cookie("tok-owner-browser"), "If-None-Match": shaOf(whole) } })).status, 304);
+	assert.equal((await call(handle, env(), deps, fileUrl("media/big.mp4"), { headers: { ...cookie("tok-owner-browser"), Range: `bytes=${BIG}-` } })).status, 416);
+	assert.deepEqual(s3.calls.filter((c) => c.key === key), [], "none of those read the object");
+});
+
+test("judge r2 #3: an equal-size replacement of a versioned file is never served: the ranged read names the manifest's version (If-Match)", async () => {
+	const s3 = media();
+	const { deps } = fakeDeps(s3);
+	const key = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/media/clip.mp4`;
+	s3.put(key, new Uint8Array(2000).fill(88));
+	for (const range of ["bytes=2-5", null]) {
+		const answer = await call(handle, env(), deps, fileUrl("media/clip.mp4"), { headers: { ...cookie("tok-owner-browser"), ...(range ? { Range: range } : {}) } });
+		assert.equal(answer.status, 404, `${range}: ${answer.status}`);
+		assert.ok(!new Uint8Array(await answer.arrayBuffer()).includes(88));
+	}
+});
+
+const UNVERSIONED_MAX = 64 * 1024 * 1024;
+
+/** `s3`'s answers, each GET body re-chunked into 1 MiB pieces and counted as it is pulled. */
+function counted(s3: MemoryS3) {
+	const pulled = new Map<string, number>();
+	const fetch = async (request: Request) => {
+		const answer = await s3.fetch(request);
+		if (request.method !== "GET" || !answer.body || !answer.ok) return answer;
+		const key = decodeURIComponent(new URL(request.url).pathname).split("/").slice(2).join("/");
+		const data = new Uint8Array(await answer.arrayBuffer());
+		let at = 0;
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (at >= data.length) return controller.close();
+				const piece = data.subarray(at, at + 1024 * 1024);
+				at += piece.length;
+				pulled.set(key, (pulled.get(key) ?? 0) + piece.length);
+				controller.enqueue(piece);
+			},
+		}, { highWaterMark: 0 });
+		return new Response(body, { status: answer.status, headers: answer.headers });
+	};
+	return { fetch, pulled };
+}
+
+test("judge r2 #3: a file with no object_etag over 64 MiB answers 413 too_large_for_unversioned_range, reading no more than the cap", async () => {
+	const s3 = new MemoryS3(ENDPOINT, BUCKET);
+	const big = new Uint8Array(129 * 1024 * 1024);
+	const small = new TextEncoder().encode("a manifest that says it is small\n");
+	const base = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/`;
+	// one honest entry (129 MiB, no object_etag), one that claims the small file's size and sha256 over the 129 MiB object
+	s3.put(`${base}manifest.json`, JSON.stringify({
+		schema: "folder-sync-manifest/1", project: "robotparts", host_id: MACHINE, host_name: "ws", seq: 3, generated_at: "2026-10-26T12:00:00Z",
+		files: [
+			{ path: "media/huge.mp4", size: big.byteLength, mtime: "2026-10-26T11:00:00Z", sha256: createHash("sha256").update(big).digest("hex"), written_at: "2026-10-26T12:00:00Z" },
+			{ path: "media/liar.mp4", size: small.byteLength, mtime: "2026-10-26T11:00:00Z", sha256: createHash("sha256").update(small).digest("hex"), written_at: "2026-10-26T12:00:00Z" },
+		],
+	}));
+	s3.put(`${base}media/huge.mp4`, big);
+	s3.put(`${base}media/liar.mp4`, big);
+	const { fetch, pulled } = counted(s3);
+	const { deps } = fakeDeps(s3, sessions(), { s3: fetch });
+	for (const [path, range] of [["media/huge.mp4", "bytes=0-0"], ["media/huge.mp4", null], ["media/liar.mp4", "bytes=0-0"]] as const) {
+		const answer = await call(handle, env(), deps, fileUrl(path), { headers: { ...cookie("tok-owner-browser"), ...(range ? { Range: range } : {}) } });
+		assert.equal(answer.status, 413, `${path} ${range}`);
+		const body = await answer.json();
+		assert.equal(body.error, "too_large_for_unversioned_range");
+		assert.match(body.why, /64 MiB/);
+	}
+	assert.equal(pulled.get(`${base}media/huge.mp4`) ?? 0, 0, "the manifest's size refused it before any read");
+	assert.ok((pulled.get(`${base}media/liar.mp4`) ?? 0) <= UNVERSIONED_MAX + 1024 * 1024, `read ${pulled.get(`${base}media/liar.mp4`)} bytes of a file that lied about its size`);
 });
 
 // ------------------------------------------------------------------------------------------------ judge round 1

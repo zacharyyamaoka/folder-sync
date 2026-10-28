@@ -1,4 +1,4 @@
-// An in-memory S3 endpoint for the Worker's unit tests: GET (a single Range honoured, as R2 does), HEAD, PUT (If-Match /
+// An in-memory S3 endpoint for the Worker's unit tests: GET (a single Range and If-Match honoured, as R2 does), HEAD, PUT (If-Match /
 // If-None-Match honoured, as R2 does), CopyObject, DELETE and ListObjectsV2, path style, and R2's temporary-credential scope (the session token's
 // claims: bucket, scope, paths.prefixPaths) enforced on every key, listing prefix and copy source, as R2 enforces it.
 // Moved from vibetracks worker/test/memory-s3.ts and given the writes the web host makes. The signature itself is
@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 
 export class MemoryS3 {
 	readonly objects = new Map<string, Uint8Array>();
-	readonly calls: { method: string; key: string; prefix?: string; allowed: boolean; scoped: string[] | null; scope?: string; range?: string; sent?: number }[] = [];
+	readonly calls: { method: string; key: string; prefix?: string; allowed: boolean; scoped: string[] | null; scope?: string; range?: string; sent?: number; ifMatch?: string }[] = [];
 	/** Runs once before the next conditional PUT of `key` (a concurrent writer, for the 412 test). `again` re-arms it
 	 *  that many more times (the review's six writers in a row). */
 	beforeConditional: { key: string; run: () => void; again?: number } | null = null;
@@ -139,6 +139,10 @@ export class MemoryS3 {
 		const etag = this.etag(data);
 		if (request.headers.get("If-None-Match") === etag) return new Response(null, { status: 304, headers: { ETag: etag } });
 		const call = this.calls[this.calls.length - 1];
+		const ifMatch = request.headers.get("If-Match");
+		if (ifMatch) call.ifMatch = ifMatch;
+		// as R2: a GET whose If-Match names another version is refused, nothing sent
+		if (ifMatch && ifMatch !== etag) return new Response("<Error><Code>PreconditionFailed</Code></Error>", { status: 412 });
 		const range = request.headers.get("Range");
 		const one = range ? /^bytes=(\d+)-(\d+)$/.exec(range) : null;
 		if (range) call.range = range;
