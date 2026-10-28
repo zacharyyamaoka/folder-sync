@@ -22,8 +22,9 @@ test("judge r2 #1: a machine's bearer cannot approve a device code; only a brows
 	const byBearer = await s.approve(code.user_code, { Authorization: `Bearer ${laptop.token}` });
 	assert.notEqual(byBearer.approved, 200, `a machine approved a grant: ${byBearer.body}`);
 	assert.equal((await s.redeem(code.device_code)).token, null, "the grant it tried to approve gives no token");
-	// the same code, approved by the person's browser, still works
+	// the same code, approved by the person's browser, still works (lastPolledAt cleared: the CLI waits its 5 s interval)
 	assert.equal((await s.approve(code.user_code, { Cookie: a.cookie })).approved, 200);
+	s.db.prepare('UPDATE "deviceCode" SET "lastPolledAt" = NULL').run();
 	assert.ok((await s.redeem(code.device_code)).token);
 });
 

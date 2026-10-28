@@ -40,7 +40,7 @@ import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store, Visibility } from "./store.ts";
 import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhost.ts";
 import type { EmailEnv } from "./email.ts";
-import { accountRoute, devicesApi, type SessionRow } from "./devices.ts";
+import { accountRoute, devicesApi, type GrantRow, type SessionRow } from "./devices.ts";
 import { servedFile } from "./ranges.ts";
 
 export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
@@ -94,6 +94,10 @@ export interface Deps {
 	sessions?(userId: string): Promise<SessionRow[]>;
 	/** Deletes this person's session `id`; false when they hold none by that id (another person's included). */
 	revokeSession?(userId: string, id: string): Promise<boolean>;
+	/** This person's approved, not yet redeemed device grants whose approving session still lives (devices.ts). */
+	grants?(userId: string): Promise<GrantRow[]>;
+	/** Deletes this person's pending grant `id`; false when they have none by that id. */
+	revokeGrant?(userId: string, id: string): Promise<boolean>;
 }
 
 const READ_TTL_S = 300;
