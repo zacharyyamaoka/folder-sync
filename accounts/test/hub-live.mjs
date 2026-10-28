@@ -9,7 +9,10 @@
 // grant, as `folder-sync login` does), and opens: machine A, machine B, the owner's page (cookie) and the reader's page
 // as WebSockets on /fs/v1/folders/robotparts/events. Then it shows: hello on connect; a web-host PUT and DELETE reach
 // every socket with web:true; a machine's `changed` reaches everyone but its sender; a reader, a page and junk can not
-// announce; ping answers pong; a cross-site cookie upgrade, a missing Upgrade and a stranger are refused.
+// announce; ping answers pong; a cross-site cookie upgrade, a missing Upgrade and a stranger are refused. Last, the
+// paths that end a session or a reader close its socket (post-rebase review): revoking machine A closes it 4401, the
+// reader's removal closes the reader's page 4403, the owner's sign-out closes the owner's page 4401, and machine B
+// stays open through all three.
 //
 // Test values only: the people are generated here for this dev stack. `ws` (a dependency of wrangler's miniflare, in
 // accounts/node_modules) is used because the browser-style WebSocket can't set Authorization or Origin.
@@ -110,6 +113,7 @@ class Client {
 			this.received.push(value);
 			for (const w of [...this.waiting]) w();
 		});
+		this.closedWith = new Promise((done) => this.ws.once("close", (code, reason) => done({ code, reason: reason.toString() })));
 		this.opened = new Promise((done, fail) => {
 			this.ws.once("open", done);
 			this.ws.once("unexpected-response", (_req, res) => fail(new Error(`${name}: upgrade refused ${res.statusCode}`)));
@@ -263,6 +267,26 @@ await late.opened;
 const lateHello = await late.next((m) => m.type === "hello");
 check("a late socket's hello carries every host's seq (web host and both machine ids)", !!lateHello && lateHello.hosts[ownerHost]?.seq === 42 && lateHello.hosts[webHost]?.seq === deleted.seq, lateHello);
 console.log(`     late hello: ${JSON.stringify(lateHello)}`);
+
+// 10. ending a session or a reader closes its socket, and nobody else's
+const within = (promise, ms = 5000) => Promise.race([promise, sleep(ms).then(() => null)]);
+const sessionOf = async (token) => (await (await fetch(`${SITE}/fs/v1/devices`, { headers: { Authorization: `Bearer ${token}` } })).json()).devices.find((d) => d.current).id;
+const revoked = await owner.write("/fs/v1/devices/revoke", { method: "POST", body: { id: await sessionOf(tokenA) } });
+check("the owner revoked machine A from the devices API", revoked.status === 200, revoked.status);
+const closedA = await within(machineA.closedWith);
+check("machine A's open socket was closed 4401 signed_out", closedA?.code === 4401 && closedA.reason === "signed_out", closedA);
+check("...its next upgrade is refused (401)", (await upgradeStatus(EVENTS, { Authorization: `Bearer ${tokenA}` })) === 401);
+const removed = await owner.write(`/fs/v1/folders/robotparts/readers/${encodeURIComponent(`hubproof-reader-${tag}@example.test`)}`, { method: "DELETE" });
+const closedReader = await within(readerPage.closedWith);
+check("removing the reader closed the reader's page 4403 not_a_reader", removed.status === 200 && closedReader?.code === 4403 && closedReader.reason === "not_a_reader", { status: removed.status, closedReader });
+const signedOut = await owner.write("/fs/v1/sign-out", { method: "POST", body: {} });
+const closedPage = await within(ownerPage.closedWith);
+check("the owner's sign-out closed the owner's page 4401 signed_out", signedOut.status === 200 && closedPage?.code === 4401, { status: signedOut.status, closedPage });
+await sleep(300);
+check("...and machine B (another session) stayed open through all three", machineB.ws.readyState === WebSocket.OPEN && late.ws.readyState === WebSocket.OPEN);
+const markB = late.mark();
+machineB.send({ type: "changed", host: ownerHost, seq: 43 });
+check("machine B still announces: the late socket hears seq 43", !!(await late.next((m) => m.type === "changed" && m.seq === 43, 5000, markB)));
 
 for (const c of [...everyone, late]) c.close();
 await sleep(200);

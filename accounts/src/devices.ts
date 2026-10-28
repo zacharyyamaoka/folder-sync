@@ -14,7 +14,7 @@
 // and with storage down (its usage line then says it cannot be measured; the devices still list and revoke).
 
 import { apps, OWN_APP, type App } from "./apps.ts";
-import { escapeAttr, fail, headers, json, jsonBody, PAGE_POLICY, session, writer, type Deps, type Env, type Person, type Via } from "./app.ts";
+import { escapeAttr, fail, headers, json, jsonBody, PAGE_POLICY, session, sessionEnded, writer, type Deps, type Env, type Person, type Via } from "./app.ts";
 import { mint, ttlOf, userRoot } from "./creds.ts";
 import { Measuring, overQuota, quotaOf, TooOld, usageOf } from "./quota.ts";
 import { S3Bucket } from "./s3-bucket.ts";
@@ -124,8 +124,9 @@ export function lifetime(seconds: number): string {
 // ------------------------------------------------------------------------------------------------ revoking
 
 /** Ends `id` when it is one of the caller's own sessions; null when it is not (another person's, or none). Revoking
- *  the caller's own session is signing it out (a browser's cookie cleared). */
-async function end(request: Request, deps: Deps, app: App | null, who: { person: Person; via: Via }, id: string): Promise<{ current: boolean; cookies: string[] } | null> {
+ *  the caller's own session is signing it out (a browser's cookie cleared). Either way its hub sockets close
+ *  (app.ts sessionEnded). */
+async function end(request: Request, env: Env, deps: Deps, app: App | null, who: { person: Person; via: Via }, id: string): Promise<{ current: boolean; cookies: string[] } | null> {
 	const owner = who.person.userId;
 	// WHY the route checks too: the id is the request's, and only the session's person may end it, whatever the
 	// accounts layer below does with an id. One direct read (store.sessionAlive), never a bounded list (judge r2 #4).
@@ -133,8 +134,14 @@ async function end(request: Request, deps: Deps, app: App | null, who: { person:
 		// not a session of theirs: a pending device grant of theirs, or nothing
 		return deps.grants && (await deps.revokeGrant?.(owner, id)) ? { current: false, cookies: [] } : null;
 	}
-	if (id === who.person.sessionId) return { current: true, cookies: await deps.signOut(request, who.via, app, who.person) };
+	if (id === who.person.sessionId) {
+		const cookies = await deps.signOut(request, who.via, app, who.person);
+		await sessionEnded(env, deps, who.person, id);
+		return { current: true, cookies };
+	}
 	if (!(await deps.revokeSession!(owner, id))) return null;
+	// WHY (post-rebase review): a revoked machine's open socket would otherwise keep hearing the folder's changes
+	await sessionEnded(env, deps, who.person, id);
 	return { current: false, cookies: [] };
 }
 
@@ -174,7 +181,7 @@ export async function devicesApi(request: Request, env: Env, deps: Deps, app: Ap
 		if (body instanceof Response) return body;
 		const id = body.id;
 		if (typeof id !== "string" || !SESSION_ID.test(id)) return fail(400, "bad_id", "id is a device's id from GET /fs/v1/devices");
-		const ended = await end(request, deps, app, who, id);
+		const ended = await end(request, env, deps, app, who, id);
 		// WHY one answer for both: whether an id is someone else's session is not the caller's to learn
 		if (!ended) return fail(404, "not_found", "no such device among yours");
 		const answer = json(200, { revoked: id, current: ended.current, keysExpireWithinS: ttlOf(env), note: note(env) });
@@ -211,10 +218,14 @@ async function formPost(request: Request, env: Env, deps: Deps, app: App | null,
 	// WHY (review r1 #2): one browser has one cookie, so a tab that showed A's devices posts with B's session once B
 	// signs in elsewhere; nothing changes, and the page then shows whose account this browser is in
 	if (fields.get("user") !== who.person.userId) return see("/fs/account?done=wrong-user");
-	if (what === "sign-out") return see("/fs/account?done=signed-out", await deps.signOut(request, who.via, app, who.person));
+	if (what === "sign-out") {
+		const cookies = await deps.signOut(request, who.via, app, who.person);
+		await sessionEnded(env, deps, who.person, who.person.sessionId);
+		return see("/fs/account?done=signed-out", cookies);
+	}
 	if (!configured(deps)) return fail(503, "not_configured", "devices are not set up on this Worker yet");
 	const id = fields.get("id") || "";
-	const ended = SESSION_ID.test(id) ? await end(request, deps, app, who, id) : null;
+	const ended = SESSION_ID.test(id) ? await end(request, env, deps, app, who, id) : null;
 	if (!ended) return see("/fs/account?done=not-found");
 	return ended.current ? see("/fs/account?done=signed-out", ended.cookies) : see("/fs/account?done=revoked");
 }

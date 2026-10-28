@@ -43,6 +43,7 @@ import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhos
 import type { EmailEnv } from "./email.ts";
 import { accountRoute, devicesApi, signInReturn, type GrantRow, type SessionRow } from "./devices.ts";
 import { servedFile } from "./ranges.ts";
+import type { CloseOrder } from "./hub.ts";
 
 export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
 	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
@@ -243,7 +244,7 @@ function csrfOk(request: Request, app: App | null): boolean {
 /** The session a write needs, or the answer refusing it. */
 /** Whether `person`'s session is still live (store.sessionAlive: one direct read). A stand-in without it (a unit test's
  *  store, which cannot revoke) says yes. */
-export async function stillSignedIn(deps: Deps, person: Person, now = deps.now()): Promise<boolean> {
+export async function stillSignedIn(deps: Pick<Deps, "store" | "now">, person: Person, now = deps.now()): Promise<boolean> {
 	return !deps.store.sessionAlive || deps.store.sessionAlive(person.userId, person.sessionId, now);
 }
 
@@ -267,8 +268,9 @@ function bucketFor(env: Env, deps: Deps, prefix: string, scope: "object-read-onl
 
 type Role = "owner" | "reader" | "public";
 
-/** Who may read owner's project: decided from the session and the folder's rows, never from the request's say-so. */
-async function decide(deps: Deps, person: Person | null, project: string, ownerParam: string | null): Promise<{ owner: string; role: Role; visibility: Visibility } | Response> {
+/** Who may read owner's project: decided from the session and the folder's rows, never from the request's say-so.
+ *  The folder's hub asks it again for each announcement (hub.ts stillOwner). */
+export async function decide(deps: Pick<Deps, "store">, person: Person | null, project: string, ownerParam: string | null): Promise<{ owner: string; role: Role; visibility: Visibility } | Response> {
 	const owner = ownerParam ?? person?.userId ?? null;
 	if (!owner) return fail(401, "signed_out", "sign in, or name the folder's owner (?owner=) of a public folder");
 	if (!USER_ID.test(owner)) return fail(400, "bad_owner", "owner is not an account id");
@@ -348,10 +350,11 @@ async function usage(request: Request, env: Env, deps: Deps, app: App | null): P
 	return json(200, { owner: who.person.userId, used: { bytes: used.bytes, objects: used.objects }, quota: { bytes: quota.bytes, objects: quota.objects }, over, partial: !!used.partial });
 }
 
-async function signOut(request: Request, deps: Deps, app: App | null): Promise<Response> {
+async function signOut(request: Request, env: Env, deps: Deps, app: App | null): Promise<Response> {
 	const who = await writer(request, deps, app);
 	if (who instanceof Response) return who;
 	const cookies = await deps.signOut(request, who.via, app, who.person);
+	await sessionEnded(env, deps, who.person, who.person.sessionId);
 	const answer = json(200, { ok: true });
 	for (const cookie of cookies) answer.headers.append("Set-Cookie", cookie);
 	return answer;
@@ -400,12 +403,8 @@ async function access(request: Request, deps: Deps, app: App | null): Promise<Re
 	return json(200, { allowed: true, role: decided.role, root: userRoot(decided.owner) });
 }
 
-async function folders(request: Request, env: Env, deps: Deps, app: App | null): Promise<Response> {
-	const who = await session(request, deps, app);
-	if (!who) return fail(401, "signed_out", "not signed in");
-	const owner = who.person.userId;
-	const root = userRoot(owner);
-	const bucket = await bucketFor(env, deps, root, "object-read-only", READ_TTL_S);
+/** The projects under a person's root in the bucket. */
+async function projectNames(bucket: S3Bucket, root: string): Promise<Set<string>> {
 	const names = new Set<string>();
 	let cursor: string | undefined;
 	do {
@@ -416,6 +415,16 @@ async function folders(request: Request, env: Env, deps: Deps, app: App | null):
 		}
 		cursor = page.truncated ? page.cursor : undefined;
 	} while (cursor);
+	return names;
+}
+
+async function folders(request: Request, env: Env, deps: Deps, app: App | null): Promise<Response> {
+	const who = await session(request, deps, app);
+	if (!who) return fail(401, "signed_out", "not signed in");
+	const owner = who.person.userId;
+	const root = userRoot(owner);
+	const bucket = await bucketFor(env, deps, root, "object-read-only", READ_TTL_S);
+	const names = await projectNames(bucket, root);
 	const rows = new Map((await deps.store.folders(owner)).map((r) => [r.project, r]));
 	for (const project of rows.keys()) names.add(project);
 	const out = [];
@@ -645,6 +654,55 @@ async function notifyHub(env: Env, owner: string, project: string, body: unknown
 	}
 }
 
+/** Runs `work` after the answer when the Worker can (ctx.waitUntil), else before it (the tests). */
+async function after(deps: Deps, work: Promise<void>): Promise<void> {
+	if (deps.waitUntil) deps.waitUntil(work);
+	else await work;
+}
+
+/** Asks each named hub to close the sockets `order` names (hub.ts POST /close), in parallel. WHY best effort and
+ *  bounded, as notifyHub: the session (or the reader row) has already ended here, so a hub that fails or hangs must
+ *  never fail or hold the revoke; the hub checks every announcement again anyway (hub.ts stillOwner). */
+async function closeInHubs(env: Env, names: Iterable<string>, order: CloseOrder): Promise<void> {
+	const hub = env.HUB;
+	if (!hub) return;
+	await Promise.all([...names].map(async (name) => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const send = hub.get(hub.idFromName(name)).fetch(new Request("https://hub/close", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(order) }));
+			send.catch(() => undefined);
+			await Promise.race([send, new Promise((done) => { timer = setTimeout(done, NOTIFY_MS); })]);
+		} catch {
+			// ignored on purpose
+		} finally {
+			clearTimeout(timer);
+		}
+	}));
+}
+
+/** Every hub a session of `person` may hold a socket in: one per folder of theirs (their projects in the bucket and
+ *  their folder rows, as GET /fs/v1/folders lists them) and one per folder shared with them. What can't be listed now
+ *  (storage down) is skipped: the hub's per-announcement check stands behind it. */
+async function hubsOf(env: Env, deps: Deps, person: Person): Promise<Set<string>> {
+	const names = new Set<string>();
+	const owner = person.userId;
+	const root = userRoot(owner);
+	await Promise.all([
+		bucketFor(env, deps, root, "object-read-only", READ_TTL_S).then((bucket) => projectNames(bucket, root)).then((projects) => { for (const p of projects) names.add(hubName(owner, p)); }),
+		deps.store.folders(owner).then((rows) => { for (const r of rows) names.add(hubName(owner, r.project)); }),
+		deps.store.readable(person.email.toLowerCase()).then((rows) => { for (const r of rows) names.add(hubName(r.owner, r.project)); }),
+	].map((listing) => listing.catch(() => undefined)));
+	return names;
+}
+
+/** After `person`'s session `sessionId` ended (revoked, signed out): its sockets close (hub.ts SIGNED_OUT). WHY
+ *  (post-rebase review): the Worker checks a socket's session only when it opens, so without this a revoked machine or
+ *  a signed-out browser keeps hearing the folder's changes. */
+export async function sessionEnded(env: Env, deps: Deps, person: Person, sessionId: string): Promise<void> {
+	if (!env.HUB) return;
+	await after(deps, hubsOf(env, deps, person).then((names) => closeInHubs(env, names, { session: sessionId })).catch(() => undefined));
+}
+
 /** GET …/events with Upgrade: websocket: who may connect is decided here (the hub trusts what this forwards). */
 async function events(request: Request, env: Env, deps: Deps, app: App | null, project: string): Promise<Response> {
 	if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return fail(426, "upgrade_required", "this route is a WebSocket: send Upgrade: websocket", { Upgrade: "websocket" });
@@ -664,8 +722,19 @@ async function events(request: Request, env: Env, deps: Deps, app: App | null, p
 	const forwarded = new Headers(request.headers);
 	forwarded.delete("Cookie");
 	forwarded.delete("Authorization");
+	// WHY every X-Hub-* of the client's dropped: the hub trusts these headers, so only this Worker may name them
+	for (const name of [...forwarded.keys()]) if (name.toLowerCase().startsWith("x-hub-")) forwarded.delete(name);
 	forwarded.set("X-Hub-Role", decided.role);
 	forwarded.set("X-Hub-Kind", who?.via === "bearer" ? "machine" : "page");
+	// who the socket is, so a revoke, a sign-out or a reader's removal can close it and an announcement be checked again
+	// (hub.ts Identity); the email percent-encoded, as a header carries bytes only
+	if (who) {
+		forwarded.set("X-Hub-Owner", decided.owner);
+		forwarded.set("X-Hub-Project", project);
+		forwarded.set("X-Hub-User", who.person.userId);
+		forwarded.set("X-Hub-Email", encodeURIComponent(who.person.email));
+		forwarded.set("X-Hub-Session", who.person.sessionId);
+	}
 	return hub.get(hub.idFromName(hubName(decided.owner, project))).fetch(new Request(request, { headers: forwarded }));
 }
 
@@ -689,7 +758,7 @@ async function patchFolder(request: Request, deps: Deps, app: App | null, projec
 	return json(200, await deps.store.setVisibility(who.person.userId, project, body.visibility, new Date(deps.now()).toISOString()));
 }
 
-async function readers(request: Request, deps: Deps, app: App | null, project: string, rest: string[], method: string): Promise<Response> {
+async function readers(request: Request, env: Env, deps: Deps, app: App | null, project: string, rest: string[], method: string): Promise<Response> {
 	const who = await writer(request, deps, app);
 	if (who instanceof Response) return who;
 	const owner = who.person.userId;
@@ -705,6 +774,8 @@ async function readers(request: Request, deps: Deps, app: App | null, project: s
 		const email = rest[0].trim().toLowerCase();
 		if (!EMAIL.test(email)) return fail(400, "bad_email", "email is one address");
 		if (!(await deps.store.removeReader(owner, project, email))) return fail(404, "not_found", "that email is not a reader of this folder");
+		// WHY (post-rebase review): their open sockets on this folder were let in as a reader; they close (hub.ts NOT_A_READER)
+		await after(deps, closeInHubs(env, [hubName(owner, project)], { reader: email }));
 		return json(200, { project, readers: await deps.store.readers(owner, project) });
 	}
 	return fail(405, "method", "POST …/readers {email} or DELETE …/readers/<email>");
@@ -853,7 +924,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 
 	if (what === "me" && rest.length === 1) return read ? me(request, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (what === "usage" && rest.length === 1) return read ? usage(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
-	if (what === "sign-out" && rest.length === 1) return method === "POST" ? signOut(request, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
+	if (what === "sign-out" && rest.length === 1) return method === "POST" ? signOut(request, env, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
 	if (what === "credentials" && rest.length === 1) return method === "POST" ? credentials(request, env, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
 	if (what === "devices") return devicesApi(request, env, deps, app, rest.slice(1), method);
 	if (what === "access" && rest.length === 1) return read ? access(request, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
@@ -871,7 +942,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 	if (sub === "web" && more.length >= 1) {
 		return method === "PUT" || method === "DELETE" ? web(request, env, deps, app, project, more, method) : fail(405, "method", "PUT or DELETE", { Allow: "PUT, DELETE" });
 	}
-	if (sub === "readers") return readers(request, deps, app, project, more, method);
+	if (sub === "readers") return readers(request, env, deps, app, project, more, method);
 	if (sub === "web-trash" && more.length === 1 && more[0] === "purge") {
 		return method === "POST" ? purgeWebTrash(request, env, deps, app, project) : fail(405, "method", "POST only", { Allow: "POST" });
 	}

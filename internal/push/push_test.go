@@ -237,3 +237,73 @@ func TestAnnounceOnce(t *testing.T) {
 		t.Fatalf("received %v auth %v", fake.received, fake.auth)
 	}
 }
+
+// signedOutHub accepts each connection and closes it at once with code (or answers status instead of upgrading).
+type signedOutHub struct {
+	mu     sync.Mutex
+	dials  int
+	code   websocket.StatusCode
+	status int
+}
+
+func (f *signedOutHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.dials++
+	f.mu.Unlock()
+	if f.status != 0 {
+		http.Error(w, `{"error":"signed_out"}`, f.status)
+		return
+	}
+	conn, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		return
+	}
+	conn.Close(f.code, "signed_out")
+}
+
+// A revoked machine's socket is closed 4401 by the hub (accounts/src/hub.ts SIGNED_OUT) and its next upgrade is a 401:
+// either way the client stops, instead of being refused every 30 s with a token that is gone for good.
+func TestHubStopsWhenSignedOut(t *testing.T) {
+	for _, fake := range []*signedOutHub{{code: 4401}, {status: http.StatusUnauthorized}} {
+		srv := httptest.NewServer(fake)
+		u := strings.Replace(srv.URL, "http://", "ws://", 1)
+		h := NewHub(u, "tok", "ua")
+		var states []string
+		var mu sync.Mutex
+		h.OnState = func(s string) { mu.Lock(); states = append(states, s); mu.Unlock() }
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		done := make(chan struct{})
+		go func() { h.Run(ctx); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Errorf("code %d status %d: Run kept reconnecting", fake.code, fake.status)
+		}
+		cancel()
+		<-done
+		srv.Close()
+		fake.mu.Lock()
+		if fake.dials != 1 {
+			t.Errorf("code %d status %d: dialled %d times, want 1", fake.code, fake.status, fake.dials)
+		}
+		fake.mu.Unlock()
+		mu.Lock()
+		if len(states) == 0 || states[len(states)-1] != "signed_out" {
+			t.Errorf("code %d status %d: states %v, want signed_out last", fake.code, fake.status, states)
+		}
+		mu.Unlock()
+	}
+	// any other close still reconnects (TestHubClient), and so does a 503
+	fake := &signedOutHub{status: http.StatusServiceUnavailable}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	h := NewHub(strings.Replace(srv.URL, "http://", "ws://", 1), "tok", "ua")
+	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	defer cancel()
+	h.Run(ctx)
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.dials < 2 {
+		t.Errorf("a 503 dialled %d times, want a reconnect", fake.dials)
+	}
+}

@@ -128,6 +128,7 @@ class FakeSocket {
 	attachment: unknown = null;
 	sent: string[] = [];
 	closed: number | null = null;
+	reason: string | null = null;
 	failOnSend = false;
 	serializeAttachment(value: unknown) { this.attachment = value; }
 	deserializeAttachment() { return this.attachment; }
@@ -135,9 +136,10 @@ class FakeSocket {
 		if (this.failOnSend) throw new Error("closing");
 		this.sent.push(text);
 	}
-	close(code: number) {
+	close(code: number, reason?: string) {
 		if (this.closed !== null) throw new Error("already closed");
 		this.closed = code;
+		this.reason = reason ?? null;
 	}
 	heard() { return this.sent.map((s) => JSON.parse(s)); }
 }
@@ -318,4 +320,179 @@ test("close and error close the socket without throwing, even when it is already
 	await object.webSocketError(c);
 	assert.equal(c.closed, 1011);
 	await object.webSocketError(c);
+});
+
+// ------------------------------------------------------------------------------------------------ ended sessions (post-rebase review)
+// A socket outlives the check the Worker made when it opened. What must hold: the paths that end a session (a revoke,
+// a sign-out) or a reader (removal) close its sockets, and nobody else's; an announcement is checked again against
+// the session, so a revoke the hub never heard of still stops a machine moving a host's seq.
+
+const OWNER_ID = "ownerABC123";
+const READER_ID = "readerXYZ789";
+
+/** The Worker's identity headers for a socket of `sessionId` on OWNER_ID's robotparts (the email percent-encoded). */
+function identity(sessionId: string, userId = OWNER_ID, email = "owner@example.com"): Record<string, string> {
+	return { "X-Hub-Owner": OWNER_ID, "X-Hub-Project": "robotparts", "X-Hub-User": userId, "X-Hub-Email": encodeURIComponent(email), "X-Hub-Session": sessionId };
+}
+
+/** A socket connected with the role, kind and identity the Worker would forward. */
+async function join(object: InstanceType<typeof FolderHub>, sockets: FakeSocket[], role: string, kind: string, who: Record<string, string>) {
+	const answer = await object.fetch(new Request("https://hub/fs/v1/folders/robotparts/events", { headers: { Upgrade: "websocket", "X-Hub-Role": role, "X-Hub-Kind": kind, ...who } }));
+	assert.equal(answer.status, 101);
+	const socket = sockets[sockets.length - 1];
+	socket.sent.length = 0;
+	return socket;
+}
+
+const closeOrder = (object: InstanceType<typeof FolderHub>, body: unknown) => object.fetch(new Request("https://hub/close", { method: "POST", body: JSON.stringify(body) }));
+
+test("a socket's attachment carries who it is: the folder, the person and the session (never a credential)", async () => {
+	const { object, fake } = await wake();
+	const laptop = await join(object, fake.sockets, "owner", "machine", identity("sess-laptop", OWNER_ID, "Owner+tag@example.com"));
+	assert.deepEqual(laptop.attachment, { role: "owner", kind: "machine", who: { owner: OWNER_ID, project: "robotparts", userId: OWNER_ID, email: "Owner+tag@example.com", sessionId: "sess-laptop" } });
+});
+
+test("a session that ended closes every socket of that session, 4401 signed_out, and nobody else's", async () => {
+	const { object, fake, connect } = await wake();
+	const laptop = await join(object, fake.sockets, "owner", "machine", identity("sess-laptop"));
+	const desktop = await join(object, fake.sockets, "owner", "machine", identity("sess-desktop"));
+	const page = await join(object, fake.sockets, "owner", "page", identity("sess-browser"));
+	const reader = await join(object, fake.sockets, "reader", "page", identity("sess-reader", READER_ID, "reader@example.com"));
+	const anonymous = (await connect("public", "page")).socket;
+	const answer = await closeOrder(object, { session: "sess-laptop" });
+	assert.equal(answer.status, 200);
+	assert.deepEqual(await answer.json(), { closed: 1 });
+	assert.deepEqual([laptop.closed, laptop.reason], [4401, "signed_out"]);
+	for (const s of [desktop, page, reader, anonymous]) assert.equal(s.closed, null, "another session's socket stays open");
+	await closeOrder(object, { session: "sess-reader" });
+	assert.deepEqual([reader.closed, reader.reason], [4401, "signed_out"], "a reader signing out closes their socket in the owner's hub");
+	assert.deepEqual(await (await closeOrder(object, { session: "sess-nobody" })).json(), { closed: 0 });
+	for (const bad of [{}, { session: "" }, { session: 7 }, { reader: "" }, { session: "a", reader: "b@example.com" }, null, []]) {
+		assert.equal((await closeOrder(object, bad)).status, 400, JSON.stringify(bad));
+	}
+	for (const s of [desktop, page, anonymous]) assert.equal(s.closed, null);
+});
+
+test("a reader removed closes that reader's reader sockets, 4403 not_a_reader; the owner's and a public one stay", async () => {
+	const { object, fake } = await wake();
+	const machine = await join(object, fake.sockets, "owner", "machine", identity("sess-laptop"));
+	const page = await join(object, fake.sockets, "owner", "page", identity("sess-browser"));
+	const reader = await join(object, fake.sockets, "reader", "page", identity("sess-reader", READER_ID, "Reader@Example.com"));
+	const other = await join(object, fake.sockets, "reader", "page", identity("sess-other", "otherQRS456", "other@example.com"));
+	const answer = await closeOrder(object, { reader: "reader@example.com" });
+	assert.deepEqual(await answer.json(), { closed: 1 });
+	assert.deepEqual([reader.closed, reader.reason], [4403, "not_a_reader"]);
+	for (const s of [machine, page, other]) assert.equal(s.closed, null);
+	assert.deepEqual(await (await closeOrder(object, { reader: "owner@example.com" })).json(), { closed: 0 }, "an owner socket is never a reader's");
+});
+
+// ------------------------------------------------------------------------------------------------ the same, end to end
+
+/** A HUB binding of real FolderHub objects (one per name, each on a fake ctx) over the real-auth stack's env. */
+function hubBinding(envOf: () => unknown) {
+	const objects = new Map<string, { object: InstanceType<typeof FolderHub>; fake: ReturnType<typeof fakeCtx>; storage: Map<string, unknown> }>();
+	const binding = {
+		idFromName: (name: string) => name,
+		get: (name: unknown) => ({
+			async fetch(request: Request) {
+				let found = objects.get(name as string);
+				if (!found) {
+					const storage = new Map<string, unknown>();
+					const fake = fakeCtx(storage);
+					const object = new FolderHub(fake.ctx, envOf() as never);
+					await fake.ctx.blocked;
+					found = { object, fake, storage };
+					objects.set(name as string, found);
+				}
+				return found.object.fetch(request);
+			},
+		}),
+	};
+	return { binding, objects };
+}
+
+async function liveFolder() {
+	const { realStack } = await import("./real-auth.ts");
+	let env: unknown = null;
+	const hubs = hubBinding(() => env);
+	const s = await realStack({ HUB: hubs.binding });
+	env = s.env;
+	const owner = await s.browser("maker@example.com");
+	const laptop = await s.machine(owner.cookie);
+	const desktop = await s.machine(owner.cookie);
+	const reader = await s.browser("reader@example.com");
+	assert.equal((await s.post("/fs/v1/folders/robotparts/readers", { email: "reader@example.com" }, owner.page)).status, 200);
+	const upgrade = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==" };
+	const name = `${owner.userId}/robotparts`;
+	/** Opens the events socket with `auth`; the hub's end of it. */
+	const open = async (auth: Record<string, string>, query = "") => {
+		const answer = await s.call(`/fs/v1/folders/robotparts/events${query}`, { headers: { ...upgrade, ...auth } });
+		assert.equal(answer.status, 101, `upgrade: ${answer.status}`);
+		const sockets = hubs.objects.get(name)!.fake.sockets;
+		const socket = sockets[sockets.length - 1];
+		socket.sent.length = 0;
+		return socket;
+	};
+	const sockets = {
+		laptop: await open({ Authorization: `Bearer ${laptop.token}` }),
+		desktop: await open({ Authorization: `Bearer ${desktop.token}` }),
+		page: await open({ Cookie: owner.cookie }),
+		reader: await open({ Cookie: reader.cookie }, `?owner=${owner.userId}`),
+	};
+	return { s, hubs, name, owner, laptop, desktop, reader, sockets, open, upgrade };
+}
+
+test("real auth: revoking a machine closes its socket (4401) and its next upgrade is 401; the others stay open", async () => {
+	const f = await liveFolder();
+	const revoked = await f.s.post("/fs/v1/devices/revoke", { id: f.laptop.sessionId }, f.owner.page);
+	assert.equal(revoked.status, 200);
+	assert.deepEqual([f.sockets.laptop.closed, f.sockets.laptop.reason], [4401, "signed_out"]);
+	for (const s of [f.sockets.desktop, f.sockets.page, f.sockets.reader]) assert.equal(s.closed, null);
+	assert.equal((await f.s.call("/fs/v1/folders/robotparts/events", { headers: { ...f.upgrade, Authorization: `Bearer ${f.laptop.token}` } })).status, 401);
+	// and from the account page's form
+	const form = await f.s.call("/fs/account/revoke", { method: "POST", headers: { Cookie: f.owner.cookie, "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ id: f.desktop.sessionId, user: f.owner.userId }).toString() });
+	assert.equal(form.headers.get("Location"), "/fs/account?done=revoked");
+	assert.deepEqual([f.sockets.desktop.closed, f.sockets.desktop.reason], [4401, "signed_out"]);
+	for (const s of [f.sockets.page, f.sockets.reader]) assert.equal(s.closed, null);
+});
+
+test("real auth: a browser signing out closes its socket (4401), from the API and from the account page; a reader's too", async () => {
+	const f = await liveFolder();
+	const second = await f.s.browser("maker@example.com");
+	const secondPage = await f.open({ Cookie: second.cookie });
+	assert.equal((await f.s.post("/fs/v1/sign-out", {}, second.page)).status, 200);
+	assert.deepEqual([secondPage.closed, secondPage.reason], [4401, "signed_out"]);
+	for (const s of [f.sockets.laptop, f.sockets.desktop, f.sockets.page, f.sockets.reader]) assert.equal(s.closed, null);
+	// the reader signs out on the account page: their socket in the owner's hub closes
+	const form = await f.s.call("/fs/account/sign-out", { method: "POST", headers: { Cookie: f.reader.cookie, "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ user: f.reader.userId }).toString() });
+	assert.equal(form.headers.get("Location"), "/fs/account?done=signed-out");
+	assert.deepEqual([f.sockets.reader.closed, f.sockets.reader.reason], [4401, "signed_out"]);
+	for (const s of [f.sockets.laptop, f.sockets.desktop, f.sockets.page]) assert.equal(s.closed, null);
+	// the owner revokes their own current browser from the devices list: that is signing it out
+	assert.equal((await f.s.post("/fs/v1/devices/revoke", { id: f.owner.sessionId }, f.owner.page)).status, 200);
+	assert.deepEqual([f.sockets.page.closed, f.sockets.page.reason], [4401, "signed_out"]);
+	for (const s of [f.sockets.laptop, f.sockets.desktop]) assert.equal(s.closed, null);
+});
+
+test("real auth: removing a reader closes the reader's socket (4403); the owner's sockets stay open", async () => {
+	const f = await liveFolder();
+	const removed = await f.s.call("/fs/v1/folders/robotparts/readers/reader%40example.com", { method: "DELETE", headers: f.owner.page });
+	assert.equal(removed.status, 200);
+	assert.deepEqual([f.sockets.reader.closed, f.sockets.reader.reason], [4403, "not_a_reader"]);
+	for (const s of [f.sockets.laptop, f.sockets.desktop, f.sockets.page]) assert.equal(s.closed, null);
+});
+
+test("real auth: a machine revoked behind the hub's back can't announce: refused, seq unmoved, socket closed; a live one still can", async () => {
+	const f = await liveFolder();
+	// the session ends without the hub being told (a notify that failed): only the per-announce check stands
+	f.s.db.prepare('DELETE FROM "session" WHERE "id" = ?').run(f.laptop.sessionId);
+	const { object, storage } = f.hubs.objects.get(f.name)!;
+	await object.webSocketMessage(f.sockets.laptop as never, changed(HOST, 99));
+	for (const s of [f.sockets.desktop, f.sockets.page, f.sockets.reader]) assert.deepEqual(s.sent, [], "nobody heard the revoked machine");
+	assert.equal(storage.get("hosts"), undefined, "no seq was stored for it");
+	assert.deepEqual([f.sockets.laptop.closed, f.sockets.laptop.reason], [4401, "signed_out"]);
+	// the real machine of that host announces seq 5: not held back by an inflated 99
+	await object.webSocketMessage(f.sockets.desktop as never, changed(HOST, 5));
+	for (const s of [f.sockets.page, f.sockets.reader]) assert.deepEqual(s.heard(), [{ type: "changed", cursor: 1, host: HOST, seq: 5, web: false }]);
+	assert.equal(f.sockets.desktop.closed, null);
 });

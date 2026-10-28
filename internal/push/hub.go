@@ -3,6 +3,7 @@ package push
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
@@ -30,6 +31,15 @@ const (
 	DeadAfter = 75 * time.Second
 )
 
+// StatusSignedOut is the hub's close when this machine's session ended (revoked, signed out): 4401, the twin of the 401
+// its next upgrade gets (accounts/src/hub.ts SIGNED_OUT).
+const StatusSignedOut websocket.StatusCode = 4401
+
+// ErrSignedOut: the hub closed with StatusSignedOut, or the upgrade was answered 401. WHY Run stops on it: the token
+// it holds is gone for good, so reconnecting would only be refused every 30 s; a round's credentials refresh then
+// meets the same 401 and says signed out the usual way (exit 3, the desktop's signed_out).
+var ErrSignedOut = errors.New("the hub says this machine is signed out")
+
 // Hub is a reconnecting client of GET <server>/fs/v1/folders/<project>/events.
 type Hub struct {
 	Events <-chan Event
@@ -42,7 +52,8 @@ type Hub struct {
 	mu        sync.Mutex
 	conn      *websocket.Conn
 	pending   *Event // the last own change not yet sent (sent on reconnect)
-	// OnState is called with "connected" or "closed" (tracing); may be nil.
+	signedOut atomic.Bool
+	// OnState is called with "connected", "closed" or, once and last, "signed_out" (tracing); may be nil.
 	OnState func(state string)
 }
 
@@ -72,6 +83,9 @@ func NewHub(eventsURL, token, userAgent string) *Hub {
 
 // Connected reports whether a socket is open now.
 func (h *Hub) Connected() bool { return h != nil && h.connected.Load() }
+
+// SignedOut reports whether the hub ended this machine's socket as signed out (Run has returned).
+func (h *Hub) SignedOut() bool { return h != nil && h.signedOut.Load() }
 
 // Announce tells the hub this machine's manifest is at seq. Never blocks; while disconnected the latest
 // announcement is kept and sent on reconnect (the hello catches peers up either way).
@@ -108,7 +122,8 @@ func (h *Hub) flush(conn *websocket.Conn) {
 	}
 }
 
-// Run keeps a socket open until ctx ends, reconnecting with backoff (0.5 s doubling to 30 s, with jitter).
+// Run keeps a socket open until ctx ends, reconnecting with backoff (0.5 s doubling to 30 s, with jitter), or until
+// the hub says this machine is signed out (ErrSignedOut).
 func (h *Hub) Run(ctx context.Context) {
 	backoff := 500 * time.Millisecond
 	for ctx.Err() == nil {
@@ -117,7 +132,13 @@ func (h *Hub) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		_ = err
+		if errors.Is(err, ErrSignedOut) {
+			h.signedOut.Store(true)
+			if h.OnState != nil {
+				h.OnState("signed_out")
+			}
+			return
+		}
 		if time.Since(started) > time.Minute {
 			backoff = 500 * time.Millisecond // it was up for a while: retry soon
 		}
@@ -157,6 +178,9 @@ func (h *Hub) session(ctx context.Context) error {
 	conn, resp, err := websocket.Dial(dialCtx, h.URL, &websocket.DialOptions{HTTPHeader: header})
 	cancel()
 	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			return ErrSignedOut
+		}
 		if resp != nil {
 			return fmt.Errorf("hub answered %d", resp.StatusCode) // never the token
 		}
@@ -193,6 +217,9 @@ func (h *Hub) session(ctx context.Context) error {
 	for {
 		_, data, err := conn.Read(sessionCtx)
 		if err != nil {
+			if websocket.CloseStatus(err) == StatusSignedOut {
+				return ErrSignedOut
+			}
 			return err
 		}
 		lastSeen.Store(time.Now().UnixNano())

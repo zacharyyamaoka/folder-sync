@@ -1906,3 +1906,64 @@ test("hub: a failing, throwing or silent hub never fails or holds the web write"
 	// no binding at all (the other tests' shape) still writes
 	assert.equal((await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/nohub.json", { method: "PUT", headers: page(OWNER), body: "{}\n" })).status, 200);
 });
+
+test("hub: the Worker forwards who the socket is (folder, person, session), and a client's own X-Hub-* never reaches the hub", async () => {
+	const { binding, seen } = fakeHub();
+	const { deps, store } = fakeDeps(people());
+	const e = env({ HUB: binding });
+	await store.addReader(OWNER.userId, "robotparts", SISTER.email, "2026-10-26T00:00:00Z");
+	const forged = { "X-Hub-Session": "sess-forged", "X-Hub-User": "someone", "X-Hub-Email": "x%40y.z", "X-Hub-Owner": "someone", "X-Hub-Project": "other", "X-Hub-Extra": "1" };
+	const cases: [string, string, Record<string, string>, Record<string, string> | null][] = [
+		["the owner's machine", EVENTS, { Authorization: "Bearer token-owner-laptop" }, { owner: OWNER.userId, project: "robotparts", user: OWNER.userId, email: OWNER.email, session: "sess-owner-laptop" }],
+		["a reader's page", `${EVENTS}?owner=${OWNER.userId}`, { ...cookie(SISTER), Origin: SITE }, { owner: OWNER.userId, project: "robotparts", user: SISTER.userId, email: SISTER.email, session: SISTER.sessionId }],
+		["anyone, signed out, a public folder", `/fs/v1/folders/pub/events?owner=${OWNER.userId}`, {}, null],
+	];
+	for (const [what, path, headers, expected] of cases) {
+		seen.length = 0;
+		assert.equal((await call(handle, e, deps, path, { headers: { ...upgrade, ...headers, ...forged } })).status, 200, what);
+		const sent = seen[0].headers;
+		assert.equal(sent.get("X-Hub-Extra"), null, `${what}: a client's X-Hub-* is dropped`);
+		if (!expected) {
+			for (const name of Object.keys(forged)) assert.equal(sent.get(name), null, `${what}: ${name}`);
+			continue;
+		}
+		const got = { owner: sent.get("X-Hub-Owner"), project: sent.get("X-Hub-Project"), user: sent.get("X-Hub-User"), email: decodeURIComponent(sent.get("X-Hub-Email") ?? ""), session: sent.get("X-Hub-Session") };
+		assert.deepEqual(got, expected, what);
+	}
+});
+
+test("hub: a sign-out tells each hub its session may be in to close it; a reader's removal tells the folder's hub", async () => {
+	const { binding, seen } = fakeHub(() => new Response('{"closed":1}', { status: 200 }));
+	const { deps, store } = fakeDeps(people());
+	const e = env({ HUB: binding });
+	await store.addReader(OWNER.userId, "robotparts", SISTER.email, "2026-10-26T00:00:00Z");
+	const closes = () => seen.filter((s) => s.url === "https://hub/close").map((s) => ({ name: s.name, body: s.body })).sort((a, b) => (a.name < b.name ? -1 : 1));
+	// the sister signs out: her own folder's hub, and the owner's robotparts she reads
+	assert.equal((await call(handle, e, deps, "/fs/v1/sign-out", { method: "POST", headers: page(SISTER) })).status, 200);
+	assert.deepEqual(closes(), [
+		{ name: `${OWNER.userId}/robotparts`, body: { session: SISTER.sessionId } },
+		{ name: `${SISTER.userId}/robotparts`, body: { session: SISTER.sessionId } },
+	]);
+	// a machine signs itself out (folder-sync logout): each of the owner's folders, listed from storage and rows
+	seen.length = 0;
+	assert.equal((await call(handle, e, deps, "/fs/v1/sign-out", { method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } })).status, 200);
+	assert.deepEqual(closes(), [
+		{ name: `${OWNER.userId}/pub`, body: { session: "sess-owner-laptop" } },
+		{ name: `${OWNER.userId}/robotparts`, body: { session: "sess-owner-laptop" } },
+	]);
+	// the account page's Sign out
+	seen.length = 0;
+	const form = await call(handle, e, deps, "/fs/account/sign-out", { method: "POST", origin: SITE, headers: { ...cookie(OWNER), Origin: SITE, "Content-Type": "application/x-www-form-urlencoded" }, body: `user=${OWNER.userId}` });
+	assert.equal(form.status, 303);
+	assert.deepEqual(closes().map((c) => c.body), [{ session: OWNER.sessionId }, { session: OWNER.sessionId }]);
+	// a reader removed: only that folder's hub, by the reader's email
+	const { deps: fresh, store: rows } = fakeDeps(people());
+	await rows.addReader(OWNER.userId, "robotparts", SISTER.email, "2026-10-26T00:00:00Z");
+	seen.length = 0;
+	assert.equal((await call(handle, e, fresh, `/fs/v1/folders/robotparts/readers/${encodeURIComponent(SISTER.email)}`, { method: "DELETE", headers: page(OWNER) })).status, 200);
+	assert.deepEqual(closes(), [{ name: `${OWNER.userId}/robotparts`, body: { reader: SISTER.email } }]);
+	// a hub that fails never fails the sign-out
+	const down = fakeHub(() => Promise.reject(new Error("hub down")));
+	const { deps: other } = fakeDeps(people());
+	assert.equal((await call(handle, env({ HUB: down.binding }), other, "/fs/v1/sign-out", { method: "POST", headers: page(OWNER) })).status, 200);
+});
