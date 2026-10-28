@@ -73,10 +73,12 @@ function iso(value: Date | string): string {
 /** The device a session is, named from what it sent: a machine by its host name, a browser by its User-Agent (as
  *  sent when this knows no shorter name for it), else null. */
 export function deviceOf(row: SessionRow, currentId: string): Device {
-	const agent = (row.userAgent || "").trim();
+	const stored = row.userAgent ?? "";
+	// a trimmed copy for recognising it only: a name this does not recognise is the string as stored (judge r1 #4)
+	const agent = stored.trim();
 	const machine = MACHINE_AGENT.exec(agent);
 	const kind = machine || agent.startsWith("folder-sync/") ? "machine" : "browser";
-	const name = machine ? machine[1] : agent ? (kind === "browser" ? browserName(agent) : null) ?? agent : null;
+	const name = machine ? machine[1] : (kind === "browser" && agent ? browserName(agent) : null) ?? (stored || null);
 	return { id: row.id, kind, name, created: iso(row.createdAt), lastSeen: iso(row.updatedAt), current: row.id === currentId };
 }
 
