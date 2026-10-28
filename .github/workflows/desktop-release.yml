@@ -97,7 +97,7 @@ jobs:
           NO_STRIP: "true"
         with:
           projectPath: app
-          tauriScript: npm run tauri --
+          tauriScript: npm run tauri
           args: ${{ matrix.args }}
 
       - name: The sidecar is in the bundle
