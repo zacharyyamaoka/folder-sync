@@ -18,11 +18,15 @@
 //   short-lived key inside its own root;
 // - over quota (the stack restarted with QUOTA_BYTES=1): read-only keys that say why; a round holds its upload, deletes
 //   through the Worker (permanently: no trash copy, the usage goes down) and still pulls; back under, the upload goes;
+// - a file read with Range: bytes=2-5 through the real store is a 206 of those bytes; past the end, 416;
+// - devices: a second machine of A's is listed by its host name (no token in the list), B cannot revoke it (404), A
+//   revokes it from /fs/account with a no-script form POST (a foreign Origin is refused), and its bearer is then 401
+//   with no new keys (`credentials` exits 3) while A's first machine still gets keys;
 // - `folder-sync logout`, then `credentials` exits 3; signing the browser out makes /fs/v1/me 401.
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -343,6 +347,67 @@ async function run(stack, cli) {
 	rmSync(join(homeA, ".folder-sync", "session.json"), { force: true }); // likewise its read-only ones
 	const backUnder = fsync(cli, homeA, site, ["sync", "--once", "--dir", folderA]);
 	check("back under the quota, the held file goes", backUnder.code === 0 && existsSync(machineKey("saved/held.json")), (backUnder.out + backUnder.err).trim().split("\n").slice(-1)[0]);
+
+	// 9c. Range through the real store (ranges.ts): one range of held.json, read as a ranged GET; past its end, 416
+	const heldText = "{\"held\": true}\n";
+	const heldUrl = `/fs/v1/folders/${PROJECT}/files/${hostA}/saved/held.json`;
+	const part = await a.fetch(heldUrl, { headers: { Range: "bytes=2-5" } });
+	const partText = await part.text();
+	check("GET …/files/<host>/saved/held.json with Range: bytes=2-5 is a 206 of exactly those bytes",
+		part.status === 206 && part.headers.get("Content-Range") === `bytes 2-5/${Buffer.byteLength(heldText)}` && partText === heldText.slice(2, 6) && part.headers.get("Accept-Ranges") === "bytes",
+		{ status: part.status, range: part.headers.get("Content-Range"), body: partText });
+	const past = await a.fetch(heldUrl, { headers: { Range: "bytes=999-" } });
+	check("… and Range: bytes=999- is 416 with Content-Range: bytes */<size>", past.status === 416 && past.headers.get("Content-Range") === `bytes */${Buffer.byteLength(heldText)}`, { status: past.status, range: past.headers.get("Content-Range") });
+
+	// 9d. devices (devices.ts): a second machine of A's, revoked from the account page
+	const homeA2 = join(DIR, "homes", "A2");
+	mkdirSync(homeA2, { recursive: true });
+	const second = await login(cli, homeA2, site, a);
+	const account2Path = join(homeA2, ".folder-sync", "account.json");
+	const account2 = existsSync(account2Path) ? JSON.parse(readFileSync(account2Path, "utf8")) : null;
+	check("a second machine of A's signs in (folder-sync login, approved by A's browser)", second.exit === 0 && !!account2?.token, `${second.out.trim().split("\n").pop()} ${second.err.trim()}`);
+	const bearer2 = { Authorization: `Bearer ${account2?.token}` };
+	const itself = await (await fetch(`${site}/fs/v1/devices`, { headers: bearer2 })).json();
+	const secondId = itself.devices?.find((d) => d.current)?.id;
+	const devList = await a.fetch("/fs/v1/devices");
+	const devText = await devList.text();
+	const devBody = JSON.parse(devText);
+	const host = hostname().replace(/[^A-Za-z0-9._ -]/g, "?").slice(0, 64) || "host";
+	const machines = (devBody.devices || []).filter((d) => d.kind === "machine");
+	check("GET /fs/v1/devices: A's browser (current) and both machines, named by host, with ISO dates",
+		devList.status === 200 && devBody.owner === meA.user.id && devBody.devices.filter((d) => d.current).length === 1 && devBody.devices.find((d) => d.current)?.kind === "browser"
+		&& machines.length >= 2 && machines.every((d) => d.name === host) && machines.some((d) => d.id === secondId)
+		&& devBody.devices.every((d) => !Number.isNaN(Date.parse(d.created)) && !Number.isNaN(Date.parse(d.lastSeen))),
+		devBody.devices?.map((d) => `${d.kind}:${d.name}:${d.current}`));
+	const jarValues = [...a.jar.values()].map((v) => decodeURIComponent(v).split(".")[0]);
+	check("the device list holds no session token (neither machine's, nor the browser's cookie)", ![account?.token, account2?.token, ...jarValues].some((t) => t && devText.includes(t)));
+	const bList = await (await b.fetch("/fs/v1/devices")).json();
+	check("B's device list holds none of A's", (bList.devices || []).length >= 1 && !bList.devices.some((d) => devBody.devices.some((x) => x.id === d.id)), bList.devices?.map((d) => d.kind));
+	const bRevoke = await b.write("/fs/v1/devices/revoke", { method: "POST", body: { id: secondId } });
+	const nobody = await b.write("/fs/v1/devices/revoke", { method: "POST", body: { id: "nOsUcHsEsSiOnIdAtAlL0123456789ab" } });
+	check("B revoking A's machine is the same 404 as an unknown id, and A's machine stays signed in",
+		bRevoke.status === 404 && JSON.stringify(await bRevoke.json()) === JSON.stringify(await nobody.json()) && (await fetch(`${site}/fs/v1/me`, { headers: bearer2 })).status === 200);
+	const accountPage = await a.fetch("/fs/account");
+	const accountHtml = await accountPage.text();
+	writeFileSync(join(DIR, "account.html"), accountHtml);
+	check("GET /fs/account: a page with no script, the second machine listed with a Revoke form, the keys' lifetime said",
+		accountPage.status === 200 && !/<script/i.test(accountHtml) && accountHtml.includes(`data-device="${secondId}"`) && accountHtml.includes(`action="/fs/account/revoke"`) && /within 5 minutes/.test(accountHtml) && accountHtml.includes(PEOPLE.A));
+	const formOf = (origin) => ({ method: "POST", raw: true, body: new URLSearchParams({ id: secondId, user: meA.user.id }).toString(), headers: { "Content-Type": "application/x-www-form-urlencoded", ...(origin ? { Origin: origin } : {}) } });
+	const foreign = await a.fetch("/fs/account/revoke", formOf("https://evil.example"));
+	check("the Revoke form from a foreign Origin is refused (403), and the machine stays signed in", foreign.status === 403 && (await fetch(`${site}/fs/v1/me`, { headers: bearer2 })).status === 200, foreign.status);
+	const revokedForm = await a.fetch("/fs/account/revoke", formOf(site));
+	check("the Revoke form from the page answers 303 to /fs/account?done=revoked", revokedForm.status === 303 && revokedForm.headers.get("Location") === "/fs/account?done=revoked", { status: revokedForm.status, location: revokedForm.headers.get("Location") });
+	const deadKeys = await fetch(`${site}/fs/v1/credentials`, { method: "POST", headers: bearer2 });
+	const deadMe = await fetch(`${site}/fs/v1/me`, { headers: bearer2 });
+	check("the revoked machine's bearer is 401 on /fs/v1/me and on /fs/v1/credentials (no new keys)", deadKeys.status === 401 && deadMe.status === 401, { credentials: deadKeys.status, me: deadMe.status });
+	rmSync(join(homeA2, ".folder-sync", "session.json"), { force: true });
+	const revokedCli = fsync(cli, homeA2, site, ["credentials"]);
+	check("on the revoked machine, folder-sync credentials exits 3", revokedCli.code === 3, revokedCli.err.trim());
+	rmSync(join(homeA, ".folder-sync", "session.json"), { force: true });
+	const stillA = fsync(cli, homeA, site, ["credentials"]);
+	check("A's first machine still gets keys", stillA.code === 0 && JSON.parse(stillA.out || "{}").Prefix === root, stillA.err.trim());
+	const afterPage = await (await a.fetch("/fs/account?done=revoked")).text();
+	check("the account page no longer lists it, and says the keys it holds stop working within 5 minutes", !afterPage.includes(`data-device="${secondId}"`) && /Storage keys it already holds stop working within 5 minutes/.test(afterPage));
 
 	// 10. the stand-in: every request it let through used a short-lived key inside its own root
 	const gate = readFileSync(join(STATE, "gate.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
