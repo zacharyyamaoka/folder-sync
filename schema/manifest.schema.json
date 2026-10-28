@@ -45,7 +45,12 @@
         "size": { "type": "integer", "minimum": 0 },
         "mtime": { "type": "string", "format": "date-time" },
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "written_at": { "type": "string", "format": "date-time" }
+        "written_at": { "type": "string", "format": "date-time" },
+        "object_etag": {
+          "description": "Optional. The stored object's ETag as the store answered right after this host uploaded it, without quotes (an MD5 in hex, or <hex>-<parts> for a multipart upload): a reader may fetch a byte range of exactly this version with If-Match.",
+          "type": "string",
+          "pattern": "^[0-9A-Za-z-]{1,128}$"
+        }
       }
     }
   }

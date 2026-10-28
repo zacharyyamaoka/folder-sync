@@ -42,6 +42,9 @@ export interface ManifestEntry {
 	mtime: string;
 	sha256: string;
 	written_at: string;
+	/** Optional: the stored object's ETag (no quotes) as the store answered right after its upload; a reader may fetch a
+	 *  byte range of exactly this version with If-Match (docs/CONTRACT.md). */
+	object_etag?: string;
 }
 
 export interface Manifest {
@@ -101,6 +104,9 @@ export function validateManifest(manifest: Manifest, project: string, hostId: st
 		checkPath(entry.path);
 		if (seen.has(entry.path)) throw new ContractError(`manifest lists ${entry.path} twice`);
 		seen.add(entry.path);
+		if (entry.object_etag !== undefined && (typeof entry.object_etag !== "string" || !/^[0-9A-Za-z-]{1,128}$/.test(entry.object_etag))) {
+			throw new ContractError(`${entry.path}: bad object_etag`);
+		}
 		if (!/^[0-9a-f]{64}$/.test(entry.sha256) || entry.size < 0) {
 			throw new ContractError(`bad entry ${entry.path}`);
 		}

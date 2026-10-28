@@ -315,7 +315,9 @@ export async function writeWebFile(bucket: WritableBucket, w: Where, path: strin
 			}
 		}
 		const iso = new Date(now).toISOString();
-		const entry: ManifestEntry = { path, size: data.byteLength, mtime: iso, sha256, written_at: iso };
+		// object_etag (docs/CONTRACT.md): the stored object's ETag, set from the PUT's answer below; sized here as the MD5
+		// R2 answers a single PUT with, so the quota charge counts the manifest it really writes
+		const entry: ManifestEntry = { path, size: data.byteLength, mtime: iso, sha256, written_at: iso, object_etag: "0".repeat(32) };
 		const updated = next(manifest, [...manifest.files.filter((e) => e.path !== path), entry], now);
 		// the net cost: the new bytes (the old ones move to _trash/ and still count), one object (the file, or the trash
 		// copy of the old one), and the manifest's change (one object more on the first write)
@@ -326,7 +328,9 @@ export async function writeWebFile(bucket: WritableBucket, w: Where, path: strin
 		// cut-off change is always one the journal names, and is removed or charged
 		const committed = await change(bucket, w, journal, { where: w, path, restore, restoreSha256: old?.sha256 ?? null, restoreSize: old?.size ?? null, sha256 }, async () => {
 			if (restore && !(await bucket.copy(hostKey(w, path), restore))) throw new Error(`${JSON.stringify(path)} could not be copied to the trash`);
-			await bucket.put(hostKey(w, path), data);
+			const stored = await bucket.put(hostKey(w, path), data);
+			if (/^[0-9A-Za-z-]{1,128}$/.test(stored.etag)) entry.object_etag = stored.etag;
+			else delete entry.object_etag; // an ETag this cannot name: the file is then read whole and sha256-checked
 			return writeManifest(bucket, w, updated, etag);
 		});
 		if (committed) {

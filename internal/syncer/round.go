@@ -254,6 +254,7 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 			return err
 		}
 		result.Uploaded = changed
+		p.recordObjectETags(next, changed)
 	}
 	if len(deleted) > 0 {
 		list, err := p.writeList("delete.txt", deleted)
@@ -339,6 +340,30 @@ func newJobID() string {
 // one, deletes them permanently and lowers the usage; its manifest becomes this machine's once checked. A job whose
 // answer was lost is asked for again first; a server that says the manifest moved on makes the round take the
 // bucket's own (a read). Anything that goes wrong is a ReadOnlyError, so the round still pulls.
+// recordObjectETags sets each uploaded entry's object_etag to the ETag its stored object has now. WHY a HEAD after the
+// copy: rclone copy does not report ETags, and this host is its prefix's only writer, so the object HEAD sees is the
+// one just uploaded. A HEAD that fails leaves the field empty: the file is then read whole and checked by sha256, as
+// before the field existed, never served under a wrong identity.
+func (p *Project) recordObjectETags(next []manifest.Entry, uploaded []string) {
+	if p.S3 == nil {
+		return
+	}
+	want := map[string]bool{}
+	for _, path := range uploaded {
+		want[path] = true
+	}
+	for i := range next {
+		if !want[next[i].Path] {
+			continue
+		}
+		etag, found, err := p.S3.Head(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+next[i].Path)
+		if err != nil || !found {
+			continue
+		}
+		next[i].ObjectETag = strings.Trim(etag, `"`)
+	}
+}
+
 func (p *Project) pushReadOnly(ctx context.Context, prev manifest.Manifest, changed, deleted []string, result *Result) error {
 	refusal := func(err error) error {
 		held := len(changed)

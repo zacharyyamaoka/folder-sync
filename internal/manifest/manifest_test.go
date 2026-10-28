@@ -56,6 +56,9 @@ func TestValidateRejects(t *testing.T) {
 		"duplicate":    func(m *Manifest) { m.Files[1].Path = m.Files[0].Path },
 		"sha":          func(m *Manifest) { m.Files[0].SHA256 = "ABC" },
 		"size":         func(m *Manifest) { m.Files[0].Size = -1 },
+		"object_etag quoted": func(m *Manifest) { m.Files[0].ObjectETag = `"abc"` },
+		"object_etag space":  func(m *Manifest) { m.Files[0].ObjectETag = "a b" },
+		"object_etag long":   func(m *Manifest) { m.Files[0].ObjectETag = strings.Repeat("a", 129) },
 		"mtime":        func(m *Manifest) { m.Files[0].MTime = "" },
 	}
 	for name, mutate := range mutations {
@@ -105,5 +108,23 @@ func TestSchemaFileAgrees(t *testing.T) {
 		if _, ok := entry[key]; !ok {
 			t.Errorf("the schema requires files[].%s, the package does not write it", key)
 		}
+	}
+}
+
+// TestObjectETagIsOptional: object_etag is written only when known, read back as written, and an R2 multipart ETag
+// ("<hex>-<parts>") is one.
+func TestObjectETagIsOptional(t *testing.T) {
+	m := sample()
+	m.Files[0].ObjectETag = "9b2cf535f27731c974343645a3985328-3"
+	data := Marshal(m)
+	if strings.Count(string(data), "object_etag") != 1 {
+		t.Fatalf("object_etag is omitted when empty and written when set: %s", data)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Index()["z.md"].ObjectETag != "9b2cf535f27731c974343645a3985328-3" || got.Index()["notes/a.md"].ObjectETag != "" {
+		t.Fatalf("%+v", got.Files)
 	}
 }

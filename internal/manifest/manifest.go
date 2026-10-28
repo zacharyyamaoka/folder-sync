@@ -29,6 +29,10 @@ type Entry struct {
 	MTime     string `json:"mtime"`      // the source file's modification time, RFC 3339 UTC with nanoseconds
 	SHA256    string `json:"sha256"`     // lowercase hex of the content
 	WrittenAt string `json:"written_at"` // when this host uploaded this content, RFC 3339 UTC
+	// ObjectETag is the stored object's ETag as the store answered right after this host uploaded it, without its
+	// quotes: what lets a reader fetch a byte range of exactly this version (If-Match) instead of the whole file to
+	// check sha256. Optional: empty when unknown (a file written before it existed, or a HEAD that failed).
+	ObjectETag string `json:"object_etag,omitempty"`
 }
 
 // Manifest is hosts/<host-id>/manifest.json.
@@ -43,6 +47,9 @@ type Manifest struct {
 }
 
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// objectETag is an S3/R2 ETag without its quotes: an MD5 in hex, or "<hex>-<parts>" for a multipart upload.
+var objectETag = regexp.MustCompile(`^[0-9A-Za-z-]{1,128}$`)
 
 // Validate checks a manifest read from the bucket before anything acts on it.
 func (m Manifest) Validate() error {
@@ -72,6 +79,9 @@ func (m Manifest) Validate() error {
 		}
 		if _, err := time.Parse(time.RFC3339Nano, e.WrittenAt); err != nil {
 			return fmt.Errorf("manifest entry %q written_at: %w", e.Path, err)
+		}
+		if e.ObjectETag != "" && !objectETag.MatchString(e.ObjectETag) {
+			return fmt.Errorf("manifest entry %q: bad object_etag", e.Path)
 		}
 	}
 	return nil

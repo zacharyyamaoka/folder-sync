@@ -224,6 +224,28 @@ func (c *Client) ListOne(bucket, prefix string) error {
 	}
 }
 
+// Head answers an object's ETag as the store sent it (quoted), and found=false when there is no such object.
+func (c *Client) Head(bucket, key string) (etag string, found bool, err error) {
+	req, err := c.newRequest(http.MethodHead, bucket, key)
+	if err != nil {
+		return "", false, err
+	}
+	c.sign(req)
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return "", false, err
+	}
+	resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return resp.Header.Get("ETag"), true, nil
+	case http.StatusNotFound:
+		return "", false, nil
+	default:
+		return "", false, fmt.Errorf("HEAD %s returned %s", key, resp.Status)
+	}
+}
+
 // GetResult is a conditional GET's outcome.
 type GetResult struct {
 	NotModified bool   // 304: the caller's copy is current

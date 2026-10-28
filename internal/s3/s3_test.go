@@ -96,3 +96,27 @@ func TestHeadBucketErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestHeadObjectETag: Head answers an object's ETag as the store sent it, and found=false on a 404.
+func TestHeadObjectETag(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead || !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 Credential=key/") {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/missing.bin") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("ETag", `"d41d8cd98f00b204e9800998ecf8427e"`)
+	}))
+	defer server.Close()
+	client := &Client{Endpoint: server.URL, Region: "auto", AccessKeyID: "key", SecretAccessKey: "secret"}
+	etag, found, err := client.Head("bkt", "demo/hosts/h/a.bin")
+	if err != nil || !found || etag != `"d41d8cd98f00b204e9800998ecf8427e"` {
+		t.Fatalf("%q %v %v", etag, found, err)
+	}
+	if _, found, err := client.Head("bkt", "demo/hosts/h/missing.bin"); err != nil || found {
+		t.Fatalf("404: found=%v %v", found, err)
+	}
+}
