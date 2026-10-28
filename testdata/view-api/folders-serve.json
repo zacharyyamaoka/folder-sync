@@ -1,0 +1,29 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "the folders this machine syncs",
+  "servers": [
+    "serve"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/folders",
+    "auth": "owner"
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "folders": [
+        {
+          "project": "notes",
+          "folder": "/home/bam/notes"
+        },
+        {
+          "project": "vibetracks",
+          "folder": "/home/bam/vt"
+        }
+      ],
+      "readable": []
+    }
+  },
+  "body_schema": "folders"
+}

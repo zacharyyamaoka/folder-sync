@@ -1,0 +1,21 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "a version's bytes after it was pruned",
+  "servers": [
+    "worker",
+    "serve"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/folders/notes/history/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/very-old.md?version=2026-09-20T10:00:00.000Z_0011223344556677",
+    "auth": "owner"
+  },
+  "response": {
+    "status": 410,
+    "body": {
+      "error": "pruned",
+      "why": "That version is older than 30 days and is gone."
+    }
+  },
+  "body_schema": "error"
+}

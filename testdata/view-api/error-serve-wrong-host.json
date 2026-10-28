@@ -1,0 +1,23 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "serve: a Host other than its own loopback address (DNS rebinding)",
+  "servers": [
+    "serve"
+  ],
+  "given": {
+    "note": "Host: evil.example:41873"
+  },
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/folders/notes/status",
+    "auth": "bad_host"
+  },
+  "response": {
+    "status": 421,
+    "body": {
+      "error": "wrong_host",
+      "why": "This server answers only http://127.0.0.1:<its port>/."
+    }
+  },
+  "body_schema": "error"
+}

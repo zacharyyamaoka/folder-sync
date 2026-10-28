@@ -1,0 +1,38 @@
+{
+  "schema": "folder-sync-pulls/1",
+  "project": "notes",
+  "host_id": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+  "host_name": "bam-laptop",
+  "at": "2026-10-28T20:41:01.900Z",
+  "events": [
+    {
+      "schema": "folder-sync-event/1",
+      "event": "remove_copy",
+      "at": "2026-10-28T20:41:01.890Z",
+      "level": "info",
+      "project": "notes",
+      "host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+      "host_name": "bam-laptop",
+      "peer": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+      "peer_name": "bam-GPU",
+      "peer_seq": 43,
+      "path": "notes/old-ideas.md",
+      "down_ms": 1459
+    },
+    {
+      "schema": "folder-sync-event/1",
+      "event": "download",
+      "at": "2026-10-28T20:41:01.880Z",
+      "level": "info",
+      "project": "notes",
+      "host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+      "host_name": "bam-laptop",
+      "peer": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+      "peer_name": "bam-GPU",
+      "peer_seq": 43,
+      "path": "notes/plan.md",
+      "size": 2140,
+      "down_ms": 1449
+    }
+  ]
+}

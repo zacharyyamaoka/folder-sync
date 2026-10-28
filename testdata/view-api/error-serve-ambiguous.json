@@ -1,0 +1,20 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "serve: two folders sync one project and no ?folder=",
+  "servers": [
+    "serve"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/folders/notes/status",
+    "auth": "owner"
+  },
+  "response": {
+    "status": 409,
+    "body": {
+      "error": "ambiguous_folder",
+      "why": "Two folders on this machine sync notes; add ?folder=<path>."
+    }
+  },
+  "body_schema": "error"
+}

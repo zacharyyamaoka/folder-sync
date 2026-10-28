@@ -1,0 +1,24 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "serve: purging history is online only",
+  "servers": [
+    "serve"
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/fs/v1/folders/notes/history/purge",
+    "auth": "owner",
+    "body": {
+      "older_than_days": 7
+    }
+  },
+  "request_schema": "purge_request",
+  "response": {
+    "status": 501,
+    "body": {
+      "error": "online_only",
+      "why": "Free up space from the folder's page online."
+    }
+  },
+  "body_schema": "error"
+}

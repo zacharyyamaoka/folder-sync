@@ -1,0 +1,20 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "serve: no token and no cookie",
+  "servers": [
+    "serve"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/folders/notes/status",
+    "auth": "none"
+  },
+  "response": {
+    "status": 401,
+    "body": {
+      "error": "no_token",
+      "why": "Send Authorization: Bearer <token> from ~/.folder-sync/serve.json, or open the URL folder-sync serve printed."
+    }
+  },
+  "body_schema": "error"
+}

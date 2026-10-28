@@ -1,0 +1,69 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "activity, warnings and errors only",
+  "servers": [
+    "serve"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/folders/notes/activity?level=warn",
+    "auth": "owner"
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "events": [
+        {
+          "schema": "folder-sync-event/1",
+          "event": "hold",
+          "at": "2026-10-28T20:49:00.000Z",
+          "level": "warn",
+          "project": "notes",
+          "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+          "host_name": "bam-GPU",
+          "why": "max_delete",
+          "count": 73
+        },
+        {
+          "schema": "folder-sync-event/1",
+          "event": "conflict",
+          "at": "2026-10-28T20:48:02.300Z",
+          "level": "warn",
+          "project": "notes",
+          "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+          "host_name": "bam-GPU",
+          "peer": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+          "peer_name": "bam-laptop",
+          "path": "notes/plan.md",
+          "kept_at": "~/.folder-sync/conflicts/notes/7c1d2e3f-0a1b-4c2d-8e3f-405162738495/notes/plan.md"
+        },
+        {
+          "schema": "folder-sync-event/1",
+          "event": "restore",
+          "at": "2026-10-28T20:46:12.006Z",
+          "level": "error",
+          "project": "notes",
+          "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+          "host_name": "bam-GPU",
+          "path": "notes/very-old.md",
+          "from": "2026-09-20T10:00:00.000Z_0011223344556677",
+          "request": "3f0e1d2c-4b5a-4968-8776-a5b4c3d2e1f0",
+          "error": "pruned"
+        },
+        {
+          "schema": "folder-sync-event/1",
+          "event": "skip",
+          "at": "2026-10-28T20:41:00.050Z",
+          "level": "warn",
+          "project": "notes",
+          "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+          "host_name": "bam-GPU",
+          "path": "CON.txt",
+          "why": "a reserved name on Windows: rename CON.txt to sync it"
+        }
+      ],
+      "next": null
+    }
+  },
+  "body_schema": "activity"
+}

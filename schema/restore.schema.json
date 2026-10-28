@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folder-sync.invalid/schema/folder-sync-restore-1.json",
+  "title": "folder-sync restore request, version 1",
+  "description": "<root>_requests/<project>/<host-id>/<id>.json: a restore the host <host-id> is asked to make (and, on a machine, ~/.folder-sync/projects/<key>/requests/<id>.json for its own files). Created once, with If-None-Match: *, by the accounts Worker or another of the person's devices. Only the host it names applies it; that host then writes `outcome` into the same key (If-Match on the request's ETag) and never deletes it. The pruner deletes it 30 days after `at`. See docs/CONTRACT.md, 'Restore requests'.",
+  "type": "object",
+  "required": ["schema", "id", "project", "host", "at", "by", "items"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "folder-sync-restore/1" },
+    "id": {
+      "description": "Equals the key's <id>.",
+      "$ref": "event.schema.json#/$defs/uuid"
+    },
+    "project": { "$ref": "event.schema.json#/$defs/project" },
+    "host": {
+      "description": "The host that owns every item's path, and equals the key's <host-id>.",
+      "$ref": "event.schema.json#/$defs/host_id"
+    },
+    "at": { "type": "string", "format": "date-time" },
+    "by": {
+      "type": "object",
+      "required": ["kind", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["web", "machine"] },
+        "name": {
+          "description": "A browser as /fs/v1/devices names it (\"Chrome on Linux\"), or a machine's host_name.",
+          "type": "string"
+        },
+        "host": {
+          "description": "For kind=machine: the asking machine's host id.",
+          "$ref": "event.schema.json#/$defs/host_id"
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "required": ["path", "version"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "$ref": "event.schema.json#/$defs/path" },
+          "version": { "$ref": "history.schema.json#/$defs/version_id" }
+        }
+      }
+    },
+    "outcome": {
+      "description": "Written by the host it names, once it ran. Each applied item is also a restore event (request = id) in that host's next change record.",
+      "type": "object",
+      "required": ["at", "results"],
+      "additionalProperties": false,
+      "properties": {
+        "at": { "type": "string", "format": "date-time" },
+        "seq": {
+          "description": "The manifest version that published the restored files; absent when nothing was published (every item failed, or each already held those bytes).",
+          "type": "integer",
+          "minimum": 1
+        },
+        "results": {
+          "description": "One per item, in item order.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["path", "version", "ok"],
+            "additionalProperties": false,
+            "properties": {
+              "path": { "$ref": "event.schema.json#/$defs/path" },
+              "version": { "$ref": "history.schema.json#/$defs/version_id" },
+              "ok": { "type": "boolean" },
+              "error": {
+                "description": "pruned: the version is gone; mismatch: its bytes do not hash to its name; failed: anything else, with why.",
+                "enum": ["pruned", "mismatch", "failed"]
+              },
+              "why": { "type": "string" }
+            },
+            "if": { "properties": { "ok": { "const": false } } },
+            "then": { "required": ["error"] },
+            "else": { "not": { "required": ["error"] } }
+          }
+        }
+      }
+    }
+  }
+}

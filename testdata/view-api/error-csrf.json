@@ -1,0 +1,48 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "a cookie restore without X-Folder-Sync: 1",
+  "servers": [
+    "worker"
+  ],
+  "given": {
+    "note": "cookie auth, no X-Folder-Sync header"
+  },
+  "request": {
+    "method": "POST",
+    "path": "/fs/v1/folders/notes/restore",
+    "auth": "owner",
+    "body": {
+      "items": [
+        {
+          "host": "e2a0b1c2-d3e4-4f50-9a1b-2c3d4e5f6a7b",
+          "path": "hearts/clamp-24.json",
+          "version": "2026-10-28T19:02:11.481Z_beefbeefbeefbeef"
+        },
+        {
+          "host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+          "path": "photos/IMG_2231.jpg",
+          "version": "2026-10-22T14:03:51.090Z_2c4e6a8b0d1f3e5a"
+        },
+        {
+          "host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+          "path": "photos/IMG_2232.jpg",
+          "version": "2026-10-22T14:03:52.771Z_7d9f1b3d5f7a9c1e"
+        },
+        {
+          "host": "e2a0b1c2-d3e4-4f50-9a1b-2c3d4e5f6a7b",
+          "path": "hearts/arm-1.json",
+          "version": "2026-09-01T00:00:00.000Z_0000111122223333"
+        }
+      ]
+    }
+  },
+  "request_schema": "restore_request",
+  "response": {
+    "status": 403,
+    "body": {
+      "error": "csrf",
+      "why": "A write from a page must send X-Folder-Sync: 1 from this origin."
+    }
+  },
+  "body_schema": "error"
+}

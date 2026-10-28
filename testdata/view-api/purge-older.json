@@ -1,0 +1,25 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "free up space: history older than 7 days",
+  "servers": [
+    "worker"
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/fs/v1/folders/notes/history/purge",
+    "auth": "owner",
+    "body": {
+      "older_than_days": 7
+    }
+  },
+  "request_schema": "purge_request",
+  "response": {
+    "status": 200,
+    "body": {
+      "purged": 1000,
+      "bytes": 48211002,
+      "more": true
+    }
+  },
+  "body_schema": "purge_response"
+}
