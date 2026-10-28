@@ -1,5 +1,5 @@
-// An in-memory S3 endpoint for the Worker's unit tests: GET, HEAD, PUT (If-Match / If-None-Match honoured, as R2
-// does), CopyObject, DELETE and ListObjectsV2, path style, and R2's temporary-credential scope (the session token's
+// An in-memory S3 endpoint for the Worker's unit tests: GET (a single Range honoured, as R2 does), HEAD, PUT (If-Match /
+// If-None-Match honoured, as R2 does), CopyObject, DELETE and ListObjectsV2, path style, and R2's temporary-credential scope (the session token's
 // claims: bucket, scope, paths.prefixPaths) enforced on every key, listing prefix and copy source, as R2 enforces it.
 // Moved from vibetracks worker/test/memory-s3.ts and given the writes the web host makes. The signature itself is
 // not checked here: folder-sync's e2e/r2standin does that in the end-to-end proof (test/proof.mjs). What this checks
@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 
 export class MemoryS3 {
 	readonly objects = new Map<string, Uint8Array>();
-	readonly calls: { method: string; key: string; prefix?: string; allowed: boolean; scoped: string[] | null; scope?: string }[] = [];
+	readonly calls: { method: string; key: string; prefix?: string; allowed: boolean; scoped: string[] | null; scope?: string; range?: string; sent?: number }[] = [];
 	/** Runs once before the next conditional PUT of `key` (a concurrent writer, for the 412 test). `again` re-arms it
 	 *  that many more times (the review's six writers in a row). */
 	beforeConditional: { key: string; run: () => void; again?: number } | null = null;
@@ -135,6 +135,20 @@ export class MemoryS3 {
 		if (!data) return new Response("", { status: 404 });
 		const etag = this.etag(data);
 		if (request.headers.get("If-None-Match") === etag) return new Response(null, { status: 304, headers: { ETag: etag } });
+		const call = this.calls[this.calls.length - 1];
+		const range = request.headers.get("Range");
+		const one = range ? /^bytes=(\d+)-(\d+)$/.exec(range) : null;
+		if (range) call.range = range;
+		if (one && request.method === "GET") {
+			// WHY only bytes=a-b: it is the one form the Worker sends; R2 answers it 206, or 416 past the end
+			const start = Number(one[1]);
+			const end = Math.min(Number(one[2]), data.length - 1);
+			if (start >= data.length || start > end) return new Response("<Error><Code>InvalidRange</Code></Error>", { status: 416, headers: { "Content-Range": `bytes */${data.length}` } });
+			const slice = data.slice(start, end + 1);
+			call.sent = slice.length;
+			return new Response(slice, { status: 206, headers: { ETag: etag, "Content-Length": String(slice.length), "Content-Range": `bytes ${start}-${end}/${data.length}` } });
+		}
+		if (request.method === "GET") call.sent = data.length;
 		return new Response(request.method === "HEAD" ? null : data, { status: 200, headers: { ETag: etag, "Content-Length": String(data.length) } });
 	};
 }

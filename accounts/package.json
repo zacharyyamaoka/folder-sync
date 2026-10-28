@@ -4,7 +4,7 @@
   "type": "module",
   "description": "folder-sync's accounts Worker (PEP 0003): Better Auth + D1, the device grant for `folder-sync login`, short-lived R2 keys per person, each person's folders online, a web host per folder.",
   "scripts": {
-    "test": "node --test test/worker.test.ts",
+    "test": "node --test test/worker.test.ts test/devices.test.ts",
     "proof": "node test/proof.mjs",
     "dev": "node scripts/dev.mjs up"
   },
