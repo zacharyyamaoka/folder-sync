@@ -93,7 +93,12 @@ function fakeDeps(s3: MemoryS3, live = sessions(), extra: Partial<Deps> = {}) {
 			}
 			return false;
 		},
-		store: new MemoryStore(),
+		store: Object.assign(new MemoryStore(), {
+			// the direct session read (store.ts d1Store.sessionAlive), over this stand-in's sessions
+			async sessionAlive(userId: string, id: string) {
+				return [...live.values()].some((r) => r.userId === userId && r.id === id);
+			},
+		}),
 		s3: s3.fetch,
 		now: () => Date.parse("2026-10-27T12:00:00Z"),
 		uuid: () => "3f1c2a9e-5b7d-4c11-8e2f-0a1b2c3d4e5f",
@@ -494,11 +499,11 @@ test("judge r1 #1: keys never live past the last successful sign-in check plus t
 		if (found) checks.push(now);
 		return found;
 	};
-	const listed = made.deps.sessions!;
-	made.deps.sessions = async (userId) => {
-		const rows = await listed(userId);
-		if (rows.some((row) => row.id === "sess-owner-laptop")) checks.push(now);
-		return rows;
+	const alive = made.deps.store.sessionAlive!.bind(made.deps.store);
+	made.deps.store.sessionAlive = async (userId, id, at) => {
+		const found = await alive(userId, id, at);
+		if (found && id === "sess-owner-laptop") checks.push(now);
+		return found;
 	};
 	// the quota measurement takes 200 s of the clock
 	made.deps.s3 = async (request) => {

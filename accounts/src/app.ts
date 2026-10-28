@@ -232,6 +232,12 @@ function csrfOk(request: Request, app: App | null): boolean {
 }
 
 /** The session a write needs, or the answer refusing it. */
+/** Whether `person`'s session is still live (store.sessionAlive: one direct read). A stand-in without it (a unit test's
+ *  store, which cannot revoke) says yes. */
+export async function stillSignedIn(deps: Deps, person: Person, now = deps.now()): Promise<boolean> {
+	return !deps.store.sessionAlive || deps.store.sessionAlive(person.userId, person.sessionId, now);
+}
+
 export async function writer(request: Request, deps: Deps, app: App | null): Promise<{ person: Person; via: Via } | Response> {
 	const who = await session(request, deps, app);
 	if (!who) return fail(401, "signed_out", "sign in first");
@@ -358,13 +364,14 @@ async function credentials(request: Request, env: Env, deps: Deps, app: App | nu
 		if (!(error instanceof TooOld)) throw error;
 		over = error.message;
 	}
-	// WHY the session checked again (judge r1 #1): the quota work above can take a while, and a device revoked (or
-	// signed out) meanwhile gets no keys. The keys' clock (deps.now() below, nothing awaited in between) starts at this
-	// check, so a slow refresh never stretches a revocation past SYNC_CREDENTIAL_TTL_S. (A stand-in without sessions,
-	// a unit test's, cannot revoke and skips it.)
-	if (deps.sessions && !(await deps.sessions(person.userId)).some((row) => row.id === person.sessionId)) {
-		return fail(401, "signed_out", "this machine is signed out (signed out or revoked): run folder-sync login");
-	}
+	// WHY the session read again, with the keys' clock started BEFORE that read (judge r1 #1, r2 #2): the quota work
+	// above takes a while, and so can the read itself; a device revoked meanwhile gets no keys, and the keys signed below
+	// end by `authorizedAt` + the TTL, a moment at or before the read saw the session alive, however slow D1 answers.
+	const authorizedAt = deps.now();
+	if (!(await stillSignedIn(deps, person, authorizedAt))) return fail(401, "signed_out", "this machine is signed out (signed out or revoked): run folder-sync login");
+	if (deps.now() >= authorizedAt + ttlOf(env) * 1000) return fail(503, "too_slow", "this request took longer than its keys would live: ask again", { "Retry-After": "1" });
+	// from here on this request's clock stands at `authorizedAt` (the marked mint lines below read deps.now())
+	deps = { ...deps, now: () => authorizedAt };
 	if (over) return json(200, { ...(await mint(env, userRoot(person.userId), "object-read-only", ttlOf(env), deps.now())), ReadOnly: true, Reason: over });
 	const minted = await mint(env, userRoot(person.userId), "object-read-write", ttlOf(env), deps.now()); // fs-mutation: the session's root
 	return json(200, minted);
@@ -525,13 +532,15 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 		if (keepNewest !== undefined && !NEWEST_FIELD.test(keepNewest)) return fail(400, "bad_header", "X-Folder-Sync-Keep-Newest names one JSON field, like at");
 		const tiePrefers = request.headers.get("X-Folder-Sync-Tie-Prefers") || undefined;
 		if (tiePrefers !== undefined && !NEWEST_FIELD.test(tiePrefers)) return fail(400, "bad_header", "X-Folder-Sync-Tie-Prefers names one JSON field, like saved");
+		// WHY again after the body (judge r2 #5): a slow upload can outlast a revoke; it writes nothing then
+		if (!(await stillSignedIn(deps, who.person))) return fail(401, "signed_out", "this device was signed out while it sent this file");
 		const hostId = await deps.store.ensureWebHost(owner, project, deps.uuid(), new Date(deps.now()).toISOString());
-		op = { method: "PUT", owner, project, hostId, path, data, keepNewest, tiePrefers };
+		op = { method: "PUT", owner, project, hostId, path, data, keepNewest, tiePrefers, sessionId: who.person.sessionId };
 	} else {
 		const hostId = await deps.store.webHost(owner, project);
 		if (!hostId) return fail(404, "not_found", "this folder has no web host yet");
 		// ?permanent=1: no trash copy, the usage lowered at once (review r3 #3: how a person gets under their quota)
-		op = { method: "DELETE", owner, project, hostId, path, permanent: new URL(request.url).searchParams.get("permanent") === "1" };
+		op = { method: "DELETE", owner, project, hostId, path, permanent: new URL(request.url).searchParams.get("permanent") === "1", sessionId: who.person.sessionId };
 	}
 	// WHY through the folder's queue: one writer per web host, so no two writes interleave their file and manifest
 	// steps (review r1 #3)
@@ -574,7 +583,7 @@ async function machineDelete(request: Request, env: Env, deps: Deps, app: App | 
 	if (!Number.isSafeInteger(body.from_seq)) return fail(400, "bad_seq", "from_seq is the seq of the manifest this machine last published");
 	if (typeof body.job !== "string" || !HOST_ID.test(body.job)) return fail(400, "bad_job", "job is a lowercase UUID v4 the machine keeps until it has the answer");
 	// WHY the session's owner: the root is never the request's
-	const answer = await webHostOf(env, deps)({ method: "HOST_DELETE", owner: person.userId, project, hostId: host, path: "", job: body.job, fromSeq: body.from_seq as number, paths: paths as string[] });
+	const answer = await webHostOf(env, deps)({ method: "HOST_DELETE", owner: person.userId, project, hostId: host, path: "", job: body.job, fromSeq: body.from_seq as number, paths: paths as string[], sessionId: person.sessionId });
 	return json(answer.status, answer.body, answer.headers ?? {});
 }
 
@@ -585,7 +594,7 @@ async function purgeWebTrash(request: Request, env: Env, deps: Deps, app: App | 
 	const owner = who.person.userId; // the session's, never the request's
 	const hostId = await deps.store.webHost(owner, project);
 	if (!hostId) return json(200, { purged: 0, bytes: 0, more: false });
-	const answer = await webHostOf(env, deps)({ method: "PURGE_TRASH", owner, project, hostId, path: "" });
+	const answer = await webHostOf(env, deps)({ method: "PURGE_TRASH", owner, project, hostId, path: "", sessionId: who.person.sessionId });
 	return json(answer.status, answer.body, answer.headers ?? {});
 }
 

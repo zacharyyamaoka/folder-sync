@@ -393,6 +393,9 @@ export interface WebOp {
 	data?: Uint8Array;
 	/** X-Folder-Sync-Keep-Newest: the JSON field whose newest instant the web host keeps for this path. */
 	keepNewest?: string;
+	/** The session that asked for this change: checked again when the folder's queue admits it (judge r2 #5), so a
+	 *  change queued before its device was revoked writes nothing after. A SETTLE is never refused. */
+	sessionId?: string;
 	/** X-Folder-Sync-Tie-Prefers: on an exact tie of keepNewest, the body whose field is true wins. */
 	tiePrefers?: string;
 	/** HOST_DELETE: the caller's job id (a UUID it keeps until it has the answer), the seq of the manifest it last
@@ -422,6 +425,10 @@ const WRITE_TTL_S = 300;
 /** Runs one web-host operation in the caller's queue: signs a read-write credential for the owner's root, settles any
  *  cut-off change first, then writes or deletes. Errors the person can act on come back as answers. */
 export async function runWebOp(env: CredsEnv & QuotaEnv, s3: FetchLike, op: WebOp, journal: Journal, clock: () => number, store: Store): Promise<WebAnswer> {
+	// admitted: the asking session must still be live now, not only when its request arrived (judge r2 #5)
+	if (op.method !== "SETTLE" && op.sessionId && store.sessionAlive && !(await store.sessionAlive(op.owner, op.sessionId, clock()))) {
+		return { status: 401, body: { error: "signed_out", why: "this device was signed out before its change could start" } };
+	}
 	try {
 		const root = userRoot(op.owner);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, clock()), s3);

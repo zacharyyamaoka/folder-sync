@@ -105,7 +105,8 @@ test("judge r2 #2: a refresh whose final session read is delayed past the revoke
 	release();
 	const answer = await pending;
 	const body = await answer.json();
-	assert.ok(answer.status === 401 || Date.parse(body.Expiration) <= revokedAt + 300_000, `answered ${answer.status}, keys until ${body.Expiration}, revoked at ${new Date(revokedAt).toISOString()}`);
+	// no keys at all (401, or 503 too_slow: the deadline passed while D1 answered), or keys that end by revoke + TTL
+	assert.ok(!body.SessionToken || Date.parse(body.Expiration) <= revokedAt + 300_000, `answered ${answer.status}, keys until ${body.Expiration}, revoked at ${new Date(revokedAt).toISOString()}`);
 });
 
 test("judge r2 #4: the 101st session is listed, revocable, and gets keys", async () => {
