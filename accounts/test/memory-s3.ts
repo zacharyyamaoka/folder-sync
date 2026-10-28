@@ -9,6 +9,10 @@ import { createHash } from "node:crypto";
 
 export class MemoryS3 {
 	readonly objects = new Map<string, Uint8Array>();
+	/** Each object's LastModified (ms), set when it is written or copied (PEP 0007: a version's left_at). */
+	readonly modified = new Map<string, number>();
+	/** The store's clock: what LastModified a write gets. */
+	now: () => number = () => Date.now();
 	readonly calls: { method: string; key: string; prefix?: string; allowed: boolean; scoped: string[] | null; scope?: string; range?: string; sent?: number; ifMatch?: string }[] = [];
 	/** Runs once before the next conditional PUT of `key` (a concurrent writer, for the 412 test). `again` re-arms it
 	 *  that many more times (the review's six writers in a row). */
@@ -29,8 +33,18 @@ export class MemoryS3 {
 		this.bucket = bucket;
 	}
 
-	put(key: string, data: string | Uint8Array): void {
+	put(key: string, data: string | Uint8Array, modified = this.now()): void {
 		this.objects.set(key, typeof data === "string" ? new TextEncoder().encode(data) : data);
+		this.modified.set(key, modified);
+	}
+
+	private stored(key: string, data: Uint8Array): void {
+		this.objects.set(key, data);
+		this.modified.set(key, this.now());
+	}
+
+	private lastModified(key: string): string {
+		return new Date(this.modified.get(key) ?? 0).toISOString();
 	}
 
 	text(key: string): string | null {
@@ -71,6 +85,22 @@ export class MemoryS3 {
 			return new Response("<Error><Code>AccessDenied</Code></Error>", { status: 403 });
 		};
 		if (!claims || bucket !== this.bucket || claims.bucket !== this.bucket) return deny(key);
+		if (!key && request.method === "POST" && url.searchParams.has("delete")) {
+			// DeleteObjects, as S3: every key in scope and a write credential, or nothing is deleted
+			const xml = await request.text();
+			const keys = [...xml.matchAll(/<Key>([\s\S]*?)<\/Key>/g)].map((m) => m[1].replace(/&(lt|gt|amp|quot|apos);/g, (_w, n: string) => ({ lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" })[n]!));
+			if (!request.headers.get("Content-MD5")) return new Response("<Error><Code>InvalidRequest</Code></Error>", { status: 400 });
+			if (scope !== "object-read-write" || keys.some((k) => !this.inScope(claims, k))) return deny(`DELETE ${keys.length} keys`);
+			this.calls.push({ method: "DELETE_MANY", key: keys.join("\n"), allowed: true, scoped, scope });
+			if (this.fail?.("DELETE_MANY", keys[0] ?? "")) return new Response("<Error><Code>InternalError</Code></Error>", { status: 500 });
+			const failed = keys.filter((k) => this.fail?.("DELETE", k));
+			for (const k of keys) if (!failed.includes(k)) {
+				this.objects.delete(k);
+				this.modified.delete(k);
+			}
+			const errors = failed.map((k) => `<Error><Key>${k}</Key><Code>InternalError</Code></Error>`).join("");
+			return new Response(`<DeleteResult>${errors}</DeleteResult>`, { status: 200 });
+		}
 		if (!key && url.searchParams.get("list-type") === "2") {
 			const prefix = url.searchParams.get("prefix") || "";
 			if (!this.inScope(claims, prefix) || !prefix) return deny(`LIST ${prefix}`);
@@ -79,7 +109,7 @@ export class MemoryS3 {
 			const delimiter = url.searchParams.get("delimiter") || "";
 			// WHY paged as S3 pages (max-keys, at most 1000, and a continuation token): a listing's cost is its pages
 			const maxKeys = Math.min(1000, Number(url.searchParams.get("max-keys") || 1000));
-			const after = url.searchParams.get("continuation-token") || "";
+			const after = url.searchParams.get("continuation-token") || url.searchParams.get("start-after") || "";
 			const entries = new Map<string, "key" | "prefix">();
 			for (const name of [...this.objects.keys()].sort()) {
 				if (!name.startsWith(prefix)) continue;
@@ -91,7 +121,7 @@ export class MemoryS3 {
 			const ordered = [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).filter(([name]) => !after || name > after);
 			const page = ordered.slice(0, maxKeys);
 			const truncated = ordered.length > page.length;
-			const contents = page.filter(([, kind]) => kind === "key").map(([k]) => `<Contents><Key>${k}</Key><Size>${this.objects.get(k)!.byteLength}</Size></Contents>`).join("");
+			const contents = page.filter(([, kind]) => kind === "key").map(([k]) => `<Contents><Key>${k.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</Key><LastModified>${this.lastModified(k)}</LastModified><Size>${this.objects.get(k)!.byteLength}</Size></Contents>`).join("");
 			const common = page.filter(([, kind]) => kind === "prefix").map(([p]) => `<CommonPrefixes><Prefix>${p}</Prefix></CommonPrefixes>`).join("");
 			const next = truncated ? `<NextContinuationToken>${page[page.length - 1][0]}</NextContinuationToken>` : "";
 			const xml = `<ListBucketResult><IsTruncated>${truncated}</IsTruncated>${contents}${common}${next}</ListBucketResult>`;
@@ -111,7 +141,10 @@ export class MemoryS3 {
 		if (request.method === "PUT" && from !== null) {
 			const data = this.objects.get(from);
 			if (!data) return new Response("<Error><Code>NoSuchKey</Code></Error>", { status: 404 });
-			this.objects.set(key, data);
+			// as R2: x-amz-copy-source-if-match names the version to copy; another one there is a 412
+			const sourceIf = request.headers.get("x-amz-copy-source-if-match");
+			if (sourceIf && sourceIf !== this.etag(data)) return new Response("<Error><Code>PreconditionFailed</Code></Error>", { status: 412 });
+			this.stored(key, data);
 			return new Response(`<CopyObjectResult><ETag>${this.etag(data)}</ETag></CopyObjectResult>`, { status: 200 });
 		}
 		if (request.method === "PUT") {
@@ -126,11 +159,12 @@ export class MemoryS3 {
 			if (ifMatch && (!current || this.etag(current) !== ifMatch)) return new Response("<Error><Code>PreconditionFailed</Code></Error>", { status: 412 });
 			if (ifNoneMatch === "*" && current) return new Response("<Error><Code>PreconditionFailed</Code></Error>", { status: 412 });
 			const data = new Uint8Array(await request.arrayBuffer());
-			this.objects.set(key, data);
+			this.stored(key, data);
 			return new Response(null, { status: 200, headers: { ETag: this.etag(data) } });
 		}
 		if (request.method === "DELETE") {
 			this.objects.delete(key);
+			this.modified.delete(key);
 			return new Response(null, { status: 204 });
 		}
 		if (request.method !== "GET" && request.method !== "HEAD") return new Response("no", { status: 405 });
@@ -156,6 +190,6 @@ export class MemoryS3 {
 			return new Response(slice, { status: this.rangeAnswer, headers: { ETag: etag, "Content-Length": String(slice.length), "Content-Range": `bytes ${start}-${end}/${data.length}` } });
 		}
 		if (request.method === "GET") call.sent = data.length;
-		return new Response(request.method === "HEAD" ? null : data, { status: 200, headers: { ETag: etag, "Content-Length": String(data.length) } });
+		return new Response(request.method === "HEAD" ? null : data, { status: 200, headers: { ETag: etag, "Content-Length": String(data.length), "Last-Modified": new Date(this.modified.get(key) ?? 0).toUTCString() } });
 	};
 }

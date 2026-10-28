@@ -27,8 +27,8 @@
           "at": "2026-10-28T20:50:00.010Z",
           "path": "hearts/clamp-24.json",
           "size": 230,
-          "sha256": "beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef",
-          "from": "2026-10-28T19:02:11.481Z_beefbeefbeefbeef"
+          "sha256": "763d2e71f45a8d0ffab9617029c07cf5d798caca46f0f240f696be5fb522fb0e",
+          "from": "2026-10-28T19:02:11.481Z_763d2e71f45a8d0f"
         },
         {
           "schema": "folder-sync-event/1",
@@ -124,10 +124,10 @@
           "sha256": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
           "op": "edit",
           "was": {
-            "sha256": "beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef",
+            "sha256": "763d2e71f45a8d0ffab9617029c07cf5d798caca46f0f240f696be5fb522fb0e",
             "size": 230,
             "written_at": "2026-10-28T19:02:11.481Z",
-            "kept": "2026-10-28T19:02:11.481Z_beefbeefbeefbeef"
+            "kept": "2026-10-28T19:02:11.481Z_763d2e71f45a8d0f"
           },
           "up_ms": 118
         },

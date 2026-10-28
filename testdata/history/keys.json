@@ -2,8 +2,8 @@
   "fixture": "folder-sync-history-keys/1",
   "valid": [
     {
-      "key": "users/AbC123/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md/2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f",
-      "root": "users/AbC123/",
+      "key": "users/AbC123zz9yX8/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md/2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f",
+      "root": "users/AbC123zz9yX8/",
       "project": "notes",
       "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
       "path": "notes/plan.md",
@@ -26,8 +26,8 @@
       "size": 2811409
     },
     {
-      "key": "users/AbC123/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md/2026-10-28T20:00:00.000Z_unlisted",
-      "root": "users/AbC123/",
+      "key": "users/AbC123zz9yX8/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md/2026-10-28T20:00:00.000Z_unlisted",
+      "root": "users/AbC123zz9yX8/",
       "project": "notes",
       "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
       "path": "notes/plan.md",
@@ -37,8 +37,8 @@
       "size": 2001
     },
     {
-      "key": "users/AbC123/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/a/2026-10-27T08:00:00.000Z_0123456789abcdef",
-      "root": "users/AbC123/",
+      "key": "users/AbC123zz9yX8/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/a/2026-10-27T08:00:00.000Z_0123456789abcdef",
+      "root": "users/AbC123zz9yX8/",
       "project": "notes",
       "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
       "path": "a",
@@ -49,8 +49,8 @@
       "size": 10
     },
     {
-      "key": "users/AbC123/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/a/b/2026-10-27T08:00:01.000Z_fedcba9876543210",
-      "root": "users/AbC123/",
+      "key": "users/AbC123zz9yX8/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/a/b/2026-10-27T08:00:01.000Z_fedcba9876543210",
+      "root": "users/AbC123zz9yX8/",
       "project": "notes",
       "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
       "path": "a/b",
@@ -84,12 +84,12 @@
     "20261028T203100Z"
   ],
   "invalid_keys": [
-    "users/AbC123/_trash/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/20261028T203100Z/notes/plan.md",
-    "users/AbC123/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes:plan.md/2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f",
-    "users/AbC123/_history/Notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md/2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f",
-    "users/AbC123/_history/notes/B55E9683-7854-4121-A56A-9BAE7C3AB1DA/notes/plan.md/2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f",
-    "users/AbC123/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f",
-    "users/AbC123/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md",
-    "/users/AbC123/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md/2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f"
+    "users/AbC123zz9yX8/_trash/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/20261028T203100Z/notes/plan.md",
+    "users/AbC123zz9yX8/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes:plan.md/2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f",
+    "users/AbC123zz9yX8/_history/Notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md/2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f",
+    "users/AbC123zz9yX8/_history/notes/B55E9683-7854-4121-A56A-9BAE7C3AB1DA/notes/plan.md/2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f",
+    "users/AbC123zz9yX8/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f",
+    "users/AbC123zz9yX8/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md",
+    "/users/AbC123zz9yX8/_history/notes/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md/2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f"
   ]
 }

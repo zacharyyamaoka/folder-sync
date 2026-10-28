@@ -5,7 +5,7 @@
     "worker"
   ],
   "given": {
-    "note": "three hosts (bam-GPU, web, bam-laptop); a skipped name on bam-GPU; testdata/requests/web-pending.json unanswered"
+    "note": "three hosts (bam-GPU, web, bam-laptop); testdata/requests/web-pending.json unanswered. No skipped warning: a skip is the machine's own and never reaches the bucket, so only serve gives one"
   },
   "request": {
     "method": "GET",
@@ -17,12 +17,12 @@
     "body": {
       "project": "notes",
       "owner": {
-        "id": "AbC123",
+        "id": "AbC123zz9yX8",
         "email": "zach@example.com"
       },
       "role": "owner",
       "state": "attention",
-      "headline": "2 things need you",
+      "headline": "1 thing needs you",
       "devices": [
         {
           "id": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
@@ -47,13 +47,6 @@
         }
       ],
       "warnings": [
-        {
-          "kind": "skipped",
-          "level": "warn",
-          "text": "CON.txt is not synced: it is a reserved name on Windows. Rename it to sync it.",
-          "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
-          "path": "CON.txt"
-        },
         {
           "kind": "waiting_restore",
           "level": "warn",

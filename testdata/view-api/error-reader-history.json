@@ -6,7 +6,7 @@
   ],
   "request": {
     "method": "GET",
-    "path": "/fs/v1/folders/notes/history/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md?owner=AbC123",
+    "path": "/fs/v1/folders/notes/history/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md?owner=AbC123zz9yX8",
     "auth": "reader"
   },
   "response": {

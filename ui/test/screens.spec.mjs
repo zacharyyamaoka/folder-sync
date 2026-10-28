@@ -105,7 +105,7 @@ for (const scheme of ["light", "dark"]) {
 			await openMenu(page);
 			await shot(page, "19-menu-no-token");
 			await stub.close();
-			await load(page, "reader", { query: "?owner=AbC123" });
+			await load(page, "reader", { query: "?owner=AbC123zz9yX8" });
 			await openMenu(page);
 			await shot(page, "20-menu-reader");
 			await stub.close();

@@ -58,28 +58,29 @@ export class MemoryStore implements Store {
 		return this.webHosts.get(this.k(owner, project)) ?? null;
 	}
 
-	readonly usageRows = new Map<string, { bytes: number; objects: number; measured_at: string; partial?: boolean; stale?: boolean }>();
+	readonly usageRows = new Map<string, { bytes: number; objects: number; measured_at: string; partial?: boolean; stale?: boolean; history?: { bytes: number; objects: number } }>();
 	readonly mutations = new Map<string, number>();
 	/** What writes charged since the current claim (review r6 #2): stored on top of the claim's listing. */
-	readonly charged = new Map<string, { bytes: number; objects: number }>();
+	readonly charged = new Map<string, { bytes: number; objects: number; history?: { bytes: number; objects: number } }>();
 
 	async usage(owner: string) {
 		return this.usageRows.get(owner) ?? null;
 	}
 
-	async setUsage(owner: string, bytes: number, objects: number, measuredAt: string, token?: string, partial = false) {
+	async setUsage(owner: string, bytes: number, objects: number, measuredAt: string, token?: string, partial = false, history = { bytes: 0, objects: 0 }) {
 		const claim = this.claims.get(owner);
 		if (token !== undefined && claim?.token !== token) return false;
 		const crossed = token !== undefined && (this.mutations.get(owner) ?? 0) !== claim!.mutations;
 		const since = token !== undefined ? (this.charged.get(owner) ?? { bytes: 0, objects: 0 }) : { bytes: 0, objects: 0 };
-		this.usageRows.set(owner, { bytes: bytes + since.bytes, objects: objects + since.objects, measured_at: measuredAt, partial, stale: crossed });
+		const sinceHistory = since.history ?? { bytes: 0, objects: 0 };
+		this.usageRows.set(owner, { bytes: bytes + since.bytes, objects: objects + since.objects, measured_at: measuredAt, partial, stale: crossed, history: { bytes: history.bytes + sinceHistory.bytes, objects: history.objects + sinceHistory.objects } });
 		if (token !== undefined) this.claims.set(owner, { ...claim!, until: 0 });
 		return true;
 	}
 
-	async addUsage(owner: string, bytes: number, objects: number) {
+	async addUsage(owner: string, bytes: number, objects: number, history = { bytes: 0, objects: 0 }) {
 		const row = this.usageRows.get(owner);
-		if (bytes < 0 || objects < 0) {
+		if (bytes < 0 || objects < 0 || history.bytes < 0 || history.objects < 0) {
 			if (row) {
 				this.usageRows.set(owner, { ...row, stale: true });
 				this.mutations.set(owner, (this.mutations.get(owner) ?? 0) + 1);
@@ -87,9 +88,11 @@ export class MemoryStore implements Store {
 			return;
 		}
 		if (!row) return;
-		this.usageRows.set(owner, { ...row, bytes: row.bytes + bytes, objects: row.objects + objects });
+		const kept = row.history ?? { bytes: 0, objects: 0 };
+		this.usageRows.set(owner, { ...row, bytes: row.bytes + bytes, objects: row.objects + objects, history: { bytes: kept.bytes + history.bytes, objects: kept.objects + history.objects } });
 		const since = this.charged.get(owner) ?? { bytes: 0, objects: 0 };
-		this.charged.set(owner, { bytes: since.bytes + bytes, objects: since.objects + objects });
+		const sinceHistory = since.history ?? { bytes: 0, objects: 0 };
+		this.charged.set(owner, { bytes: since.bytes + bytes, objects: since.objects + objects, history: { bytes: sinceHistory.bytes + history.bytes, objects: sinceHistory.objects + history.objects } });
 	}
 
 	readonly claims = new Map<string, { until: number; token: string; mutations: number }>();
