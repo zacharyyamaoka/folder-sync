@@ -4,6 +4,7 @@ package syncer
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -393,6 +394,21 @@ func HashFile(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// HashFiles returns the lowercase hex SHA-256 and MD5 of a file, from one read: the MD5 is what a single-part upload's
+// ETag is, so it ties the stored object to these bytes (recordObjectETags).
+func HashFiles(path string) (sha string, md string, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", "", err
+	}
+	defer f.Close()
+	h, m := sha256.New(), md5.New()
+	if _, err := io.Copy(io.MultiWriter(h, m), f); err != nil {
+		return "", "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), hex.EncodeToString(m.Sum(nil)), nil
 }
 
 // ownManifest is the last manifest this machine uploaded.
