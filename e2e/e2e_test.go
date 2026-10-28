@@ -515,7 +515,7 @@ func TestTwoMachines(t *testing.T) {
 		}
 	})
 
-	t.Run("an overwrite and a delete land in _trash", func(t *testing.T) {
+	t.Run("an overwrite and a delete land in _history", func(t *testing.T) {
 		writeFile(t, filepath.Join(a.folder, "notes", "a.md"), "changed by A\n", time.Time{})
 		os.Remove(filepath.Join(a.folder, "data.json"))
 		out := w.must(a, "sync", "--once")
@@ -523,19 +523,23 @@ func TestTwoMachines(t *testing.T) {
 		if strings.Contains(out, "skipped") {
 			t.Errorf("a round repeats skipped names the last round already reported:\n%s", out)
 		}
-		trash := w.objects("_trash/" + project + "/" + idA)
+		// PEP 0007: the old versions are kept path first, _history/<project>/<host>/<path>/<version>, not in _trash/
+		kept := w.objects("_history/" + project + "/" + idA)
 		var old, deleted string
-		for _, key := range trash {
+		for _, key := range kept {
 			content, _ := w.object(key)
 			switch {
-			case strings.HasSuffix(key, "/notes/a.md"):
+			case strings.Contains(key, "/notes/a.md/"):
 				old = content
-			case strings.HasSuffix(key, "/data.json"):
+			case strings.Contains(key, "/data.json/"):
 				deleted = content
 			}
 		}
 		if old != "hello from A\n" || deleted != `{"x":1}`+"\n" {
-			t.Fatalf("trash holds %q: a.md=%q data.json=%q", trash, old, deleted)
+			t.Fatalf("history holds %q: a.md=%q data.json=%q", kept, old, deleted)
+		}
+		if trash := w.objects("_trash/" + project + "/" + idA); len(trash) != 0 {
+			t.Errorf("a round still writes the legacy _trash/: %q", trash)
 		}
 		if _, ok := w.object(prefixA + "data.json"); ok {
 			t.Error("the deleted object is still live")
@@ -662,7 +666,7 @@ func TestTwoMachines(t *testing.T) {
 		}
 		editConfig(t, a, "max_delete = 2", "max_delete = 50")
 		out = w.must(a, "sync", "--once")
-		if !strings.Contains(out, "3 deleted to _trash/") {
+		if !strings.Contains(out, "3 deleted") {
 			t.Fatalf("after raising max_delete: %s", out)
 		}
 		w.ops.take()
