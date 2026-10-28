@@ -81,7 +81,7 @@ test("download page: no session needed; lists every installer with size and SHA-
 	assert.match(html, /More info → Run anyway/);
 	const win = await (await get("/fs/download", published(), WIN)).text();
 	assert.ok(win.indexOf('data-os="windows"') < win.indexOf('data-os="macos"'), "the Windows section leads for Windows");
-	assert.match(win, /class="fs-button fs-primary" href="\/fs\/download\/desktop-v0\.1\.0-rc1\/folder-sync-0\.1\.0-rc1-windows-x64-setup\.exe"/);
+	assert.match(win, /class="fs-dl fs-dl-primary" href="\/fs\/download\/desktop-v0\.1\.0-rc1\/folder-sync-0\.1\.0-rc1-windows-x64-setup\.exe"/);
 	assert.equal((await get("/fs/download/", published(), WIN)).status, 200, "a trailing slash is the same page");
 });
 
@@ -152,4 +152,10 @@ test("mutation: without the per-file key check, a manifest naming a key outside 
 	} finally {
 		unlinkSync(mutant);
 	}
+});
+
+test("download page CSS never restyles the account page's .fs-button (its Sign in link went black on black once)", () => {
+	const css = readFileSync(fileURLToPath(new URL("../site/account.css", import.meta.url)), "utf8");
+	assert.equal((css.match(/^\.fs-button\s*\{/gm) ?? []).length, 1, "one .fs-button rule, the account page's");
+	assert.doesNotMatch(css, /^\.fs-card a\s*\{/m, "no blanket link colour over every card");
 });

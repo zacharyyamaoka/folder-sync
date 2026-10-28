@@ -139,14 +139,14 @@ function page(app: App | null, manifest: DownloadManifest | null, mine: Download
 				const rows = files
 					.map((f, i) => `<li class="fs-device" data-file="${escapeAttr(f.name)}">
 <div class="fs-device-text"><a class="fs-device-name" href="${escapeAttr(link(manifest, f))}">${escapeAttr(f.label)}</a>
-<span class="fs-small">${escapeAttr(f.name)} · ${size(f.size)}</span>
+<span class="fs-small fs-dl-file">${escapeAttr(f.name)} · ${size(f.size)}</span>
 <code class="fs-sha" title="SHA-256">${escapeAttr(f.sha256)}</code></div>
-<a class="fs-button${os === mine && i === 0 ? " fs-primary" : ""}" href="${escapeAttr(link(manifest, f))}">Download</a>
+<a class="fs-dl${os === mine && i === 0 ? " fs-dl-primary" : ""}" href="${escapeAttr(link(manifest, f))}">Download</a>
 </li>`)
 					.join("\n");
 				const here = os === mine ? ' <span class="fs-tag">This computer</span>' : "";
 				return `<h2 data-os="${os}">${OS_NAMES[os]}${here}</h2>
-<ul class="fs-devices">
+<ul class="fs-devices fs-dl-list">
 ${rows}
 </ul>
 <details class="fs-steps"${os === mine ? " open" : ""}><summary>First run on ${OS_NAMES[os]}</summary>
@@ -170,7 +170,7 @@ ${sections}
 <link rel="stylesheet" href="/fs/site/account.css">
 </head>
 <body>
-<main class="fs-cover" data-testid="fs-download"><div class="fs-card fs-wide">
+<main class="fs-cover fs-dl-cover" data-testid="fs-download"><div class="fs-card fs-wide">
 ${inner}
 <p class="fs-foot">One account for your folders, on every machine and online.</p>
 </div></main>
