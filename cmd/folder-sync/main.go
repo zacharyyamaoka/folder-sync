@@ -440,9 +440,9 @@ func cmdSync(args []string, out io.Writer) error {
 	if *events && !*watch {
 		return fmt.Errorf("--events needs --watch")
 	}
-	var ev *eventWriter
+	var stdout io.Writer
 	if *events {
-		ev = &eventWriter{out: out}
+		stdout = out
 		out = os.Stderr
 	}
 	p, err := openProject(*dir, out)
@@ -450,8 +450,11 @@ func cmdSync(args []string, out io.Writer) error {
 		return err
 	}
 	defer p.Close()
+	ev := newEventWriter(p, stdout)
 	if !*watch {
+		started := time.Now()
 		result, err := p.Round(context.Background(), syncer.Options{ForceDiscover: *discover})
+		ev.onceRound(started, result, err)
 		if err != nil {
 			return err
 		}
