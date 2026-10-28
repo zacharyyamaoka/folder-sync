@@ -1,7 +1,10 @@
 // The web host's one writer per folder (PEP 0003 §3.4, review r1 #3): a Durable Object per (person, project), named
 // webHostName(owner, project). Every web-host write, delete and pre-read settle of that folder runs here, one at a
 // time, through WebHostCore (webhost.ts), with its journal in the object's own storage and an alarm that settles a
-// change a restart or a failed undo left journalled, even when no other request comes (review r2 #2).
+// change a restart or a failed undo left journalled, even when no other request comes (review r2 #2). The same one
+// alarm writes the change records the object queued after answering, and prunes the folder once a day (PEP 0007
+// §3.2): every host's history by the staggered schedule, records and requests and legacy _trash/ 30 days on, rooted
+// _trash/ included, which no R2 lifecycle rule can match.
 //
 // WHY a Durable Object: it is the one place Cloudflare guarantees a single instance per name, so the queue holds
 // across every isolate and colo. WHY still a queue inside it: an object takes a new call whenever the current one

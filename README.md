@@ -97,7 +97,7 @@ On a case-insensitive folder (the macOS default) `README.md` and `readme.md` are
 | Two-way `shared/` folders (bisync under a lease) | v1. v0 refuses a `shared` mode with a clear error |
 | **Real R2** | **Pending Zach**: `scripts/check-r2` (mtime round trip, conditional writes through rclone). Against the stand-in, mtimes pass and conditional writes fail, because the stand-in ignores those headers |
 | **Task Scheduler run on the Windows box** | **Pending Zach**: `scripts\check-windows-task.cmd` |
-| Lifecycle rule on `_trash/` (30 days; no bucket lock: PEP 0003 §3.7), budget alert | Pending Zach, in the R2 dashboard |
+| Lifecycle rule on `_trash/` (30 days; no bucket lock: PEP 0003 §3.7), budget alert | Pending Zach, in the R2 dashboard. It only ever matches v0 bucket-key folders (empty root): a rule matches a literal prefix, so a signed-in person's `users/<id>/_trash/` never matched it; the folder's Durable Object expires that 30 days after its stamp (PEP 0007 §1.4) |
 
 ### The real-R2 check (Zach)
 

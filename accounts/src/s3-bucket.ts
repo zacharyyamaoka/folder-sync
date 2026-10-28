@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { AwsClient } from "./vendor/aws4fetch.js";
 import type { R2BucketLike, R2ListResultLike, R2ObjectBodyLike, R2ObjectLike } from "../../readers/worker/src/folder-sync-read.ts";
 import type { Minted } from "./creds.ts";
+import { measureRoot } from "./quota.ts";
 
 /** R2 refused the request (403): the credential does not cover the key. Never shown to the person as anything but
  *  "not found". */
@@ -198,40 +199,73 @@ export class S3Bucket implements R2BucketLike {
 	}
 
 	/** Bytes and objects under `prefix` (ListObjectsV2, no delimiter, 1000 a page), counting stopped once either
-	 *  passes `stop` (then the answer only says "over"): what a person's quota is measured with. */
-	async measure(prefix: string, stop: { bytes: number; objects: number }): Promise<{ bytes: number; objects: number; complete: boolean }> {
-		let bytes = 0;
-		let objects = 0;
-		let cursor: string | undefined;
-		do {
-			this.calls.push(`LIST ${prefix}`);
-			const query = new URLSearchParams({ "list-type": "2", prefix, "max-keys": "1000" });
-			if (cursor) query.set("continuation-token", cursor);
-			const answer = await this.call(`${this.base}?${query}`);
-			if (!answer.ok) {
-				await answer.body?.cancel();
-				throw new Error(`the storage answered ${answer.status} for a listing`);
-			}
-			const xml = await answer.text();
-			for (const match of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
-				objects += 1;
-				bytes += Number(tagValues(match[1], "Size")[0] || 0);
-			}
-			const truncated = /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml);
-			cursor = truncated ? tagValues(xml, "NextContinuationToken")[0] : undefined;
-		} while (cursor && bytes <= stop.bytes && objects <= stop.objects);
-		// stopped with pages left: a lower bound (review r4 #5)
-		return { bytes, objects, complete: !cursor };
+	 *  passes `stop` (then the answer only says "over"): what a person's quota is measured with, split into live and
+	 *  history (quota.ts measureRoot, PEP 0007 §3.5). `seen` collects the projects the listing passes. */
+	measure(prefix: string, stop: { bytes: number; objects: number }, seen?: Set<string>): Promise<{ bytes: number; objects: number; complete: boolean; history: { bytes: number; objects: number } }> {
+		return measureRoot(this, prefix, stop, seen) as Promise<{ bytes: number; objects: number; complete: boolean; history: { bytes: number; objects: number } }>;
 	}
 
-	/** An object's size and ETag (HEAD), or null when there is none. */
-	async head(key: string): Promise<{ size: number; etag: string } | null> {
+	/** An object's size, ETag and Last-Modified (HEAD, ms), or null when there is none. */
+	async head(key: string): Promise<{ size: number; etag: string; lastModified: number } | null> {
 		this.calls.push(`HEAD ${key}`);
 		const answer = await this.call(this.url(key), { method: "HEAD" });
 		await answer.body?.cancel();
 		if (answer.status === 404) return null;
 		if (!answer.ok) throw new Error(`the storage answered ${answer.status} for a HEAD`);
-		return { size: Number(answer.headers.get("Content-Length") || 0), etag: etagOf(answer) };
+		return { size: Number(answer.headers.get("Content-Length") || 0), etag: etagOf(answer), lastModified: Date.parse(answer.headers.get("Last-Modified") || "") || 0 };
+	}
+
+	/** One ListObjectsV2 page under `prefix`: its objects (key, size, LastModified in ms) and, with a delimiter, its
+	 *  common prefixes; `cursor` continues a truncated one. What history, the pruner and the quota's split read
+	 *  (PEP 0007): an object's LastModified is when its version left the folder. */
+	async objects(prefix: string, options: { delimiter?: string; cursor?: string; max?: number; startAfter?: string } = {}): Promise<{ objects: { key: string; size: number; lastModified: number }[]; prefixes: string[]; truncated: boolean; cursor?: string }> {
+		this.calls.push(`LIST ${prefix}`);
+		const query = new URLSearchParams({ "list-type": "2", prefix, "max-keys": String(options.max ?? 1000) });
+		if (options.delimiter) query.set("delimiter", options.delimiter);
+		if (options.cursor) query.set("continuation-token", options.cursor);
+		if (options.startAfter) query.set("start-after", options.startAfter);
+		const answer = await this.call(`${this.base}?${query}`);
+		if (!answer.ok) {
+			await answer.body?.cancel();
+			throw new Error(`the storage answered ${answer.status} for a listing`);
+		}
+		const xml = await answer.text();
+		const objects = [...xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)].map((m) => ({
+			key: tagValues(m[1], "Key")[0],
+			size: Number(tagValues(m[1], "Size")[0] || 0),
+			lastModified: Date.parse(tagValues(m[1], "LastModified")[0] || "") || 0,
+		}));
+		const prefixes = [...xml.matchAll(/<CommonPrefixes>([\s\S]*?)<\/CommonPrefixes>/g)].flatMap((m) => tagValues(m[1], "Prefix"));
+		const truncated = /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml);
+		const cursor = tagValues(xml, "NextContinuationToken")[0];
+		return { objects, prefixes, truncated, ...(truncated && cursor ? { cursor } : {}) };
+	}
+
+	/** CopyObject `from` to `to` only while `from` is the version whose ETag is `etag` (x-amz-copy-source-if-match):
+	 *  "copied", "gone" (404) or "moved" (412: another version is there now). */
+	async copyIf(from: string, to: string, etag: string): Promise<"copied" | "gone" | "moved"> {
+		this.calls.push(`COPY ${from} -> ${to} if ${etag}`);
+		const answer = await this.call(this.url(to), { method: "PUT", headers: { "x-amz-copy-source": `/${encodeURIComponent(this.bucket)}/${this.encodeKey(from)}`, "x-amz-copy-source-if-match": `"${etag}"` } });
+		const text = await answer.text();
+		if (answer.status === 404) return "gone";
+		if (answer.status === 412) return "moved";
+		if (!answer.ok || /<Error>/.test(text)) throw new Error(`the storage answered ${answer.status} for a copy`);
+		return "copied";
+	}
+
+	/** DeleteObjects: up to 1000 keys in one request; the keys it could not delete (an <Error> each). */
+	async deleteMany(keys: string[]): Promise<string[]> {
+		if (!keys.length) return [];
+		if (keys.length > 1000) throw new Error("one DeleteObjects takes at most 1000 keys");
+		this.calls.push(`DELETE ${keys.length} keys`);
+		const escape = (text: string) => text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[c]!);
+		const body = `<?xml version="1.0" encoding="UTF-8"?><Delete><Quiet>true</Quiet>${keys.map((k) => `<Object><Key>${escape(k)}</Key></Object>`).join("")}</Delete>`;
+		// WHY Content-MD5: S3 requires it (or a checksum header) on DeleteObjects
+		const md5 = createHash("md5").update(body).digest("base64");
+		const answer = await this.call(`${this.base}?delete`, { method: "POST", headers: { "Content-Type": "application/xml", "Content-MD5": md5 }, body });
+		const xml = await answer.text();
+		if (!answer.ok) throw new Error(`the storage answered ${answer.status} for a bulk delete`);
+		return [...xml.matchAll(/<Error>([\s\S]*?)<\/Error>/g)].map((m) => tagValues(m[1], "Key")[0]).filter((k) => typeof k === "string");
 	}
 
 	/** Up to `max` keys under `prefix` with their sizes (one ListObjectsV2 page), and whether there are more. */

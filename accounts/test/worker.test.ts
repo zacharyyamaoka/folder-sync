@@ -5,8 +5,8 @@
 //   slash), only a bearer session gets them, the root is always the session's (never a URL's, body's or header's), a
 //   private folder is 404 to another person and 401 signed out, a public one is readable signed out;
 // - CSRF: a cookie-authenticated write needs X-Folder-Sync: 1 and its own origin;
-// - the web host writes as a folder-sync round does: _trash/ first, the file, then the manifest with If-Match, and
-//   starts over from a fresh read on 412.
+// - the web host writes as a folder-sync round does: _history/ first (PEP 0007), the file, then the manifest with
+//   If-Match, then the change record, and starts over from a fresh read on 412.
 // The mutations at the bottom prove those tests go red when the line that holds them is broken.
 //
 // The accounts layer is a stand-in (`fakeDeps`): Better Auth itself is exercised end to end by test/proof.mjs.
@@ -95,6 +95,8 @@ function fakeDeps(s3: MemoryS3, store = new MemoryStore(), extra: Partial<Deps> 
 		["token-sister-laptop", { ...SISTER, sessionId: "sess-sister-laptop", sessionToken: "token-sister-laptop" }],
 	]);
 	const authCalls: string[] = [];
+	// the store's LastModified on the same clock as the Worker's (PEP 0007: a version's left_at)
+	s3.now = () => deps.now();
 	store.rows.set(`${OWNER.userId}\u0000pub`, { owner_id: OWNER.userId, project: "pub", visibility: "public", updated_at: "2026-10-26T00:00:00Z" });
 	let ids = 0;
 	const deps: Deps = {
@@ -356,7 +358,7 @@ test("files and bundle: exact manifest entries, sha256 ETag, sandboxed active ty
 	}
 });
 
-test("the web host: trash first, the file, the manifest with If-Match; a 412 starts over from a fresh read", async () => {
+test("the web host: history first, the file, the manifest with If-Match, the change record; a 412 starts over from a fresh read", async () => {
 	const s3 = people();
 	const { deps, store } = fakeDeps(s3);
 	const root = `users/${OWNER.userId}/`;
@@ -371,21 +373,25 @@ test("the web host: trash first, the file, the manifest with If-Match; a 412 sta
 	assert.equal(m1.host_id, WEB);
 	assert.equal(m1.project, "robotparts");
 	assert.deepEqual(m1.files.map((f: { path: string }) => f.path), ["saved/x.json"]);
+	await drained(deps);
 	const writes = s3.calls.filter((c) => c.method !== "GET" && c.method !== "LIST").map((c) => `${c.method} ${c.key.slice(root.length)}`);
-	assert.deepEqual(writes, [`PUT robotparts/hosts/${WEB}/saved/x.json`, `PUT robotparts/hosts/${WEB}/manifest.json`], "the file, then the manifest");
+	assert.deepEqual(writes, [`PUT robotparts/hosts/${WEB}/saved/x.json`, `PUT robotparts/hosts/${WEB}/manifest.json`, `PUT _changes/robotparts/${WEB}/000000000001.json`], "the file, the manifest, then the change record");
 	s3.calls.length = 0;
-	// overwrite: the old version goes to _trash/ first
+	// overwrite: the old version goes to _history/<project>/<host>/<path>/<written_at>_<sha16> first (PEP 0007)
 	const second = await (await put("saved/x.json", "two\n")).json();
 	assert.equal(second.seq, 2);
-	// the trash key is the contract's stamp plus the millisecond and a nonce (review r1 #8), so find it by its stamp
-	const trashed = [...s3.objects.keys()].filter((k) => k.startsWith(`${root}_trash/robotparts/${WEB}/${stamp(deps.now())}-`) && k.endsWith("/saved/x.json"));
-	assert.deepEqual(trashed.map((k) => s3.text(k)), ["one\n"]);
+	const kept = `${root}_history/robotparts/${WEB}/saved/x.json/${new Date(deps.now()).toISOString()}_${createHash("sha256").update("one\n").digest("hex").slice(0, 16)}`;
+	assert.equal(s3.text(kept), "one\n");
 	assert.equal(s3.text(at("saved/x.json")), "two\n");
-	assert.deepEqual(s3.calls.filter((c) => c.method !== "GET").map((c) => c.method), ["COPY", "PUT", "PUT"]);
+	await drained(deps);
+	assert.deepEqual(s3.calls.filter((c) => c.method !== "GET" && c.method !== "LIST").map((c) => c.method), ["COPY", "PUT", "PUT", "PUT"]);
+	const record = JSON.parse(s3.text(`${root}_changes/robotparts/${WEB}/000000000002.json`)!);
+	assert.deepEqual([record.by, record.events[0].event, record.events[0].op, record.events[0].was.kept], ["web", "upload", "edit", kept.slice(kept.lastIndexOf("/") + 1)]);
 	// the same bytes again: nothing written, same seq
 	s3.calls.length = 0;
 	assert.equal((await (await put("saved/x.json", "two\n")).json()).seq, 2);
-	assert.deepEqual(s3.calls.filter((c) => c.method !== "GET"), []);
+	await drained(deps);
+	assert.deepEqual(s3.calls.filter((c) => c.method !== "GET" && c.method !== "LIST"), []);
 	// a concurrent writer moves the manifest between our read and our conditional PUT: 412, then a fresh read
 	s3.beforeConditional = {
 		key: at("manifest.json"),
@@ -401,7 +407,7 @@ test("the web host: trash first, the file, the manifest with If-Match; a 412 sta
 	const m4 = JSON.parse(s3.text(at("manifest.json"))!);
 	assert.equal(raced.seq, 4, "their seq 3, then ours");
 	assert.deepEqual(m4.files.map((f: { path: string }) => f.path), ["saved/theirs.json", "saved/x.json", "saved/y.json"], "neither write lost, sorted by path");
-	// delete: to _trash/, then the manifest without it
+	// delete: to _history/, then the manifest without it
 	const gone = await call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/x.json", { method: "DELETE", headers: page(OWNER) });
 	assert.deepEqual(await gone.json(), { host: WEB, path: "saved/x.json", seq: 5 });
 	assert.equal(s3.objects.has(at("saved/x.json")), false);
@@ -606,18 +612,31 @@ test("mutation: a public read signed for the owner's whole root instead of the o
 
 // ------------------------------------------------------------------------------------------------ round-1 review
 
-test("review r1 #8: two replacements in the same second keep two trash objects", async () => {
+test("review r1 #8, PEP 0007: replacements in one millisecond never overwrite a kept version; the burst rule keeps the first", async () => {
 	const s3 = people();
 	const { deps } = fakeDeps(s3); // WHY a fixed clock: every write lands in the same millisecond, the worst case
 	const put = (body: string) => call(handle, env(), deps, "/fs/v1/folders/robotparts/web/saved/x.json", { method: "PUT", headers: page(OWNER), body });
 	for (const body of ["one\n", "two\n", "three\n"]) assert.equal((await put(body)).status, 200, body);
-	const trash = `users/${OWNER.userId}/_trash/robotparts/${WEB}/`;
-	const kept = [...s3.objects.keys()].filter((k) => k.startsWith(trash) && k.endsWith("/saved/x.json")).map((k) => s3.text(k)).sort();
-	assert.deepEqual(kept, ["one\n", "two\n"], "both replaced versions are in _trash/, neither overwrote the other");
-	for (const key of [...s3.objects.keys()].filter((k) => k.startsWith(trash))) {
-		assert.match(key.slice(trash.length), /^20261026T123456Z[^/]*\/saved\/x\.json$/, "the trash stamp still starts with the contract's UTC stamp");
-	}
+	await drained(deps);
+	const history = `users/${OWNER.userId}/_history/robotparts/${WEB}/saved/x.json/`;
+	const kept = [...s3.objects.keys()].filter((k) => k.startsWith(history));
+	// "one" lived 0 s with nothing kept before it: kept; "two" lived 0 s, one was kept 0 s ago: a burst, not kept
+	assert.deepEqual(kept.map((k) => s3.text(k)), ["one\n"], "one version per 30 s per path; the burst's undo copy was removed");
+	for (const key of kept) assert.match(key.slice(history.length), /^2026-10-26T12:34:56\.000Z_[0-9a-f]{16}$/, "<written_at>_<sha16>");
+	const third = JSON.parse(s3.text(`users/${OWNER.userId}/_changes/robotparts/${WEB}/000000000003.json`)!);
+	assert.deepEqual(third.events[0].was.kept, null);
+	assert.equal(third.events[0].was.why, "burst");
 });
+
+/** Waits for the folder's queue (and the change records it writes after answering): a read settles through it. */
+async function drained(deps: Deps) {
+	await call(handle, env(), deps, "/fs/v1/folders/robotparts", { headers: cookie(OWNER) });
+}
+
+/** Nothing left for the folder's object to do but its daily prune (PEP 0007 §3.2): the alarm is set for that only. */
+function idle(storage: { alarm: number | null; data: Map<string, unknown> }) {
+	return storage.alarm !== null && storage.alarm === storage.data.get("prune_at");
+}
 
 /** Every file the owner's web host's manifest lists, against its object: the paths whose bytes do not match. */
 function mismatched(s3: MemoryS3, project = "robotparts", host = WEB): string[] {
@@ -888,7 +907,8 @@ test("review r2 #2: the folder's Durable Object settles a cut-off write on its o
 	const core = new WebHostCore(env(), s3.fetch, storage, () => Date.parse("2026-10-26T12:34:56Z"), new MemoryStore());
 	const op = (text: string) => ({ method: "PUT", owner: OWNER.userId, project: "robotparts", hostId: WEB, path: "saved/x.json", data: new TextEncoder().encode(text) });
 	assert.equal((await core.run(op("one\n"))).status, 200);
-	assert.equal(storage.alarm, null, "nothing pending, no alarm");
+	await core.drain();
+	assert.ok(idle(storage), "nothing pending: only the folder's daily prune is set");
 	cutOff(s3);
 	assert.equal((await core.run(op("two\n"))).status, 503);
 	s3.fail = null;
@@ -898,7 +918,7 @@ test("review r2 #2: the folder's Durable Object settles a cut-off write on its o
 	assert.deepEqual(mismatched(s3), []);
 	assert.equal(s3.text(`users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/x.json`), "one\n");
 	assert.equal(storage.data.get("pending"), undefined);
-	assert.equal(storage.alarm, null);
+	assert.ok(idle(storage));
 });
 
 test("review r2 #5: keep-newest settles an exact tie the same whichever write arrives first", async () => {
@@ -922,15 +942,18 @@ test("review r2 #5: keep-newest settles an exact tie the same whichever write ar
 	assert.equal(a.saved, b.saved, "the review saw false one way round and true the other");
 });
 
-/** What is really stored under a person's root: bytes and objects. */
+/** What is really stored under a person's root, as the quota counts it: bytes and objects, a change record's bytes
+ *  but never its object (PEP 0007 §14.2, quota.ts measureRoot). */
 function stored(s3: MemoryS3, who: Person) {
-	const entries = [...s3.objects].filter(([k]) => k.startsWith(`users/${who.userId}/`));
-	return { bytes: entries.reduce((sum, [, v]) => sum + v.byteLength, 0), objects: entries.length };
+	const root = `users/${who.userId}/`;
+	const entries = [...s3.objects].filter(([k]) => k.startsWith(root));
+	return { bytes: entries.reduce((sum, [, v]) => sum + v.byteLength, 0), objects: entries.filter(([k]) => !k.startsWith(`${root}_changes/`)).length };
 }
 
 /** Since review r5 #2 a deletion never subtracts from the measured figure: it marks it stale (an upper bound) and the
  *  next request measures again. This is that request, and what it leaves: the measured figure. */
 async function measuredAgain(store: MemoryStore, deps: Deps, e: Env = env()) {
+	await drained(deps); // the change records the folder's object writes after answering (PEP 0007)
 	await call(handle, e, deps, "/fs/v1/usage", { headers: cookie(OWNER) });
 	const u = (await store.usage(OWNER.userId))!;
 	return { bytes: u.bytes, objects: u.objects };
@@ -948,19 +971,21 @@ test("review r2 #6: concurrent web writes are admitted one at a time, and usage 
 	const s3 = people();
 	const store = new MemoryStore();
 	const { deps } = fakeDeps(s3, store);
-	const quota = stored(s3, OWNER).bytes + 1000;
+	// WHY 4000: each write also costs its change record's bytes (PEP 0007: history counts)
+	const quota = stored(s3, OWNER).bytes + 4000;
 	const e = env({ QUOTA_BYTES: String(quota), QUOTA_RECHECK_S: "3600" });
 	const answers = await Promise.all(Array.from({ length: 25 }, (_, n) =>
 		call(handle, e, deps, `/fs/v1/folders/robotparts/web/saved/p${n}.json`, { method: "PUT", headers: page(OWNER), body: "x".repeat(100) })));
 	const statuses = answers.map((a) => a.status);
 	assert.ok(statuses.includes(200) && statuses.includes(403), `some admitted, the rest refused: ${statuses}`);
+	await drained(deps);
 	const real = stored(s3, OWNER);
 	assert.ok(real.bytes <= quota, `stored ${real.bytes} bytes, over the ${quota} quota (the review saw all 25 admitted)`);
 	const counted = await store.usage(OWNER.userId);
 	assert.deepEqual({ bytes: counted!.bytes, objects: counted!.objects }, real, "the count is what is stored, manifest included");
 });
 
-test("review r2 #6: a write that changes nothing costs nothing; a replacement costs its trash copy and the manifest's change", async () => {
+test("review r2 #6: a write that changes nothing costs nothing; a replacement costs its history copy, the manifest's change and its record", async () => {
 	const s3 = people();
 	const store = new MemoryStore();
 	const { deps } = fakeDeps(s3, store);
@@ -968,6 +993,7 @@ test("review r2 #6: a write that changes nothing costs nothing; a replacement co
 	const put = (body: string) => call(handle, e, deps, "/fs/v1/folders/robotparts/web/saved/same.json", { method: "PUT", headers: page(OWNER), body });
 	for (let n = 0; n < 11; n++) assert.equal((await put("y".repeat(100))).status, 200, `identical write ${n + 1} (the review saw the 11th refused)`);
 	assert.equal((await put("z".repeat(100))).status, 200);
+	await drained(deps);
 	const counted = await store.usage(OWNER.userId);
 	assert.deepEqual({ bytes: counted!.bytes, objects: counted!.objects }, stored(s3, OWNER));
 	assert.equal((await call(handle, e, deps, "/fs/v1/folders/robotparts/web/saved/same.json", { method: "DELETE", headers: page(OWNER) })).status, 200);
@@ -1059,9 +1085,9 @@ test("the store's SQL runs against the migrations applied in order on SQLite, D1
 	assert.equal(await store.setUsage(OWNER.userId, 0, 0, "2026-10-26T11:00:00.000Z", "claim-a"), false, "the outlived claim's result is fenced off (review r3 #7)");
 	assert.equal(await store.setUsage(OWNER.userId, 100, 2, "2026-10-26T12:00:00.000Z", "claim-b"), true);
 	await store.addUsage(OWNER.userId, 40, 1);
-	assert.deepEqual({ ...(await store.usage(OWNER.userId)) }, { bytes: 140, objects: 3, measured_at: "2026-10-26T12:00:00.000Z", partial: false, stale: false });
+	assert.deepEqual({ ...(await store.usage(OWNER.userId)) }, { bytes: 140, objects: 3, measured_at: "2026-10-26T12:00:00.000Z", partial: false, stale: false, history: { bytes: 0, objects: 0 } });
 	await store.addUsage(OWNER.userId, -40, -1);
-	assert.deepEqual({ ...(await store.usage(OWNER.userId)) }, { bytes: 140, objects: 3, measured_at: "2026-10-26T12:00:00.000Z", partial: false, stale: true },
+	assert.deepEqual({ ...(await store.usage(OWNER.userId)) }, { bytes: 140, objects: 3, measured_at: "2026-10-26T12:00:00.000Z", partial: false, stale: true, history: { bytes: 0, objects: 0 } },
 		"a credit marks the figure stale, never subtracts (review r5 #2)");
 	assert.equal(await store.claimMeasurement(OWNER.userId, 200_000, 260_000, "claim-c"), true);
 	await store.addUsage(OWNER.userId, -1, 0); // a deletion while claim-c lists
@@ -1074,6 +1100,13 @@ test("the store's SQL runs against the migrations applied in order on SQLite, D1
 	assert.deepEqual([crossed.bytes, crossed.objects], [150, 3], "a measurement a charge crossed keeps the charge (review r6 #2)");
 	await store.setUsage(OWNER.userId, 1000, 1000, "2026-10-26T12:01:00.000Z", undefined, true);
 	assert.equal((await store.usage(OWNER.userId))!.partial, true, "a lower bound reads back as one (review r4 #5)");
+	// PEP 0007 §3.5: the history share, measured, then charged on top (a claim's charges kept as the totals' are)
+	assert.equal(await store.claimMeasurement(OWNER.userId, 400_000, 460_000, "claim-e"), true);
+	await store.addUsage(OWNER.userId, 30, 1, { bytes: 30, objects: 1 });
+	assert.equal(await store.setUsage(OWNER.userId, 500, 5, "2026-10-26T12:04:00.000Z", "claim-e", false, { bytes: 200, objects: 2 }), true);
+	assert.deepEqual((await store.usage(OWNER.userId))!.history, { bytes: 230, objects: 3 });
+	await store.addUsage(OWNER.userId, 10, 0, { bytes: 10, objects: 0 });
+	assert.deepEqual([(await store.usage(OWNER.userId))!.bytes, (await store.usage(OWNER.userId))!.history], [540, { bytes: 240, objects: 3 }]);
 	assert.equal(await store.ensureWebHost(OWNER.userId, "robotparts", WEB, "2026-10-26"), WEB);
 });
 
@@ -1109,6 +1142,7 @@ test("review r2 #7: a machine deletes through the Worker: exactly its manifest m
 	const old = JSON.parse(s3.text(`${base}manifest.json`)!);
 	const del = (body: unknown, headers: Record<string, string> = { Authorization: "Bearer token-owner-laptop" }, host = MACHINE) =>
 		call(handle, env(), deps, `/fs/v1/folders/robotparts/hosts/${host}/delete`, { origin: OWN, method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+	await drained(deps);
 	const before = new Map(s3.objects);
 	for (const [what, answer, status] of [
 		["a browser's cookie", del({ job: JOB, from_seq: old.seq, paths: ["cad/bracket.step"] }, page(OWNER)), 401],
@@ -1129,8 +1163,12 @@ test("review r2 #7: a machine deletes through the Worker: exactly its manifest m
 	assert.equal(answer.seq, old.seq + 1);
 	assert.deepEqual(answer.deleted, ["cad/bracket.step"]);
 	assert.equal(s3.objects.has(`${base}cad/bracket.step`), false, "deleted");
-	assert.ok(![...s3.objects.keys()].some((k) => k.includes("_trash/") && k.endsWith("cad/bracket.step")), "permanently: no trash copy");
+	assert.ok(![...s3.objects.keys()].some((k) => (k.includes("_trash/") || k.includes("_history/")) && k.endsWith("cad/bracket.step")), "permanently: no history copy");
 	assert.deepEqual(JSON.parse(s3.text(`${base}manifest.json`)!).files.map((f: { path: string }) => f.path), ["saved/a.json"]);
+	await drained(deps);
+	// PEP 0007: the job's change record, by the server, the delete permanent and nothing kept
+	const record = JSON.parse(s3.text(`users/${OWNER.userId}/_changes/robotparts/${MACHINE}/${String(old.seq + 1).padStart(12, "0")}.json`)!);
+	assert.deepEqual([record.by, record.events.map((e: { path: string; permanent: boolean; was: { kept: null; why: string } }) => [e.path, e.permanent, e.was.kept, e.was.why])], ["server", [["cad/bracket.step", true, null, "permanent"]]]);
 	assert.deepEqual(await measuredAgain(store, deps), stored(s3, OWNER), "the usage went down by what was deleted, manifest included");
 });
 
@@ -1189,7 +1227,13 @@ test("review r3 #1: the delete endpoint builds the next manifest itself: the rev
 	assert.equal(written.generated_at, "2026-10-26T12:34:56.000Z", "the server's clock");
 	assert.deepEqual(written.files, old.files.filter((f: { path: string }) => f.path !== "cad/bracket.step"));
 	assert.deepEqual(answer.manifest, written, "the answer carries the manifest, for the machine to keep");
-	assert.ok((await measuredAgain(store, deps, env({ QUOTA_BYTES: "1" }))).bytes < usedBefore, "and the usage went down");
+	// PEP 0007: the job writes its change record (history counts its bytes), so a 14-byte file's delete can cost more
+	// than it frees; what matters here is that nothing the caller sent was stored
+	await drained(deps);
+	const record = s3.objects.get(`users/${OWNER.userId}/_changes/robotparts/${MACHINE}/${String(old.seq + 1).padStart(12, "0")}.json`)!;
+	const after = await measuredAgain(store, deps, env({ QUOTA_BYTES: "1" }));
+	assert.deepEqual(after, stored(s3, OWNER));
+	assert.ok(after.bytes < usedBefore + record.byteLength, "and the usage went down by what was deleted, its record aside");
 });
 
 
@@ -1237,10 +1281,10 @@ test("review r3 #2: the folder's Durable Object finishes a delete's cleanup on i
 	s3.fail = null;
 	await core.alarm();
 	assert.equal(s3.objects.has(`${base}cad/bracket.step`), false, "finished with no request");
-	assert.equal(storage.alarm, null, "nothing left to do");
+	assert.ok(idle(storage), "nothing left to do");
 });
 
-test("review r3 #3: a web-only person deletes their way under quota: a permanent web delete and a purge of the web host's trash", async () => {
+test("review r3 #3, PEP 0007: a web-only person deletes their way under quota: a permanent web delete and Free up space", async () => {
 	const s3 = people();
 	const store = new MemoryStore();
 	const { deps } = fakeDeps(s3, store);
@@ -1248,7 +1292,7 @@ test("review r3 #3: a web-only person deletes their way under quota: a permanent
 	const big = "x".repeat(10_000);
 	assert.equal((await web("web/saved/big.json", { method: "PUT", headers: page(OWNER), body: big })).status, 200);
 	assert.equal((await web("web/saved/old.json", { method: "PUT", headers: page(OWNER), body: big })).status, 200);
-	assert.equal((await web("web/saved/old.json", { method: "DELETE", headers: page(OWNER) })).status, 200, "an ordinary delete: into the trash");
+	assert.equal((await web("web/saved/old.json", { method: "DELETE", headers: page(OWNER) })).status, 200, "an ordinary delete: into the history");
 	const before = await measuredAgain(store, deps); // what is stored (the delete above left the cached figure stale)
 	// over quota now (read-only keys), and the person has only a browser
 	const tight = env({ QUOTA_BYTES: String(before.bytes - 1) });
@@ -1256,16 +1300,20 @@ test("review r3 #3: a web-only person deletes their way under quota: a permanent
 	const gone = await call(handle, tight, deps, "/fs/v1/folders/robotparts/web/saved/big.json?permanent=1", { method: "DELETE", headers: page(OWNER) });
 	assert.equal(gone.status, 200, "a permanent web delete (the review saw only the manifest shrink)");
 	assert.equal(s3.objects.has(`users/${OWNER.userId}/robotparts/hosts/${WEB}/saved/big.json`), false);
-	assert.ok(![...s3.objects].some(([k, v]) => k.includes("/_trash/") && k.endsWith("saved/big.json") && v.byteLength === 10_000), "no trash copy of it");
-	const purge = await call(handle, tight, deps, "/fs/v1/folders/robotparts/web-trash/purge", { method: "POST", headers: page(OWNER) });
-	assert.equal(purge.status, 200, "the web host's trash, purged");
-	assert.ok(![...s3.objects.keys()].some((k) => k.startsWith(`users/${OWNER.userId}/_trash/robotparts/${WEB}/`)));
+	assert.ok(![...s3.objects].some(([k, v]) => (k.includes("/_trash/") || k.includes("/_history/")) && k.includes("saved/big.json") && v.byteLength === 10_000), "no history copy of it");
+	// Free up space (POST …/history/purge, older than 0 days): the deleted old.json's version goes
+	const purge = await call(handle, tight, deps, "/fs/v1/folders/robotparts/history/purge", { method: "POST", headers: { ...page(OWNER), "Content-Type": "application/json" }, body: JSON.stringify({ older_than_days: 0 }) });
+	assert.equal(purge.status, 200, "the history, purged");
+	assert.ok(![...s3.objects.keys()].some((k) => k.startsWith(`users/${OWNER.userId}/_history/robotparts/${WEB}/`)));
+	await drained(deps);
 	const after = await measuredAgain(store, deps, tight);
 	assert.deepEqual(after, stored(s3, OWNER), "the usage is what is stored");
-	assert.ok(after.bytes < before.bytes - 20_000 && after.objects < before.objects, `bytes and objects really dropped: ${JSON.stringify([before, after])}`);
+	// WHY 19,000 of the 20,000: the permanent delete writes its change record (PEP 0007: its bytes count)
+	assert.ok(after.bytes < before.bytes - 19_000 && after.objects < before.objects, `bytes and objects really dropped: ${JSON.stringify([before, after])}`);
 	assert.equal((await (await call(handle, tight, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: "Bearer token-owner-laptop" } })).json()).ReadOnly, undefined, "back under: read-write keys");
 	// a cookie purge needs the page's own headers, like any write
 	assert.equal((await call(handle, tight, deps, "/fs/v1/folders/robotparts/web-trash/purge", { method: "POST", headers: cookie(OWNER) })).status, 403);
+	assert.equal((await call(handle, tight, deps, "/fs/v1/folders/robotparts/history/purge", { method: "POST", headers: { ...cookie(OWNER), "Content-Type": "application/json" }, body: '{"older_than_days": 0}' })).status, 403);
 });
 
 test("review r3 #6: replacements rolled back leave no uncounted trash copies: the usage stays what is stored", async () => {
@@ -1383,6 +1431,7 @@ async function folderObject(s3: MemoryS3, store = new MemoryStore(), e: Env = en
 	const { WebHostCore } = (await import("../src/webhost.ts")) as Record<string, any>;
 	const storage = objectStorage();
 	const core = new WebHostCore(e, s3.fetch, storage, () => Date.parse("2026-10-26T12:34:56Z"), store);
+	s3.now = () => Date.parse("2026-10-26T12:34:56Z");
 	const op = (method: string, path: string, extra: Record<string, unknown> = {}) => core.run({ method, owner: OWNER.userId, project: "robotparts", hostId: WEB, path, ...extra });
 	const put = (path: string, text: string) => op("PUT", path, { data: new TextEncoder().encode(text) });
 	return { core, storage, store, op, put };
@@ -1414,7 +1463,10 @@ test("review r4 #2: a purge never destroys a backup a cut-off change still needs
 	assert.equal((await put("saved/x.json", "new\n")).status, 503);
 	const purge = await op("PURGE_TRASH", "");
 	assert.equal(purge.status, 503, "the folder is recovering: no purge (the review saw 200 and the backup gone)");
-	assert.ok([...s3.objects.keys()].some((k) => k.includes("/_trash/") && k.endsWith("saved/x.json") && s3.text(k) === "old\n"), "the backup is still there");
+	const history = await op("PURGE_HISTORY", "", { purge: { olderThanDays: 0 } });
+	assert.equal(history.status, 503, "nor of the history, where the backup is (PEP 0007)");
+	const backupOf = (k: string) => k.includes("/_history/") && k.includes("saved/x.json/") && s3.text(k) === "old\n";
+	assert.ok([...s3.objects.keys()].some(backupOf), "the backup is still there");
 	s3.fail = null;
 	await core.alarm();
 	assert.equal(s3.text(`${base}saved/x.json`), "old\n");
@@ -1423,7 +1475,7 @@ test("review r4 #2: a purge never destroys a backup a cut-off change still needs
 	cutOff(s3);
 	assert.equal((await put("saved/x.json", "newer\n")).status, 503);
 	s3.fail = null;
-	for (const k of [...s3.objects.keys()].filter((k) => k.includes("/_trash/") && k.endsWith("saved/x.json") && s3.text(k) === "old\n")) s3.objects.delete(k);
+	for (const k of [...s3.objects.keys()].filter(backupOf)) s3.objects.delete(k);
 	await core.alarm();
 	assert.ok(storage.data.get("pending"), "the journal stays: a COPY from nothing is a failure (the review saw it cleared)");
 	assert.equal((await op("SETTLE", "")).status, 503);
@@ -1446,7 +1498,7 @@ test("review r4 #3: a delete job has its alarm before its first bucket write, so
 	storage.put = realPut;
 	await core.alarm();
 	assert.equal(s3.objects.has(`${base}cad/bracket.step`), false, "the alarm finished it");
-	assert.equal(storage.alarm, null);
+	assert.ok(idle(storage));
 	void store;
 });
 
@@ -1457,13 +1509,13 @@ test("review r4 #7: a backup that cannot be removed after an undo is charged unt
 	assert.equal((await put("saved/x.json", "v0".repeat(100))).status, 200);
 	const manifestKey = `users/${OWNER.userId}/robotparts/hosts/${WEB}/manifest.json`;
 	// each replacement fails at its manifest and is undone, but its backup cannot be deleted
-	s3.fail = (method, key) => (method === "PUT" && key === manifestKey) || (method === "DELETE" && key.includes("/_trash/"));
+	s3.fail = (method, key) => (method === "PUT" && key === manifestKey) || (method === "DELETE" && key.includes("/_history/"));
 	for (let n = 1; n <= 5; n++) await put("saved/x.json", `v${n}`.repeat(100)).catch(() => null);
 	s3.fail = null;
 	const counted = async () => { const u = (await store.usage(OWNER.userId))!; return { bytes: u.bytes, objects: u.objects }; };
 	assert.deepEqual(await counted(), stored(s3, OWNER), "the backups left behind are charged (the review saw 1,728 / 8 counted, 3,228 / 13 stored)");
 	await core.alarm();
-	assert.ok(![...s3.objects.keys()].some((k) => k.includes("/_trash/robotparts/" + WEB + "/")), "the alarm removed them");
+	assert.ok(![...s3.objects.keys()].some((k) => k.includes("/_history/robotparts/" + WEB + "/")), "the alarm removed them");
 	await staleUpperBound(store, s3); // credited: since review r5 #2 a credit marks the figure stale for measuring again
 	assert.deepEqual(mismatched(s3), []);
 });
@@ -1633,7 +1685,7 @@ test("review r6 #1: a delete cut off after its manifest commits keeps its cleanu
 	assert.deepEqual(JSON.parse(s3.text(`${base}manifest.json`)!).files, [], "neither listed");
 	assert.equal(s3.objects.has(`${base}saved/x.json`), false, "X's cleanup still ran (the review saw X stored, counted, and its job gone)");
 	assert.equal(s3.objects.has(`${base}saved/y.json`), false);
-	assert.equal(storage.alarm, null, "nothing left to do");
+	assert.ok(idle(storage), "nothing left to do");
 	assert.deepEqual(mismatched(s3), []);
 	await staleUpperBound(store, s3);
 });
@@ -1651,7 +1703,7 @@ test("review r6 #1: a delete job that never wrote its manifest is dropped when t
 	await core.alarm();
 	assert.deepEqual(JSON.parse(s3.text(`${base}manifest.json`)!).files.map((f: { path: string }) => f.path), ["saved/x.json", "saved/z.json"]);
 	assert.equal(s3.text(`${base}saved/x.json`), "x\n", "a file still listed is never deleted");
-	assert.equal(storage.alarm, null);
+	assert.ok(idle(storage));
 });
 
 test("review r6 #2: a measurement crossed by a write's charge keeps the charge, and its caller answers with the figure stored", async () => {
