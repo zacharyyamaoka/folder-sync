@@ -59,6 +59,11 @@ Usage:
                                                                      --json prints folder-sync-status/1
   folder-sync projects [--json] [--bucket NAME]                      the projects under the key's account root
                                                                      (one LIST): what a new machine can join
+  folder-sync history [--json] [--dir PATH] PATH                     a file's kept versions (30 days, staggered)
+  folder-sync restore [--version ID] [--dir PATH] PATH               put a kept version back (this machine's file: now;
+                                                                     another's: asks that machine)
+  folder-sync deleted [--restore PREFIX] [--json] [--dir PATH]       this machine's deleted files; --restore puts back
+                                                                     every one under PREFIX
   folder-sync version
 
 The key comes from FOLDER_SYNC_ACCESS_KEY_ID, FOLDER_SYNC_SECRET_ACCESS_KEY and
@@ -99,6 +104,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdStatus(args[1:], stdout)
 	case "projects":
 		err = cmdProjects(args[1:], stdout, stderr)
+	case "history":
+		err = cmdHistory(args[1:], stdout)
+	case "restore":
+		err = cmdRestore(args[1:], stdout)
+	case "deleted":
+		err = cmdDeleted(args[1:], stdout)
 	case "version":
 		l := mustLayout()
 		v, _ := rclone.Version(rcloneBinary(l), l)
