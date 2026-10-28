@@ -17,6 +17,7 @@ import (
 
 	"folder-sync/internal/account"
 	"folder-sync/internal/creds"
+	"folder-sync/internal/syncer"
 )
 
 // EventSchema names `sync --events`' lines.
@@ -83,11 +84,20 @@ func classify(err error) (kind, why string) {
 	}
 	msg := err.Error()
 	var quota *account.OverQuotaError
+	var readOnly *syncer.ReadOnlyError
 	switch {
 	case errors.Is(err, creds.ErrSignedOut), errors.Is(err, account.ErrSignedOut), errors.Is(err, account.ErrNotSignedIn):
 		return KindSignedOut, msg
 	case errors.As(err, &quota):
 		return KindOverQuota, quota.Why
+	// WHY: since PEP 0003 §3.7 an account over its quota gets read-only keys rather than a refusal, and the round
+	// reports its held uploads as a ReadOnlyError; before the offline check, because a delete it could not finish may
+	// wrap a refused connection (found by the desktop proof after the v0 merge, 2026-10-28)
+	case errors.As(err, &readOnly):
+		if readOnly.Reason != "" {
+			return KindOverQuota, readOnly.Reason
+		}
+		return KindOverQuota, readOnly.Error()
 	}
 	// The credential process's failure reaches us as its last stderr line (internal/creds), so over quota is read
 	// from `credentials`' fixed prefix.
@@ -143,4 +153,3 @@ func classifyRound(err error, endpoints ...string) (kind, why string) {
 	}
 	return kind, why
 }
-

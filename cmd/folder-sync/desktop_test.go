@@ -21,6 +21,7 @@ import (
 
 	"folder-sync/internal/account"
 	"folder-sync/internal/creds"
+	"folder-sync/internal/syncer"
 )
 
 // accountProcess writes a program that prints the given sign-in (or exits with code) and names it in the environment.
@@ -193,10 +194,19 @@ func TestClassifyRoundErrors(t *testing.T) {
 		{errors.New("credential process failed: folder-sync credentials: http://127.0.0.1:4933 did not answer (dial tcp 127.0.0.1:4933: connect: connection refused)"), KindOffline},
 		{errors.New("rclone: Get \"http://127.0.0.1:4930/\": dial tcp: lookup r2.example: no such host"), KindOffline},
 		{errors.New("manifest seq went backwards"), KindError},
+		// PEP 0003 §3.7 on v0: over quota hands out read-only keys and the round reports held uploads (found by the
+		// desktop proof after the v0 merge: the tray said "Sync error" where it must say "Over quota")
+		{fmt.Errorf("push: %w", &syncer.ReadOnlyError{Reason: "this account holds 5506908 bytes of its 4000000", Held: 1}), KindOverQuota},
+		{fmt.Errorf("push: %w", &syncer.ReadOnlyError{Held: 2}), KindOverQuota},
+		{fmt.Errorf("push: %w", &syncer.ReadOnlyError{Held: 0, Err: errors.New("dial tcp 127.0.0.1:4933: connect: connection refused")}), KindOverQuota},
 	} {
 		if kind, _ := classify(c.err); kind != c.kind {
 			t.Errorf("classify(%v) = %q, want %q", c.err, kind, c.kind)
 		}
+	}
+	// the tray shows the server's reason, not the whole round message
+	if _, why := classify(fmt.Errorf("push: %w", &syncer.ReadOnlyError{Reason: "this account holds 5 of its 4", Held: 1})); why != "this account holds 5 of its 4" {
+		t.Errorf("why = %q", why)
 	}
 }
 
@@ -250,4 +260,3 @@ func TestAFailedRoundAgainstADownServerIsOffline(t *testing.T) {
 		t.Fatalf("a known kind is not re-sorted by the probe: %q", kind)
 	}
 }
-
