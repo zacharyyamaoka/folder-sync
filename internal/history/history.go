@@ -23,11 +23,6 @@ const (
 	MaxKeyBytes = 1024
 )
 
-// DefaultNoHistory is .folder-sync.toml's no_history when the key is absent. WHY *.log (Zach, 2026-10-28, PEP 0007
-// §10.6): an appended log copied whole on every round is the fastest way to fill a quota, and each old version is
-// just the start of the current one.
-var DefaultNoHistory = []string{"*.log"}
-
 // Why a leaving version was not kept (the event's was.why).
 const (
 	WhyBurst      = "burst"
