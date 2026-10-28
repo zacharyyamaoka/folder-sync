@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Builds the desktop-installers review report (PEP 0006) from the evidence of one CI release and one Linux proof.
 
-    python3 docs/report/build_installers.py --evidence <dir> --proof <proof_linux.py out dir> [--out FILE]
+    python3 docs/report/build_installers.py --evidence <dir> --proof <proof_linux.py out dir> --branch-sha <sha> [--out FILE]
 
 <dir> of --evidence holds what was collected from the run (scripts in the report's "how it was checked" section):
   run.json          gh run view <id> --json url,headSha,conclusion,createdAt,updatedAt,jobs
@@ -10,6 +10,7 @@
   verify.txt        sha256sum -c SHA256SUMS over the downloaded assets
   listing-*.txt     each installer's contents (7z l / dpkg-deb -c / --appimage-extract), cut to the sidecar lines
   download-*.png    /fs/download on the local stack (robotparts' /fs/ mount), desktop and phone width
+  download-check.txt  one installer fetched through /fs/download, its headers and SHA-256
 Copies the media into reports/media/desktop-installers-2026-10-28/ beside the page and writes one page, by default
 /home/bam/folder-sync/reports/media/desktop-installers-2026-10-28.html in the main checkout.
 """
@@ -61,7 +62,7 @@ def size(n: int) -> str:
     return f"{n / 1e6:.1f} MB"
 
 
-def build(evidence: pathlib.Path, proof_dir: pathlib.Path, out: pathlib.Path) -> str:
+def build(evidence: pathlib.Path, proof_dir: pathlib.Path, out: pathlib.Path, branch_sha: str) -> str:
     run = json.loads((evidence / "run.json").read_text())
     release = json.loads((evidence / "release.json").read_text())
     proof = json.loads((proof_dir / "proof.json").read_text()) if (proof_dir / "proof.json").exists() else {}
@@ -151,7 +152,7 @@ figure {{ margin:0; }} img,video {{ max-width:100%; border:1px solid var(--line)
 .scroll {{ overflow-x:auto; }} .cap {{ color:var(--muted); font-size:12px; margin-top:4px; }} a {{ color:inherit; }}
 </style></head><body><main>
 <h1>folder-sync desktop installers</h1>
-<p class="verdict"><b>Unsigned installers for Mac, Windows and Linux build from one tag and land on a GitHub Release with SHA-256 sums</b>: on <code>lane/desktop-release</code> @ <code>{esc(run['headSha'][:7])}</code>, not merged. Linux is installed and signed in end to end here; <b>Mac and Windows are NOT VERIFIED ON DEVICE</b> (their bundles are listed and contain the engine). <code>/fs/download</code> is written and tested locally, not deployed.</p>
+<p class="verdict"><b>Unsigned installers for Mac, Windows and Linux build from one tag and land on a GitHub Release with SHA-256 sums</b>: on <code>lane/desktop-release</code> @ <code>{esc(branch_sha)}</code> (installers built from <code>{esc(run['headSha'][:7])}</code>; later commits touch only the proof script, the page's CSS and this report), not merged. Linux is installed and signed in end to end here; <b>Mac and Windows are NOT VERIFIED ON DEVICE</b> (their bundles are listed and contain the engine). <code>/fs/download</code> is written and tested locally, not deployed.</p>
 <p>CI run: <a href="{esc(run['url'])}">{esc(run['url'])}</a> ({esc(run['conclusion'])}) · Release: <a href="{esc(release['url'])}">{esc(release['name'])}</a> (private repo: only you can open it)</p>
 {hero}
 <h2>Jobs</h2><div class="scroll"><table><tr><th>Job</th><th>Result</th><th>Time</th></tr>{jobs}</table></div>
@@ -167,8 +168,23 @@ figure {{ margin:0; }} img,video {{ max-width:100%; border:1px solid var(--line)
 <h2>/fs/download (local stack, not deployed)</h2>
 <p>The Worker's new page, served by the local accounts stack through robotparts' <code>/fs/</code> mount at <code>127.0.0.1:4973/fs/download</code>, with this release's <code>latest.json</code> and files put into its local R2 bucket. It leads with the visitor's OS; the files stream from the <code>folder-sync-downloads</code> bucket.</p>
 <div class="grid">{downloads}</div>
+<p>A real download through it, checked against the release:</p><pre>{esc((evidence / "download-check.txt").read_text().strip()) if (evidence / "download-check.txt").exists() else ""}</pre>
 <h2>Install, per OS (first-run warnings for unsigned apps)</h2>{os_steps}
 <h2>Your 5-step test on the Mac and on Windows</h2><ol>{test_script}</ol>
+<h2>Found and fixed on the way</h2><ul>
+<li><b>Over quota showed as “Sync error”</b> after the v0 merge: read-only keys (PEP 0003 §3.7) surface as <code>syncer.ReadOnlyError</code>, which the engine's event classifier didn't know. Failing-first cases in <code>TestClassifyRoundErrors</code>; the proof now reaches <i>Over quota</i>.</li>
+<li><b>Times blank on Mac and Windows</b>: the app shelled out to <code>date</code> (none on Windows; BSD <code>date</code> has no <code>-d</code>). Now chrono, already in Tauri's tree.</li>
+<li><b>A console window per sync on Windows</b>: the engine is now started with <code>CREATE_NO_WINDOW</code>.</li>
+<li><b>“App is damaged” on Apple silicon</b> for unsigned bundles: ad-hoc signed (<code>signingIdentity "-"</code>) so the warning is the passable “cannot verify”.</li>
+<li><b>macOS bundle had no icon type</b>: added <code>icon.icns</code>.</li>
+<li><b>/fs/download first draft</b> turned the account page's <i>Sign in</i> button black-on-black and scrolled sideways on a phone; own classes now, 390 px measured, a CSS guard test.</li>
+<li><b>Proof flake</b>: with no window manager the sign-in browser could stack over the tray; the proof raises the tray before each click.</li>
+</ul>
+<h2>What needs you</h2><ol>
+<li><b>Test on the Mac and on Windows</b> with the 5 steps above (nothing else verifies those two).</li>
+<li><b>Turn on the R2 copy</b> (default if you say nothing: GitHub Release only, the page stays “nothing published”). In Cloudflare → R2 → Manage API tokens → <i>Create User API token</i>: permission <b>Object Read &amp; Write</b>, <b>Apply to specific buckets only → folder-sync-downloads</b>, no expiry. Then the two <code>gh secret set</code> commands and one job re-run (in the handoff).</li>
+<li><b>Deploy</b> is the Vibe Tracks session's: <code>lane/desktop-release</code> merged into <code>claude/folder-sync-v0</code> (your call), then <code>wrangler r2 bucket create folder-sync-downloads</code> once, then the usual deploy. Robotparts.dev/fs/download and vibetracks.dev/fs/download work from that deploy, no app change.</li>
+</ol>
 <h2>Not verified</h2><ul>
 <li><b>Mac and Windows on a device</b>: not run on either (this box is Linux). The 5 steps above are the test.</li>
 <li><b>Windows stop</b>: the engine is still killed on Quit (no CTRL_BREAK yet, <code>TODO(windows)</code> in core.rs), so a sync round in flight at Quit is cut and redone next start.</li>
@@ -184,9 +200,10 @@ def main() -> None:
     parser.add_argument("--evidence", required=True, type=pathlib.Path)
     parser.add_argument("--proof", required=True, type=pathlib.Path)
     parser.add_argument("--out", type=pathlib.Path, default=OUT)
+    parser.add_argument("--branch-sha", required=True)
     args = parser.parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(build(args.evidence, args.proof, args.out))
+    args.out.write_text(build(args.evidence, args.proof, args.out, args.branch_sha))
     print(args.out)
 
 
