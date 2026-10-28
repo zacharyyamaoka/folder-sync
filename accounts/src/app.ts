@@ -42,6 +42,7 @@ import type { Store, Visibility } from "./store.ts";
 import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhost.ts";
 import type { EmailEnv } from "./email.ts";
 import { accountRoute, devicesApi, signInReturn, type GrantRow, type SessionRow } from "./devices.ts";
+import { downloadRoute, type DownloadsBucket } from "./download.ts";
 import { servedFile } from "./ranges.ts";
 import type { CloseOrder } from "./hub.ts";
 
@@ -61,6 +62,8 @@ export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
 	WEB_HOST?: { idFromName(name: string): unknown; get(id: unknown): { run(op: WebOp): Promise<WebAnswer> } };
 	/** The folder's hub (PEP 0005): a Durable Object namespace of hub.ts's FolderHub. Absent, /events answers 503. */
 	HUB?: { idFromName(name: string): unknown; get(id: unknown): { fetch(request: Request): Promise<Response> } };
+	/** The desktop installers' bucket (download.ts), read only. Absent, /fs/download says nothing is published yet. */
+	DOWNLOADS?: DownloadsBucket;
 }
 
 /** A signed-in person, as a session proves them. */
@@ -918,6 +921,8 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 		return first === "signin" ? page(env, app, "Sign in", "", back, head) : page(env, app, "Sign in a machine", "device.js", back, head);
 	}
 	if (first === "account") return accountRoute(request, env, deps, app, rest, method);
+	// public, no session: the desktop installers (PEP 0006), on every app's /fs/ and this Worker's own host
+	if (first === "download") return downloadRoute(request, env, app, rest, method);
 	if (first !== "v1") return fail(404, "not_found", "no such route");
 	if (!deps) return fail(503, "not_configured", "accounts are not set up on this Worker yet");
 	const [what, project, sub, ...more] = rest;
