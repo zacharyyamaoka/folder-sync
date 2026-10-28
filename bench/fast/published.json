@@ -1,0 +1,97 @@
+{
+  "schema": "fast-folder-sync-published/1",
+  "about": "Tools the Fast Folder Sync bench did not run on this machine (bench/fast/CONTRACT.md: a published number is never a results row). Each number is quoted from the source named beside it, with what it actually measured; nothing here was measured by the bench. 'not published' means no vendor or credible third-party number was found.",
+  "accessed": "2026-10-28",
+  "not_run": [
+    {
+      "tool": "Dropbox",
+      "status": "not run (needs a paid or online account)",
+      "latency": [
+        {
+          "value": "2.04 s",
+          "what": "average time for a change to show in the Dropbox web view, from the local drive write (the same page: 2.16 s from the start of an API upload, 0.67 s from the API upload completing; file size and sample count not stated; tests dated around March 2018)",
+          "source": "https://github.com/mattheworiordan/google-drive-dropbox-onedrive-performance-measured",
+          "kind": "independent (one developer's scripts)",
+          "accessed": "2026-10-28"
+        },
+        {
+          "value": "< 6 s",
+          "what": "median time to sync a 50 KB file from one laptop to another (upload on one, timer stopped when the file was visible on the second), macOS, London; Box took almost 25 s in the same test. Per-service medians for the other cells are only in a chart",
+          "source": "https://aem.dropbox.com/cms/content/dam/dropbox/dmep/en-us/assets/pdfs/Dropbox-Sync-Benchmarking-Europe-Full-Report.pdf",
+          "kind": "vendor-commissioned (Principled Technologies for Dropbox, December 2023)",
+          "accessed": "2026-10-28"
+        }
+      ],
+      "lan_sync": {
+        "claim": "\"Enabling LAN sync tells Dropbox to use your LAN to sync files that are stored on your LAN, which may speed up syncing for those files.\" No speed or latency number is given.",
+        "source": "https://help.dropbox.com/sync/lan-sync-overview",
+        "accessed": "2026-10-28"
+      },
+      "idle": "not published"
+    },
+    {
+      "tool": "Resilio Sync",
+      "status": "not run (needs a paid or online account)",
+      "latency": [
+        {
+          "value": "41 s",
+          "what": "time to transfer one 1.36 GB file between two MacBook Pros on the same gigabit switch (LAN), average of three runs; the post says Google Drive, OneDrive and Dropbox were 8x, 11x and 16x slower but gives no times for them. A throughput test, not a small-change latency; publication date not shown on the page",
+          "source": "https://www.resilio.com/blog/sync-speed-test-over-16-times-faster-than-the-cloud",
+          "kind": "vendor (Resilio)",
+          "accessed": "2026-10-28"
+        }
+      ],
+      "small_change_latency": "not published (the help-center article on when synchronization starts, https://help.resilio.com/hc/en-us/articles/204754319-How-soon-does-synchronization-start, returned HTTP 403 to the fetch, so its wording is not quoted here)",
+      "idle": "not published"
+    },
+    {
+      "tool": "Google Drive",
+      "status": "not run (needs a paid or online account)",
+      "latency": [
+        {
+          "value": "22.37 s",
+          "what": "average time for a change to show in the Drive web view, from the local drive write (the same page: 20.17 s from the start of an API upload, 17.42 s from the API upload completing; one 20-row sample ranges 8.65-43.93 s; local Drive File Stream sync not measured because it 'took hours to days or never completed'; March 2018)",
+          "source": "https://github.com/mattheworiordan/google-drive-dropbox-onedrive-performance-measured",
+          "kind": "independent (one developer's scripts)",
+          "accessed": "2026-10-28"
+        }
+      ],
+      "idle": "not published"
+    },
+    {
+      "tool": "OneDrive",
+      "status": "not run (needs a paid or online account)",
+      "latency": "not published as a number: the Principled Technologies report (https://aem.dropbox.com/cms/content/dam/dropbox/dmep/en-us/assets/pdfs/Dropbox-Sync-Benchmarking-Europe-Full-Report.pdf, Dropbox-commissioned, December 2023) shows OneDrive's 50 KB / 25 MB sync medians only as bars in a chart; the mattheworiordan repo names OneDrive but has no OneDrive numbers",
+      "idle": "not published"
+    },
+    {
+      "tool": "iCloud Drive",
+      "status": "not run (needs a paid or online account)",
+      "latency": [
+        {
+          "value": "4.310 s",
+          "what": "elapsed time at which Mac B received the push notification for a 1 MB Cirrus test file uploaded on Mac A; Mac B's automatic download began at about 4.87-4.91 s. Upload-to-notification only, not end-to-end to Mac B's disk (2018, macOS 10.12/10.13)",
+          "source": "https://eclecticlight.co/2018/04/02/inside-icloud-drive-pushed-updates-that-syncing-feeling/",
+          "kind": "independent (log analysis, one run)",
+          "accessed": "2026-10-28"
+        }
+      ],
+      "idle": "not published"
+    },
+    {
+      "tool": "Obsidian Sync",
+      "status": "not run (needs a paid or online account)",
+      "latency": "not published (obsidian.md/help/sync describes change detection and offline queueing but gives no timing)",
+      "idle": "not published"
+    }
+  ],
+  "documented_defaults_of_tools_we_ran": [
+    {
+      "tool": "Syncthing",
+      "claim": "the filesystem watcher \"accumulates changes for 10s (adjustable by fsWatcherDelayS)\"; deleted files are \"further delayed for 1min\"; \"By default the watcher is enabled and full scans are done once per hour\"",
+      "source": "https://docs.syncthing.net/users/syncing.html",
+      "accessed": "2026-10-28",
+      "bench": "variant \"default\" keeps fsWatcherDelayS=10; variant \"tuned\" sets fsWatcherDelayS=1"
+    }
+  ]
+}
