@@ -13,5 +13,13 @@
       "http://localhost:4933"
     ],
     "project": "robotparts"
+  },
+  "vibetracks": {
+    "name": "Vibe Tracks",
+    "origins": [
+      "https://vibetracks.dev",
+      "https://www.vibetracks.dev"
+    ],
+    "project": "vibetracks"
   }
 }
