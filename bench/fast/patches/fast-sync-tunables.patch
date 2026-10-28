@@ -1,3 +1,30 @@
+diff --git a/internal/push/hub.go b/internal/push/hub.go
+index 8815baf..1bdc7b9 100644
+--- a/internal/push/hub.go
++++ b/internal/push/hub.go
+@@ -122,6 +122,11 @@ func (h *Hub) flush(conn *websocket.Conn) {
+ 	}
+ }
+ 
++// BackoffMax caps the reconnect backoff. FOLDER_SYNC_BACKOFF_MAX (a Go duration) overrides it for the bench
++// (bench/fast/patches; never committed). WHY it matters: after a network drop the next dial can land up to this long
++// after the network is back, and with the hub down a machine only polls at its interval.
++var BackoffMax = EnvDuration("FOLDER_SYNC_BACKOFF_MAX", 30*time.Second)
++
+ // Run keeps a socket open until ctx ends, reconnecting with backoff (0.5 s doubling to 30 s, with jitter), or until
+ // the hub says this machine is signed out (ErrSignedOut).
+ func (h *Hub) Run(ctx context.Context) {
+@@ -148,8 +153,8 @@ func (h *Hub) Run(ctx context.Context) {
+ 			return
+ 		case <-time.After(wait):
+ 		}
+-		if backoff *= 2; backoff > 30*time.Second {
+-			backoff = 30 * time.Second
++		if backoff *= 2; backoff > BackoffMax {
++			backoff = BackoffMax
+ 		}
+ 	}
+ }
 diff --git a/internal/push/wait.go b/internal/push/wait.go
 index 9fc08dc..60ad1e0 100644
 --- a/internal/push/wait.go

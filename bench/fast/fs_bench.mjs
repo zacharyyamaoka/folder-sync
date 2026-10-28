@@ -33,8 +33,10 @@ const MAIN = "/home/bam/folder-sync"; // the refs are exported from here; nothin
 const RCLONE = join(MAIN, ".tools", "rclone");
 // WHY poll is a pinned commit: claude/folder-sync-v0 took the push merge (99560d9, 2026-10-28 15:11) after the bench
 // was specified; its first parent, 0db76d4, is the last polling-only v0 (no watcher, no hub), the engine "poll" means
-const REFS = { poll: "0db76d4be572e92f76ed9017edb4779395aa4fe9", push: "lane/fast-sync" };
-const REF_LABELS = { poll: "claude/folder-sync-v0^1", push: "lane/fast-sync" };
+// WHY head: claude/folder-sync-v0 took the push merge (99560d9) and PEP 0007 history on 2026-10-28; "head" measures what
+// is on the deployed branch now (push + history), untuned, so a regression from history writes shows up beside "push"
+const REFS = { poll: "0db76d4be572e92f76ed9017edb4779395aa4fe9", push: "lane/fast-sync", head: "claude/folder-sync-v0" };
+const REF_LABELS = { poll: "claude/folder-sync-v0^1", push: "lane/fast-sync", head: "claude/folder-sync-v0" };
 const PATCH = join(HERE, "patches", "fast-sync-tunables.patch");
 const CACHE = join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "folder-sync-bench");
 const OUT = join(HERE, "results", "raw");
@@ -52,8 +54,8 @@ const DIRECTIONS = ["m2m", "m2w", "w2m", "m2a", "offline"];
 const WORKLOADS = { "1k": 1024, "100k": 100 * 1024, "10m": 10 * 1024 * 1024, "200m": 200 * 1024 * 1024, many100: 1024, storm: 1024 };
 const FAULTS = ["drop", "sleep"];
 const TIMEOUT_MS = { "1k": 60_000, "100k": 60_000, "10m": 120_000, "200m": 300_000, many100: 120_000, storm: 60_000, offline: 180_000 };
-const TUNABLES = { debounce: "FOLDER_SYNC_DEBOUNCE", fallback: "FOLDER_SYNC_FALLBACK", discover_every: "FOLDER_SYNC_DISCOVER_EVERY" };
-const DEFAULTS_MS = { debounce_ms: 100, fallback_ms: 60_000, discover_every_ms: 300_000, interval_ms: 10_000 };
+const TUNABLES = { debounce: "FOLDER_SYNC_DEBOUNCE", fallback: "FOLDER_SYNC_FALLBACK", discover_every: "FOLDER_SYNC_DISCOVER_EVERY", backoff_max: "FOLDER_SYNC_BACKOFF_MAX" };
+const DEFAULTS_MS = { debounce_ms: 100, fallback_ms: 60_000, discover_every_ms: 300_000, backoff_max_ms: 30_000, interval_ms: 10_000 };
 const OPS_WINDOW_MS = 15_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const now = () => performance.timeOrigin + performance.now();
@@ -97,7 +99,7 @@ function options(argv) {
 		else throw new Error(`unknown argument ${a}`);
 	}
 	if (o.verb !== "run") throw new Error("usage: node bench/fast/fs_bench.mjs run --variant poll|push [options]");
-	if (!REFS[o.variant]) throw new Error("--variant is poll or push");
+	if (!REFS[o.variant]) throw new Error("--variant is poll, push or head");
 	if (!Number.isInteger(o.trials) || o.trials < 1) throw new Error("--trials is a positive integer");
 	if (!(o.idleS >= 0)) throw new Error("--idle-s is a number of seconds");
 	for (const [k, v] of Object.entries(o.config)) {
@@ -121,7 +123,8 @@ function options(argv) {
 /** The tunables in force, in ms, as each row's `config` carries them. */
 function configOf(o, code) {
 	const c = { code, interval_ms: o.config.interval ? durationMs(o.config.interval) : DEFAULTS_MS.interval_ms, discover_every_ms: o.config.discover_every ? durationMs(o.config.discover_every) : DEFAULTS_MS.discover_every_ms };
-	if (o.variant === "push") {
+	if (o.variant !== "poll") {
+		c.backoff_max_ms = o.config.backoff_max ? durationMs(o.config.backoff_max) : DEFAULTS_MS.backoff_max_ms;
 		c.debounce_ms = o.config.debounce ? durationMs(o.config.debounce) : DEFAULTS_MS.debounce_ms;
 		c.fallback_ms = o.config.fallback ? durationMs(o.config.fallback) : DEFAULTS_MS.fallback_ms;
 		c.patched = Object.keys(TUNABLES).some((k) => o.config[k]);

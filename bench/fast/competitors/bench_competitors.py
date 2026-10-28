@@ -491,7 +491,7 @@ class Syncthing(Tool):
     name = "syncthing"
     # WHY two variants: Syncthing's documented fsWatcherDelayS default is 10 s, which dominates any latency number;
     # "tuned" is the smallest delay a user can set, rescanIntervalS left at its default.
-    presets = {"default": {}, "tuned": {"fsWatcherDelayS": 1}}
+    presets = {"default": {}, "tuned": {"fsWatcherDelayS": 1}, "fast": {"fsWatcherDelayS": 0.1}}
     cut_what = "both proxies (A dials B through B's, B dials A through A's), so B has no path to A"
 
     def start(self):
