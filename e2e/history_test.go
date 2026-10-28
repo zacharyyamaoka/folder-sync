@@ -460,6 +460,8 @@ func TestHistory(t *testing.T) {
 		plant(fmt.Sprintf("_changes/%s/%s/%012d.json", project, idA, 900), "{}", old)
 		plant("_changes/"+project+"/"+idA+"/pulls/"+old.Format("2006-01-02T15:04:05.000Z")+".json", "{}", now) // the key's at counts
 		plant("_requests/"+project+"/"+idA+"/0f0e0d0c-0b0a-4908-8706-050403020100.json", "{}", old)
+		// a stray: an object under A's prefix that no manifest lists; the reconcile keeps it as an unlisted version
+		plant(project+"/hosts/"+idA+"/stray.md", "a stray", time.Time{})
 		// due: never pruned, and a reconcile due
 		state := stateDir(t, a)
 		os.Remove(filepath.Join(state, "prune.json"))
@@ -497,6 +499,18 @@ func TestHistory(t *testing.T) {
 		}
 		if kept := w.versions(idA, "notes/plan.md"); len(kept) == 0 {
 			t.Error("the prune removed this hour's versions of notes/plan.md")
+		}
+		if _, live := w.object(project + "/hosts/" + idA + "/stray.md"); live {
+			t.Error("the stray is still under A's prefix")
+		}
+		strays := w.versions(idA, "stray.md")
+		if len(strays) != 1 {
+			t.Errorf("the stray's history: %v", strays)
+		}
+		for id, content := range strays {
+			if !strings.HasSuffix(id, "_unlisted") || content != "a stray" {
+				t.Errorf("the stray is kept as %s: %q", id, content)
+			}
 		}
 		w.ops.take()
 	})
