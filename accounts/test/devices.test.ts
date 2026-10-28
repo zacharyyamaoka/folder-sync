@@ -487,11 +487,18 @@ test("judge r1 #1: keys never live past the last successful sign-in check plus t
 	let now = Date.parse("2026-10-27T12:00:00Z");
 	const checks: number[] = [];
 	const made = fakeDeps(s3, sessions(), { now: () => now });
+	// every check that found the session alive: the sign-in itself, and the one before the keys are signed
 	const person = made.deps.person;
 	made.deps.person = async (...args) => {
 		const found = await person(...args);
 		if (found) checks.push(now);
 		return found;
+	};
+	const listed = made.deps.sessions!;
+	made.deps.sessions = async (userId) => {
+		const rows = await listed(userId);
+		if (rows.some((row) => row.id === "sess-owner-laptop")) checks.push(now);
+		return rows;
 	};
 	// the quota measurement takes 200 s of the clock
 	made.deps.s3 = async (request) => {

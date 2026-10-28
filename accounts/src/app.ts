@@ -358,6 +358,13 @@ async function credentials(request: Request, env: Env, deps: Deps, app: App | nu
 		if (!(error instanceof TooOld)) throw error;
 		over = error.message;
 	}
+	// WHY the session checked again (judge r1 #1): the quota work above can take a while, and a device revoked (or
+	// signed out) meanwhile gets no keys. The keys' clock (deps.now() below, nothing awaited in between) starts at this
+	// check, so a slow refresh never stretches a revocation past SYNC_CREDENTIAL_TTL_S. (A stand-in without sessions,
+	// a unit test's, cannot revoke and skips it.)
+	if (deps.sessions && !(await deps.sessions(person.userId)).some((row) => row.id === person.sessionId)) {
+		return fail(401, "signed_out", "this machine is signed out (signed out or revoked): run folder-sync login");
+	}
 	if (over) return json(200, { ...(await mint(env, userRoot(person.userId), "object-read-only", ttlOf(env), deps.now())), ReadOnly: true, Reason: over });
 	const minted = await mint(env, userRoot(person.userId), "object-read-write", ttlOf(env), deps.now()); // fs-mutation: the session's root
 	return json(200, minted);
