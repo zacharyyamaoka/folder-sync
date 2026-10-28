@@ -59,6 +59,11 @@ Usage:
                                                                      --json prints folder-sync-status/1
   folder-sync projects [--json] [--bucket NAME]                      the projects under the key's account root
                                                                      (one LIST): what a new machine can join
+  folder-sync history [--json] [--dir PATH] PATH                     a file's kept versions (30 days, staggered)
+  folder-sync restore [--version ID] [--dir PATH] PATH               put a kept version back (this machine's file: now;
+                                                                     another's: asks that machine)
+  folder-sync deleted [--restore PREFIX] [--json] [--dir PATH]       this machine's deleted files; --restore puts back
+                                                                     every one under PREFIX
   folder-sync version
 
 The key comes from FOLDER_SYNC_ACCESS_KEY_ID, FOLDER_SYNC_SECRET_ACCESS_KEY and
@@ -99,6 +104,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdStatus(args[1:], stdout)
 	case "projects":
 		err = cmdProjects(args[1:], stdout, stderr)
+	case "history":
+		err = cmdHistory(args[1:], stdout)
+	case "restore":
+		err = cmdRestore(args[1:], stdout)
+	case "deleted":
+		err = cmdDeleted(args[1:], stdout)
 	case "version":
 		l := mustLayout()
 		v, _ := rclone.Version(rcloneBinary(l), l)
@@ -513,6 +524,7 @@ func watchLoop(p *syncer.Project, out io.Writer, noPush bool, ev *eventWriter) e
 		started := time.Now()
 		result, err := p.Round(ctx, opts)
 		opts = syncer.Options{}
+		ev.fileEvents(result)
 		if err != nil {
 			if ctx.Err() != nil {
 				break
@@ -672,9 +684,12 @@ func fetched(r syncer.Result) int {
 
 func printResult(out io.Writer, p *syncer.Project, r syncer.Result) {
 	stamp := time.Now().Format("15:04:05")
-	fmt.Fprintf(out, "%s push: %d uploaded, %d deleted to _trash/", stamp, len(r.Uploaded), len(r.Deleted))
+	fmt.Fprintf(out, "%s push: %d uploaded, %d deleted", stamp, len(r.Uploaded), len(r.Deleted))
 	if len(r.HeldDeletes) > 0 {
 		fmt.Fprintf(out, ", %d deletes held (max_delete)", len(r.HeldDeletes))
+	}
+	if len(r.HeldCopies) > 0 {
+		fmt.Fprintf(out, ", %d held (their old version's copy to history failed)", len(r.HeldCopies))
 	}
 	if r.ManifestWritten {
 		fmt.Fprint(out, ", manifest rewritten")
@@ -687,7 +702,7 @@ func printResult(out io.Writer, p *syncer.Project, r syncer.Result) {
 		fmt.Fprintf(out, "  ↑ %s\n", path)
 	}
 	for _, path := range r.Deleted {
-		fmt.Fprintf(out, "  ✗ %s → _trash/\n", path)
+		fmt.Fprintf(out, "  ✗ %s\n", path)
 	}
 	for _, peer := range r.Peers {
 		state := fmt.Sprintf("%d fetched, %d removed", peer.Fetched, peer.Removed)
@@ -802,7 +817,7 @@ func cmdPublish(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "Manifest up to date: %s/hosts/%s/manifest.json (%d uploaded, %d deleted to _trash/, rewritten: %v)\n",
+	fmt.Fprintf(out, "Manifest up to date: %s/hosts/%s/manifest.json (%d uploaded, %d deleted, rewritten: %v)\n",
 		p.Config.Project, p.Host.ID, len(result.Uploaded), len(result.Deleted), result.ManifestWritten)
 	fmt.Fprintf(out, "Apps read it per docs/CONTRACT.md: bucket %q, prefix %s/hosts/.\n", p.Config.Bucket, p.Config.Project)
 	if !*withViewer {

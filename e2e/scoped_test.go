@@ -211,21 +211,21 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 		if err != nil || string(got) != "written on A2\n" {
 			t.Fatalf("A1 lacks A2's file (%v): %s", err, out)
 		}
-		// an overwrite and a delete: server-side copies into <root>_trash/, a move out of hosts/
+		// an overwrite and a delete: server-side copies into <root>_history/ (PEP 0007), a delete out of hosts/
 		writeFile(t, filepath.Join(a1.folder, "tracks", "a.md"), "A's track, edited\n", time.Time{})
 		writeFile(t, filepath.Join(a1.folder, "tracks", "gone.md"), "short-lived\n", time.Time{})
 		w.must(a1, "sync", "--once")
 		os.Remove(filepath.Join(a1.folder, "tracks", "gone.md"))
 		w.must(a1, "sync", "--once")
-		trash := w.objects(rootA + "_trash/home/" + idA1)
+		kept := w.objects(rootA + "_history/home/" + idA1)
 		var old, gone bool
-		for _, key := range trash {
+		for _, key := range kept {
 			content, _ := w.object(key)
-			old = old || (strings.HasSuffix(key, "/tracks/a.md") && content == "A's track\n")
-			gone = gone || (strings.HasSuffix(key, "/tracks/gone.md") && content == "short-lived\n")
+			old = old || (strings.Contains(key, "/tracks/a.md/") && content == "A's track\n")
+			gone = gone || (strings.Contains(key, "/tracks/gone.md/") && content == "short-lived\n")
 		}
 		if !old || !gone {
-			t.Fatalf("A's trash under its root holds %v", trash)
+			t.Fatalf("A's history under its root holds %v", kept)
 		}
 		w.must(a2, "sync", "--once")
 		if got, _ := os.ReadFile(filepath.Join(a2.folder, "hosts", idA1, "tracks", "a.md")); string(got) != "A's track, edited\n" {
@@ -465,9 +465,9 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 		if _, ok := w.object(rootA + "home/hosts/" + idA1 + "/tracks/new.md"); ok {
 			t.Fatal("an upload went through with read-only keys")
 		}
-		for _, key := range w.objects(rootA + "_trash/home/" + idA1) {
+		for _, key := range w.objects(rootA + "_history/home/" + idA1) {
 			if content, _ := w.object(key); content == "A's track, edited\n" {
-				t.Fatalf("the delete went to the trash, which still counts: %s", key)
+				t.Fatalf("the delete went to history, which still counts: %s", key)
 			}
 		}
 		if got, err := os.ReadFile(filepath.Join(a1.folder, "hosts", idA2, "tracks", "while-over.md")); err != nil || string(got) != "written while A1 was over quota\n" {

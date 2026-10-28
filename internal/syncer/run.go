@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"folder-sync/internal/history"
 	"folder-sync/internal/layout"
 	"folder-sync/internal/names"
 )
@@ -80,9 +81,16 @@ type Options struct {
 	// ForceDiscover looks for new peers this round (one delimiter LIST) instead of waiting for DiscoverEvery.
 	// WHY: an app's "sync now" (vt sync now) should find a machine that joined a minute ago, not in 5 minutes.
 	ForceDiscover bool
+	// Restore is a restore of this machine's own files to carry out in this round, after its push (folder-sync
+	// restore); its outcome is Result.Restore.
+	Restore *history.Request
 }
 
-// Round runs one round: (reconcile if due), push, pull, then writes last-sync.json.
+// Round runs one round: (reconcile if due), push, the restores it is asked for, pull, then the round's change and
+// pull records, (the daily prune), and last-sync.json.
+// WHY restore requests are looked for only with peer discovery (a reconcile, --discover, or every 5 minutes), not at
+// the start of every `sync --once`: a round with no changes makes no listing (docs/peps/0001 §4), and a `sync --once`
+// run less often than every 5 minutes discovers on every run anyway. Local requests are a folder read: every round.
 func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 	lock, err := p.AcquireLock()
 	if err != nil {
@@ -96,8 +104,11 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 	last.Schema = LastSyncSchema
 	last.Project, last.Bucket, last.Folder, last.Root = p.Config.Project, p.Config.Bucket, p.Folder, p.Root
 	last.HostID, last.HostName = p.Host.ID, p.Host.Name
+	p.prevRoundStart, _ = time.Parse(time.RFC3339Nano, last.RoundStarted)
+	wasSynced := last.OK && last.LastCleanRun != "" && last.LastCleanRun == last.RoundFinished
 	last.RoundStarted = started.UTC().Format(time.RFC3339Nano)
 	p.reportedSkips = map[string]bool{}
+	p.behind = false
 	for _, s := range last.Skipped {
 		p.reportedSkips[s.Path] = true
 	}
@@ -112,13 +123,15 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 		step = time.Now()
 		// WHY no reconcile with read-only keys (review r2 #7): it moves strays to the trash, a write; peers are still
 		// looked for, so the pull below finds them
-		reconcile := opts.ForceReconcile || ReconcileDue(last, started)
+		reconcile := opts.ForceReconcile || ReconcileDue(last, started) || p.reconcileRequested()
+		discovered := false
 		if reconcile && !p.Creds.ReadOnly {
 			if err := p.Reconcile(ctx, stamp, &result); err != nil {
 				return fmt.Errorf("reconcile: %w", err)
 			}
 			last.LastReconcile = p.Now().UTC().Format(time.RFC3339Nano)
 			last.LastDiscover = last.LastReconcile
+			discovered = true
 		} else if reconcile || opts.ForceDiscover || due(last.LastDiscover, DiscoverEvery, started) {
 			if reconcile && p.Creds.ReadOnly {
 				if err := p.ReconcileReadOnly(); err != nil {
@@ -129,7 +142,20 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 				return fmt.Errorf("discover peers: %w", err)
 			}
 			last.LastDiscover = p.Now().UTC().Format(time.RFC3339Nano)
+			discovered = true
 			p.Trace.Since("step", step, map[string]any{"name": "discover"})
+		}
+		// restore requests (read-only keys can write nothing, so they wait)
+		var requests []pendingRequest
+		if !p.Creds.ReadOnly {
+			requests = p.localRequests()
+			if discovered {
+				asked, err := p.bucketRequests()
+				if err != nil {
+					p.say("restore requests: %v (looked for again with the next peer scan)", p.Creds.Scrub(err.Error()))
+				}
+				requests = append(requests, asked...)
+			}
 		}
 		// WHY an empty folder still pulls (review r1 #6): the refusal guards this machine's files in the bucket, not
 		// its copies of the others'; an edit on another machine or the web must still arrive. The round still
@@ -138,8 +164,9 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 		var refused error
 		var empty *EmptyFolderError
 		var readOnly *ReadOnlyError
+		var copyFailed *CopyError // a history copy that failed held its path: the others went, and the round pulls
 		step = time.Now()
-		if err := p.Push(ctx, stamp, &result); errors.As(err, &empty) || errors.As(err, &readOnly) {
+		if err := p.Push(ctx, stamp, &result); errors.As(err, &empty) || errors.As(err, &readOnly) || errors.As(err, &copyFailed) {
 			refused = fmt.Errorf("push: %w", err)
 		} else if err != nil {
 			return fmt.Errorf("push: %w", err)
@@ -147,12 +174,36 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 			last.LastPush = p.Now().UTC().Format(time.RFC3339Nano)
 		}
 		p.Trace.Since("step", step, map[string]any{"name": "push", "uploaded": len(result.Uploaded), "deleted": len(result.Deleted), "manifest": result.ManifestWritten})
+		// WHY no restore after a refused push: a restore first publishes what is on disk, and this round could not
+		if refused == nil {
+			for _, pr := range requests {
+				p.applyRequest(ctx, stamp, pr, &result)
+			}
+			if opts.Restore != nil {
+				outcome := p.applyRequest(ctx, stamp, pendingRequest{req: *opts.Restore}, &result)
+				result.Restore = &outcome
+			}
+		} else if opts.Restore != nil {
+			return refused
+		}
+		// the change records go while the pull runs: readers wait on the manifest, never on its record
+		flushed := make(chan error, 1)
+		go func() { flushed <- p.FlushRecords() }()
+		defer func() {
+			if err := <-flushed; err != nil {
+				p.say("change records: %v (sent again next round)", p.Creds.Scrub(err.Error()))
+			}
+		}()
 		step = time.Now()
 		if opts.PushOnly {
 			return refused
 		}
-		if err := p.Pull(ctx, &result); err != nil {
-			return errors.Join(refused, fmt.Errorf("pull: %w", err))
+		pullErr := p.Pull(ctx, &result)
+		if err := p.queuePulls(result.Events, p.Now()); err != nil {
+			p.say("the pull record: %v", err)
+		}
+		if pullErr != nil {
+			return errors.Join(refused, fmt.Errorf("pull: %w", pullErr))
 		}
 		last.LastPull = p.Now().UTC().Format(time.RFC3339Nano)
 		fetchedFiles := 0
@@ -162,6 +213,16 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 		p.Trace.Since("step", step, map[string]any{"name": "pull", "peers": len(result.Peers), "fetched": fetchedFiles})
 		return refused
 	}()
+
+	// the pull record, and anything the flush above could not send
+	if err := p.FlushRecords(); err != nil && runErr == nil {
+		p.say("change records: %v (sent again next round)", p.Creds.Scrub(err.Error()))
+	}
+	if result.Reconciled && runErr == nil && p.pruneDue(p.Now()) {
+		if _, err := p.Prune(); err != nil {
+			p.say("prune: %v (tried again with the next reconcile)", p.Creds.Scrub(err.Error()))
+		}
+	}
 
 	finished := p.Now()
 	p.Trace.Event("round", map[string]any{"start": started.UnixMilli(), "ms": finished.Sub(started).Milliseconds(), "ok": runErr == nil})
@@ -200,6 +261,12 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 	}
 	if runErr == nil && len(result.Skipped) == 0 && len(result.HeldDeletes) == 0 && len(result.Conflicts) == 0 {
 		last.LastCleanRun = last.RoundFinished
+		// synced: a clean round, nothing local pending, every known peer's latest manifest applied. Said when it
+		// becomes true, and after a round that moved something, not on every quiet round.
+		moved := len(result.Uploaded)+len(result.Deleted)+last.Fetched+last.RemovedCopies > 0
+		if !p.behind && (moved || !wasSynced) {
+			result.Events = append(result.Events, p.fileEvent("synced", finished))
+		}
 	}
 	if err := writeJSON(filepath.Join(p.StateDir, "last-sync.json"), last); err != nil && runErr == nil {
 		runErr = err

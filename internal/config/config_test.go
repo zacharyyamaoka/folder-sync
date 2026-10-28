@@ -93,3 +93,36 @@ func TestProjectFromFolder(t *testing.T) {
 		}
 	}
 }
+
+// TestNoHistoryDefaultAndEmpty (PEP 0007 §10.6): an absent no_history is ["*.log"]; `no_history = []` keeps every
+// version, *.log included; a written config round-trips its own list.
+func TestNoHistoryDefaultAndEmpty(t *testing.T) {
+	for name, tc := range map[string]struct {
+		line string
+		want []string
+	}{
+		"absent": {"", []string{"*.log"}},
+		"empty":  {"no_history = []\n", []string{}},
+		"own":    {"no_history = [\"*.csv\", \"big/\"]\n", []string{"*.csv", "big/"}},
+	} {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, FileName), []byte("project = \"demo\"\nbucket = \"folder-sync\"\n"+tc.line), 0o644)
+		got, err := Load(dir)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !reflect.DeepEqual(got.NoHistory, tc.want) {
+			t.Errorf("%s: no_history = %#v, want %#v", name, got.NoHistory, tc.want)
+		}
+		if err := Write(dir, got); err != nil {
+			t.Fatal(err)
+		}
+		again, err := Load(dir)
+		if err != nil || !reflect.DeepEqual(again.NoHistory, tc.want) {
+			t.Errorf("%s: after Write, no_history = %#v (%v)", name, again.NoHistory, err)
+		}
+	}
+	if New("demo", "folder-sync").NoHistory[0] != "*.log" {
+		t.Error("a new config starts with no_history = [\"*.log\"]")
+	}
+}
