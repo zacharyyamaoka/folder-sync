@@ -255,7 +255,8 @@ test("GET /fs/account: the whole page with no script: who, usage, devices with R
 	assert.equal(answer.headers.get("Referrer-Policy"), "same-origin");
 	const html = await answer.text();
 	assert.ok(!/<script/i.test(html), "no script: the page works with JavaScript off");
-	assert.ok(!/(href|action|src)="(https?:)?\/\//.test(html), "every link stays on the app's own domain");
+	// every link stays on the app's own domain, but for the list of the apps themselves
+	assert.ok(!/(href|action|src)="(https?:)?\/\//.test(html.replace(/<nav class="fs-apps"[\s\S]*?<\/nav>/, "")), "every link stays on the app's own domain");
 	assert.ok(html.includes("owner@example.com"));
 	assert.match(html, /3(\.0)? MiB of 1 GiB/);
 	assert.match(html, /1 of 100,000 files · measured 2026-10-27 12:00 UTC/, "a cached figure says when it was taken");
@@ -276,6 +277,28 @@ test("GET /fs/account: the whole page with no script: who, usage, devices with R
 	assert.ok(!html.includes("sister") && !html.includes("tok-") && !html.includes("token-"), "no one else's devices, no tokens");
 	assert.match(html, /<form method="post" action="\/fs\/account\/sign-out">[\s\S]*?<button[^>]*>Sign out<\/button>/);
 	assert.ok(html.includes('href="/fs/site/account.css"'));
+});
+
+test("sign-in on the accounts Worker's own host lands on /fs/account (no return, or return=/); on an app's origin, on /", async () => {
+	const { deps } = fakeDeps(new MemoryS3(ENDPOINT, BUCKET));
+	const back = async (origin: string, query = "") => {
+		const html = await (await call(handle, env(), deps, `/fs/signin${query}`, { origin })).text();
+		return /<meta name="fs-return" content="([^"]*)">/.exec(html)?.[1];
+	};
+	// Zach's first sign-in (2026-10-28): no return on the Worker's own host landed on "/", which is a 404 there
+	assert.equal(await back(OWN), "/fs/account");
+	assert.equal(await back(OWN, "?return=/"), "/fs/account");
+	assert.equal(await back(OWN, "?return=%2Fsaved%2F"), "/saved/", "an explicit path elsewhere is kept");
+	assert.equal(await back(SITE), "/");
+	assert.equal(await back(SITE, "?return=/"), "/");
+	// and there, signed in, the page names who you are and offers the way back to your apps
+	const html = await (await call(handle, env(), deps, "/fs/account", { origin: OWN, headers: cookie("tok-owner-browser") })).text();
+	assert.match(html, /Signed in as <strong>owner@example\.com<\/strong>/);
+	const nav = /<nav class="fs-apps"[\s\S]*?<\/nav>/.exec(html)?.[0] || "";
+	assert.match(nav, /Back to your apps/);
+	assert.match(nav, /<a href="https:\/\/robotparts\.dev">Robot Parts<\/a>/);
+	assert.match(nav, /<a href="https:\/\/vibetracks\.dev">[^<]+<\/a>/);
+	assert.ok(!nav.includes("127.0.0.1") && !nav.includes(OWN), "a demo origin and the accounts host itself are not apps to go back to");
 });
 
 test("the account page's forms: Revoke (303 back, the device gone), revoking this browser or Sign out signs out; signed out the page says so", async () => {
