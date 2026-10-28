@@ -804,6 +804,9 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 		if err != nil {
 			return pr, err
 		}
+		// WHY a stop may cut this fetch, unlike the manifest publish (Push): the peer's manifest and ETag are kept
+		// only below, once its files are in, so the next round redoes a cut fetch (the manifest read again, 200 not
+		// 304, then what is missing) and nothing is lost; making the stop wait would hold it as long as the fetch.
 		if _, err := p.Rclone.Run(ctx, "copy", rclone.Path(p.Config.Bucket, p.HostPrefix(peerID)), localRoot,
 			"--files-from-raw", list, "--no-traverse"); err != nil {
 			return pr, err
