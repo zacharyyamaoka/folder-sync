@@ -67,7 +67,7 @@ Two reference readers implement this page and are tested against a live stand-in
 | `size`, `sha256` | The content. A reader may verify `sha256` after a GET. |
 | `mtime` | The source file's modification time on its machine, nanoseconds where the OS has them. |
 | `written_at` | When this host uploaded this content. |
-| `object_etag` | Optional. The stored object's ETag as the store answered right after this host uploaded it, without its quotes (an MD5 in hex, or `<hex>-<parts>` for a multipart upload; `^[0-9A-Za-z-]{1,128}$`). A reader may fetch a byte range of exactly this version with `If-Match: "<object_etag>"` (a 412 means the object moved on: read the manifest again), instead of the whole file to check `sha256`. Absent when the writer did not learn it; a reader then reads the whole file. |
+| `object_etag` | Optional. The stored object's ETag as the store answered right after this host uploaded it, without its quotes (an MD5 in hex, or `<hex>-<parts>` for a multipart upload; `^[0-9A-Za-z-]{1,128}$`). A reader may fetch a byte range of exactly this version with `If-Match: "<object_etag>"` (a 412 means the object moved on: read the manifest again), instead of the whole file to check `sha256`. Absent when the writer did not learn it, or could not prove it is the object whose `sha256` this entry carries (the CLI records it only when it is the MD5 of the very bytes it hashed, so a multipart upload's ETag is never recorded); a reader then reads the whole file. A writer must never pair one version's `sha256` with another version's `object_etag`. |
 
 ## How an app lists and reads a project
 
