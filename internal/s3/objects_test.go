@@ -148,3 +148,30 @@ func TestDeleteAndGetToFile(t *testing.T) {
 		t.Fatalf("404: %v", err)
 	}
 }
+
+// TestBusyAnswersAreSentAgain: a 5xx is sent again, body and all, and a 4xx is not.
+func TestBusyAnswersAreSentAgain(t *testing.T) {
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(data))
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/denied"):
+			w.WriteHeader(http.StatusForbidden)
+		case len(bodies) == 1:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	client := &Client{Endpoint: server.URL, Region: "auto", AccessKeyID: "key", SecretAccessKey: "secret"}
+	if _, err := client.Put("bkt", "k", []byte("record"), "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != 2 || bodies[1] != "record" {
+		t.Fatalf("bodies %q", bodies)
+	}
+	bodies = nil
+	if err := client.Delete("bkt", "denied"); err == nil || len(bodies) != 1 {
+		t.Fatalf("a 403 is final: %v, %d requests", err, len(bodies))
+	}
+}
