@@ -25,6 +25,7 @@
 // - `folder-sync logout`, then `credentials` exits 3; signing the browser out makes /fs/v1/me 401.
 
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join, resolve } from "node:path";
@@ -244,6 +245,9 @@ async function run(stack, cli) {
 	const pushed = fsync(cli, homeA, site, ["sync", "--once", "--dir", folderA]);
 	check("sync --once pushes saved/y.json", pushed.code === 0 && pushed.out.includes("saved/y.json"), pushed.out.trim().split("\n").slice(0, 3).join(" · "));
 	const hostA = JSON.parse(readFileSync(join(homeA, ".folder-sync", "host.json"), "utf8")).id;
+	const machineManifest = JSON.parse(readFileSync(join(STATE, "s3", stack.bucket, root, PROJECT, "hosts", hostA, "manifest.json"), "utf8"));
+	const yEntry = machineManifest.files.find((f) => f.path === "saved/y.json");
+	check("the CLI's manifest names y.json's stored version: object_etag is the store's ETag for it (its MD5 here)", yEntry?.object_etag === createHash("md5").update(yText).digest("hex"), yEntry);
 	const view = await (await a.fetch(`/fs/v1/folders/${PROJECT}`)).json();
 	check("GET /fs/v1/folders/robotparts lists saved/y.json under A's machine and saved/x.json under the web host",
 		view.owner === meA.user.id && view.visibility === "private"
@@ -367,6 +371,10 @@ async function run(stack, cli) {
 	const account2 = existsSync(account2Path) ? JSON.parse(readFileSync(account2Path, "utf8")) : null;
 	check("a second machine of A's signs in (folder-sync login, approved by A's browser)", second.exit === 0 && !!account2?.token, `${second.out.trim().split("\n").pop()} ${second.err.trim()}`);
 	const bearer2 = { Authorization: `Bearer ${account2?.token}` };
+	const grantAsked = await (await fetch(`${site}/fs/api/auth/device/code`, { method: "POST", headers: { "Content-Type": "application/json", Origin: site }, body: JSON.stringify({ client_id: "folder-sync" }) })).json();
+	await fetch(`${site}/fs/api/auth/device?user_code=${encodeURIComponent(grantAsked.user_code)}`, { headers: { ...bearer2, Origin: site } });
+	const byMachine = await fetch(`${site}/fs/api/auth/device/approve`, { method: "POST", headers: { ...bearer2, Origin: site, "Content-Type": "application/json" }, body: JSON.stringify({ userCode: grantAsked.user_code }) });
+	check("a machine's bearer cannot approve another device code (only a browser session can)", byMachine.status === 403, byMachine.status);
 	const itself = await (await fetch(`${site}/fs/v1/devices`, { headers: bearer2 })).json();
 	const secondId = itself.devices?.find((d) => d.current)?.id;
 	const devList = await a.fetch("/fs/v1/devices");
