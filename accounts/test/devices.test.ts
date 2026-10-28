@@ -252,7 +252,8 @@ test("GET /fs/account: the whole page with no script: who, usage, devices with R
 	assert.ok(!/(href|action|src)="(https?:)?\/\//.test(html), "every link stays on the app's own domain");
 	assert.ok(html.includes("owner@example.com"));
 	assert.match(html, /3(\.0)? MiB of 1 GiB/);
-	assert.match(html, /1 of 100,000 files/);
+	assert.match(html, /1 of 100,000 files · measured 2026-10-27 12:00 UTC/, "a cached figure says when it was taken");
+	assert.equal((html.match(/owner@example\.com/g) || []).length, 1, "no name: the email once, not twice");
 	assert.match(html, /within 5 minutes/);
 	// each device: its name (or Unnamed device), kind, first-seen date, and a Revoke form for exactly its id
 	for (const [id, name] of [["sess-owner-browser", "Chrome on Linux"], ["sess-owner-laptop", "zach-laptop"], ["sess-owner-old", "Unnamed device"]]) {

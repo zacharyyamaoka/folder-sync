@@ -201,7 +201,7 @@ const count = (n: number) => n.toLocaleString("en-US");
 async function usageLine(env: Env, deps: Deps, userId: string): Promise<string> {
 	const quota = quotaOf(env);
 	const root = userRoot(userId);
-	let used: { bytes: number; objects: number; partial?: boolean } | null;
+	let used: { bytes: number; objects: number; measured_at?: string; partial?: boolean } | null;
 	let over: string | null = null;
 	try {
 		const bucket = new S3Bucket(await mint(env, root, "object-read-only", READ_TTL_S, deps.now()), deps.s3);
@@ -219,7 +219,9 @@ async function usageLine(env: Env, deps: Deps, userId: string): Promise<string> 
 		return '<p data-testid="fs-usage">Storage use can\'t be measured right now.</p>';
 	}
 	if (!used) return '<p data-testid="fs-usage">Storage use is being measured: reload in a minute.</p>';
-	const figures = `${used.partial ? "over " : ""}${size(used.bytes)} of ${size(quota.bytes)} · ${count(used.objects)} of ${count(quota.objects)} files`;
+	// WHY when: the figure is the cached measurement (quota.ts), up to QUOTA_RECHECK_S old, never presented as live
+	const when = used.measured_at && !Number.isNaN(Date.parse(used.measured_at)) ? ` · measured ${new Date(used.measured_at).toISOString().slice(0, 16).replace("T", " ")} UTC` : "";
+	const figures = `${used.partial ? "over " : ""}${size(used.bytes)} of ${size(quota.bytes)} · ${count(used.objects)} of ${count(quota.objects)} files${when}`;
 	return `<p data-testid="fs-usage">${escapeAttr(figures)}</p>${over ? `<p class="fs-error" data-testid="fs-over">${escapeAttr(over)}</p>` : ""}`;
 }
 
@@ -291,7 +293,7 @@ ${notice(env, done === "signed-out" ? done : null)}<p>You're not signed in here.
 		? `<ul class="fs-devices" data-testid="fs-devices">\n${list.map((d) => deviceItem(d.device, d.agent, person.userId)).join("\n")}\n</ul>`
 		: '<p class="fs-small">Devices are not set up on this server yet.</p>';
 	return shell(app, `<h1>Your account</h1>
-${notice(env, done)}<p class="fs-who"><strong>${escapeAttr(person.name || person.email)}</strong><br><span class="fs-small">${escapeAttr(person.email)}</span></p>
+${notice(env, done)}<p class="fs-who">${person.name ? `<strong>${escapeAttr(person.name)}</strong><br><span class="fs-small">${escapeAttr(person.email)}</span>` : `<strong>${escapeAttr(person.email)}</strong>`}</p>
 <h2>Storage</h2>
 ${await usageLine(env, deps, person.userId)}
 <h2>Devices</h2>
