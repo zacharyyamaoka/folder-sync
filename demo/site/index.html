@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>folder-sync demo</title>
+<meta name="description" content="Point folder-sync at a folder: it is on every computer you use, and here.">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/demo.css">
+<!-- The integration every app uses (docs/API.md "The element"): this line, and <folder-sync-status> below. -->
+<script type="module" src="/fs/ui/v1/folder-sync.js"></script>
+<script type="module" src="/demo.js"></script>
+</head>
+<body>
+<header class="top">
+  <b class="name">folder-sync <span class="muted">demo</span></b>
+  <span class="grow"></span>
+  <span id="pill" hidden><folder-sync-status data-testid="pill"></folder-sync-status></span>
+  <a id="sign-in" class="button" href="/fs/signin?return=/" hidden>Sign in</a>
+  <button id="sign-out" hidden>Sign out</button>
+</header>
+
+<main>
+  <p class="lead">Point folder-sync at a folder: it is on every computer you use, and here.</p>
+  <p class="muted small">This page is here to show it working, not to work in. It reads your folder through the same
+    <code>/fs/</code> mount every app uses.</p>
+
+  <section id="loading" class="card"><p class="muted">Loading…</p></section>
+
+  <!-- signed out -->
+  <section id="signed-out" class="card" hidden data-testid="signed-out">
+    <h2>Sign in to see your folders</h2>
+    <p>Hosted accounts are by invitation. Signed in, this page shows your own folders, their files, and how long each
+      sync took.</p>
+    <p><a class="button primary" href="/fs/signin?return=/" data-testid="sign-in">Sign in</a></p>
+    <h3>No invitation? Bring your own bucket</h3>
+    <p>folder-sync runs on any S3-compatible bucket you own. Sign a computer in with your own R2 key, and nobody else's
+      bill is involved:</p>
+    <div class="cmd"><code>folder-sync login --key</code><button class="copy" data-copy="folder-sync login --key">Copy</button></div>
+    <p class="muted small">Then <code>folder-sync serve</code> shows this same view over your own computer (it comes with
+      the next release).</p>
+  </section>
+
+  <!-- signed in -->
+  <div id="signed-in" hidden data-testid="signed-in">
+    <section class="card" id="no-folders" hidden data-testid="no-folders">
+      <h2>No folders yet</h2>
+      <p>Put folder-sync on a computer (below) and point it at a folder. It shows up here the moment its first sync lands.</p>
+    </section>
+
+    <section class="card" id="folder" hidden data-testid="folder">
+      <div class="row">
+        <h2 class="grow">Your folder <span id="folder-name" data-testid="folder-name"></span></h2>
+        <label id="pick-wrap" hidden class="small muted">Folder <select id="pick" data-testid="pick"></select></label>
+      </div>
+      <p class="muted small" id="who"></p>
+
+      <h3>How long each sync took</h3>
+      <div class="times" data-testid="times">
+        <figure class="time" data-dir="up" data-testid="time-up">
+          <figcaption>Disk to online</figcaption>
+          <div class="figures"><span><small>median</small> <b data-k="median">–</b></span><span><small>last</small> <b data-k="last">–</b></span><span class="muted small" data-k="count"></span></div>
+          <svg class="chart" data-k="chart" role="img" aria-label="Recent disk-to-online times" viewBox="0 0 300 48" preserveAspectRatio="none"></svg>
+          <p class="muted small">From the change on a computer's disk to the version online, on that computer's clock.</p>
+        </figure>
+        <figure class="time" data-dir="down" data-testid="time-down">
+          <figcaption>Online to disk</figcaption>
+          <div class="figures"><span><small>median</small> <b data-k="median">–</b></span><span><small>last</small> <b data-k="last">–</b></span><span class="muted small" data-k="count"></span></div>
+          <svg class="chart" data-k="chart" role="img" aria-label="Recent online-to-disk times" viewBox="0 0 300 48" preserveAspectRatio="none"></svg>
+          <p class="muted small">From the version online to the file on another computer's disk. It reads two clocks, so it
+            includes any difference between them and can be negative; it is shown as measured.</p>
+        </figure>
+      </div>
+      <p class="muted small">Each figure is that sync's own measure, over the activity below. The latency KPI is
+        folder-sync's bench (<code>bench/latency</code>), which times both directions on one clock.</p>
+
+      <h3>Try it</h3>
+      <div class="row wrap">
+        <button class="primary" id="write" data-testid="write">Write a test file</button>
+        <span class="muted small" id="wrote" data-testid="wrote" aria-live="polite"></span>
+      </div>
+      <p class="muted small">It writes <code>folder-sync-demo/&lt;time&gt;.txt</code> into this folder online, the way a page
+        saves, so your computers pull it and its online-to-disk time shows up. Edit any file on disk to see disk to online.</p>
+
+      <h3>Files</h3>
+      <div id="files" data-testid="files"></div>
+
+      <div class="row">
+        <h3 class="grow">Recent activity</h3>
+        <button class="link" data-open="history">Version history</button>
+        <button class="link" data-open="deleted">Deleted files</button>
+      </div>
+      <ol id="activity" class="activity" data-testid="activity"></ol>
+    </section>
+
+    <section class="card" data-testid="install">
+      <h2>Put it on another computer</h2>
+      <p>Get the command-line tool for Linux or macOS, one file:
+        <a href="https://zacharyyamaoka.github.io/folder-sync/#install" data-testid="download">download page</a> ·
+        <a href="https://github.com/zacharyyamaoka/folder-sync/releases/tag/v0.1.0" data-testid="release">v0.1.0 on GitHub</a>.
+        Then, on that computer:</p>
+      <div id="commands"></div>
+      <p class="muted small">The computer appears in this folder's devices the moment its first manifest lands.</p>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Use it in your app</h2>
+    <p>Mount folder-sync at <code>/fs/</code> on your app's domain, and add two lines:</p>
+    <pre><code>&lt;script type="module" src="/fs/ui/v1/folder-sync.js"&gt;&lt;/script&gt;
+&lt;folder-sync-status project="notes"&gt;&lt;/folder-sync-status&gt;</code></pre>
+    <p class="small"><a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/CONTRACT.md">The bucket contract</a> ·
+      <a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/API.md">The view's API</a> ·
+      <a href="https://github.com/zacharyyamaoka/folder-sync">Source on GitHub</a></p>
+  </section>
+</main>
+</body>
+</html>

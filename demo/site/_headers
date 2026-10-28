@@ -1,0 +1,7 @@
+# The page's own files (Workers static assets). /fs/* is the accounts Worker's and carries its own headers.
+# WHY style-src 'unsafe-inline': <folder-sync-status> keeps its stylesheet in its Shadow DOM's own <style>.
+/*
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: same-origin

@@ -1,4 +1,13 @@
 {
+  "demo": {
+    "name": "folder-sync demo",
+    "origins": [
+      "https://folder-sync-demo.zach-yamaoka.workers.dev",
+      "http://127.0.0.1:4936",
+      "http://localhost:4936"
+    ],
+    "project": null
+  },
   "folder-sync": {
     "name": "folder-sync",
     "origins": [],
