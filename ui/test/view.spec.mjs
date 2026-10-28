@@ -115,7 +115,7 @@ test.describe("the pill and the menu", () => {
 	test("owner online: headline, warnings in amber, devices, the three views, storage, the account link", async ({ page }) => {
 		await load(page);
 		await expect(pill(page)).toHaveAttribute("data-state", "attention");
-		await expect(pill(page)).toContainText("2 things need you");
+		await expect(pill(page)).toContainText("1 thing needs you");
 		await openMenu(page);
 		const status = fixtures["status-owner"].response.body;
 		for (const w of status.warnings) await expect(menu(page).locator(`[data-warning="${w.kind}"]`)).toHaveText(w.text);
@@ -215,8 +215,8 @@ test.describe("the pill and the menu", () => {
 	});
 
 	test("a reader sees the pill and the devices only, and owner-only routes answer not_found", async ({ page }) => {
-		await load(page, { scenario: "reader", query: "?owner=AbC123" });
-		expect(stub.requests.find((r) => r.path.includes("/status")).path).toBe("/fs/v1/folders/notes/status?owner=AbC123");
+		await load(page, { scenario: "reader", query: "?owner=AbC123zz9yX8" });
+		expect(stub.requests.find((r) => r.path.includes("/status")).path).toBe("/fs/v1/folders/notes/status?owner=AbC123zz9yX8");
 		await expect(pill(page)).toHaveText("Synced");
 		await openMenu(page);
 		await expect(menu(page).locator(".devices li")).toHaveCount(3);
@@ -228,7 +228,7 @@ test.describe("the pill and the menu", () => {
 	});
 
 	test("public: the pill and the devices only", async ({ page }) => {
-		await load(page, { scenario: "public", query: "?owner=AbC123" });
+		await load(page, { scenario: "public", query: "?owner=AbC123zz9yX8" });
 		await expect(pill(page)).toHaveText("Synced");
 		await openMenu(page);
 		await expect(menu(page).locator(".devices li")).toHaveCount(3);
@@ -422,7 +422,7 @@ test.describe("Version history", () => {
 		const [post] = requests("POST", "/restore");
 		expect(post.path).toBe("/fs/v1/folders/notes/restore");
 		expect(post.headers["x-folder-sync"]).toBe("1");
-		expect(post.headers["x-folder-sync-user"]).toBe("AbC123");
+		expect(post.headers["x-folder-sync-user"]).toBe("AbC123zz9yX8");
 		expect(post.headers["content-type"]).toBe("application/json");
 		expect(post.body).toEqual({ items: [{ host: GPU, path: "notes/plan.md", version: PLAN_9F2C }] });
 		await expect(page.locator("folder-sync-status [data-restore=applied]")).toHaveText("Restored hearts/clamp-24.json as a new version.");

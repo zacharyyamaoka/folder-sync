@@ -11,7 +11,10 @@ every app's `/fs/` mount, PEP 0003 §3.2) and **`folder-sync serve`** on a machi
   [`schema/history.schema.json`](../schema/history.schema.json).
 - **Fixtures:** [`testdata/view-api/`](../testdata/view-api/), one request and its answer per file, each saying which
   servers must answer exactly that (`servers`). Both servers' tests and the element's tests load them.
-  `node --test schema/fixtures.test.mjs` checks every fixture against its schema.
+  `node --test schema/fixtures.test.mjs` checks every fixture against its schema. The owner's id is `AbC123zz9yX8`
+  (an account id is 8 to 64 characters). A version a fixture restores has a real id: its `given.bytes` holds the
+  bytes, keyed `<host>/<path>@<version>`, and the version's sha16 is theirs (`restore-online`: web's
+  `hearts/clamp-24.json` at `2026-10-28T19:02:11.481Z_763d2e71f45a8d0f`, 230 bytes, sha256 `763d2e71…22fb0e`).
 - **Nothing here is new for the files themselves:** reading a live file is still
   `GET /fs/v1/folders/:project/files/:host/<path>` (PEP 0003 §3.3).
 
@@ -74,6 +77,9 @@ else `409 ambiguous_folder`.
   is this machine's engine: `engine: watching | idle` (whether a `sync --watch` holds the folder lock) and its
   `last_round` (from `status --json`). Online, a device's state is only what its manifest says (`seq`,
   `last_change`): there is no live presence.
+- **Skip warnings** (`kind: skipped`, a name folder-sync will not sync) come only from `folder-sync serve` and the
+  machine's local activity log (`skip` events): a skip is decided on the machine and never written to the bucket, so
+  the Worker cannot know of one and never gives it, nor counts it in `headline`.
 - **`activity`** is newest first. `limit` is 1–500 (default 200); `level=warn` gives `warn` and `error` lines,
   `level=error` only errors; `host` keeps one host's. `before` is the `next` cursor of the previous page (opaque).
   Every event carries `host` and `host_name`; events from change records carry `seq`. Online, the Worker reads each

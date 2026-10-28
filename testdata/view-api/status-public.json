@@ -6,7 +6,7 @@
   ],
   "request": {
     "method": "GET",
-    "path": "/fs/v1/folders/notes/status?owner=AbC123",
+    "path": "/fs/v1/folders/notes/status?owner=AbC123zz9yX8",
     "auth": "public"
   },
   "response": {
@@ -14,7 +14,7 @@
     "body": {
       "project": "notes",
       "owner": {
-        "id": "AbC123"
+        "id": "AbC123zz9yX8"
       },
       "role": "public",
       "state": "synced",
