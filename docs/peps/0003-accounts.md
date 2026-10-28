@@ -256,6 +256,12 @@ The bucket layout, the manifest, the credential-process shape (0002), the stand-
   With `*`, each account's storage is capped by §3.7's quota.
 - **Organisations** (robotparts' "only for our organisation"): v1 here is per-person readers (`folder_reader`). An org
   is a later `orgs/<id>/` root with members; not built.
+- **One Google client per app** (follow-up; Zach, 2026-10-28). Today every app shares one Google OAuth client (one
+  `GOOGLE_CLIENT_ID`), so Google's consent screen says "Vibe Tracks" on robotparts.dev too. Default for now: keep it.
+  Later each app gets its own branded client in its own Google project (Robot Parts first), which needs this Worker to
+  pick the client per registered app or origin (`apps.json` names the client; one secret pair per app). People keep
+  their one account: a second client's Google account links to the same `user` row by Google `sub`, or by verified
+  email, never as a new user, so every `users/<id>/` prefix and signed-in machine stays valid.
 
 ## 7. Revisit when
 
