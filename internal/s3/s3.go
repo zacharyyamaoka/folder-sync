@@ -3,7 +3,9 @@
 // manifest (docs/peps/0001 §4: "a conditional GET of each other machine's
 // manifest"). rclone moves every file; this package moves only manifests,
 // because rclone has no conditional GET, and a 304 costs one Class B operation
-// instead of a HEAD plus a GET.
+// instead of a HEAD plus a GET. objects.go adds the calls version history needs
+// (docs/peps/0007 §3.1): a conditional server-side copy, a delete, a conditional
+// PUT, a delimiter listing and a GET into a file.
 package s3
 
 import (
