@@ -15,6 +15,9 @@ export class MemoryS3 {
 	beforeConditional: { key: string; run: () => void; again?: number } | null = null;
 	/** Delays every request by this many ms (seeded, so concurrent requests interleave the same way each run). */
 	jitter: (() => number) | null = null;
+	/** The status of a ranged GET's answer: 206 as R2 sends it, or 200 as rclone serve s3 does (same Content-Range and
+	 *  bytes), or "whole" for a store that ignores Range (200, the whole object, no Content-Range). */
+	rangeAnswer: 206 | 200 | "whole" = 206;
 	/** Answers 500 to a request it returns true for (the storage failing mid-write). */
 	fail: ((method: string, key: string) => boolean) | null = null;
 
@@ -139,14 +142,14 @@ export class MemoryS3 {
 		const range = request.headers.get("Range");
 		const one = range ? /^bytes=(\d+)-(\d+)$/.exec(range) : null;
 		if (range) call.range = range;
-		if (one && request.method === "GET") {
+		if (one && request.method === "GET" && this.rangeAnswer !== "whole") {
 			// WHY only bytes=a-b: it is the one form the Worker sends; R2 answers it 206, or 416 past the end
 			const start = Number(one[1]);
 			const end = Math.min(Number(one[2]), data.length - 1);
 			if (start >= data.length || start > end) return new Response("<Error><Code>InvalidRange</Code></Error>", { status: 416, headers: { "Content-Range": `bytes */${data.length}` } });
 			const slice = data.slice(start, end + 1);
 			call.sent = slice.length;
-			return new Response(slice, { status: 206, headers: { ETag: etag, "Content-Length": String(slice.length), "Content-Range": `bytes ${start}-${end}/${data.length}` } });
+			return new Response(slice, { status: this.rangeAnswer, headers: { ETag: etag, "Content-Length": String(slice.length), "Content-Range": `bytes ${start}-${end}/${data.length}` } });
 		}
 		if (request.method === "GET") call.sent = data.length;
 		return new Response(request.method === "HEAD" ? null : data, { status: 200, headers: { ETag: etag, "Content-Length": String(data.length) } });

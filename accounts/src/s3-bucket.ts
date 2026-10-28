@@ -103,21 +103,16 @@ export class S3Bucket implements R2BucketLike {
 			await answer.body?.cancel();
 			return null;
 		}
-		if (answer.status === 200) {
-			// a store that ignored the Range: the whole object came back, so take the asked-for slice of it
-			const data = new Uint8Array(await answer.arrayBuffer());
-			return { key, etag: etagOf(answer), size: data.byteLength, body: new Blob([data.slice(offset, offset + length)]).stream() };
-		}
-		if (answer.status !== 206) {
+		if (answer.status !== 200 && answer.status !== 206) {
 			await answer.body?.cancel();
 			throw new Error(`the storage answered ${answer.status} for a ranged read`);
 		}
-		const total = /\/(\d+)\s*$/.exec(answer.headers.get("Content-Range") || "");
-		if (!total) {
-			await answer.body?.cancel();
-			throw new Error("the storage answered a ranged read without its size");
-		}
-		return { key, etag: etagOf(answer), size: Number(total[1]), body: answer.body };
+		// WHY Content-Range and not the status: R2 answers a range 206, but rclone serve s3 (the local stand-in's store)
+		// answers 200 with the Content-Range and only those bytes; without it, the store sent the whole object
+		const total = /^bytes \d+-\d+\/(\d+)\s*$/.exec(answer.headers.get("Content-Range") || "");
+		if (total) return { key, etag: etagOf(answer), size: Number(total[1]), body: answer.body };
+		const data = new Uint8Array(await answer.arrayBuffer());
+		return { key, etag: etagOf(answer), size: data.byteLength, body: new Blob([data.slice(offset, offset + length)]).stream() };
 	}
 
 	async list(options: { prefix: string; delimiter: string; cursor?: string }): Promise<R2ListResultLike> {

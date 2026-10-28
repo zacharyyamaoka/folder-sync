@@ -455,6 +455,18 @@ test("a large video: a seek reads only the asked-for bytes from storage, never t
 	assert.deepEqual(s3.calls.filter((c) => c.key === key).map((c) => c.range), [`bytes=0-${BIG - 1}`]);
 });
 
+test("a range from a store that answers it 200 with Content-Range (rclone serve s3), or ignores it, is still those bytes", async () => {
+	for (const how of [200, "whole"] as const) {
+		const s3 = media();
+		s3.rangeAnswer = how;
+		const { deps } = fakeDeps(s3);
+		const answer = await call(handle, env(), deps, fileUrl("logs/run.log"), { headers: { ...cookie("tok-owner-browser"), Range: "bytes=2-5" } });
+		assert.equal(answer.status, 206, String(how));
+		assert.equal(answer.headers.get("Content-Range"), `bytes 2-5/${LOG.length}`, String(how));
+		assert.equal(await answer.text(), LOG.slice(2, 6), String(how));
+	}
+});
+
 test("a range whose stored object no longer matches the manifest's size is a 404, never another version's bytes", async () => {
 	const s3 = media();
 	const { deps } = fakeDeps(s3);
