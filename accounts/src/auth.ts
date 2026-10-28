@@ -5,7 +5,8 @@
 // - A machine signs in with the device authorization grant (RFC 8628, Better Auth's deviceAuthorization plugin):
 //   `folder-sync login` shows a code, the person approves it at /fs/device while signed in, and the machine receives a
 //   session of its own, used as a bearer token (the bearer plugin). That session IS the revocable device grant:
-//   deleting it (`folder-sync logout`) stops the machine at its next credentials refresh.
+//   deleting it (`folder-sync logout`, or Revoke on /fs/account: devices.ts) stops the machine at its next
+//   credentials refresh.
 // - Sessions last 90 days and renew while used, so a machine that syncs never has to sign in again.
 //
 // WHY one instance per origin (§2: "Many apps" loses 3 points for it): Better Auth's baseURL is per host, and each
@@ -167,6 +168,20 @@ export function liveDeps(env: Env): Deps | null {
 			return [ctx.authCookies.sessionToken.name, ctx.authCookies.sessionData.name, ctx.authCookies.dontRememberToken.name].map(
 				(name) => `${name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax${secure}`,
 			);
+		},
+		// devices (devices.ts): one D1 behind every origin's instance, so this Worker's own instance lists them all
+		async sessions(userId) {
+			const ctx = await authFor(env, ownOrigin(env)).$context;
+			const rows = await ctx.internalAdapter.listSessions(userId);
+			// WHY copied field by field: a session's token is its bearer credential and never leaves this layer
+			return rows.map((row) => ({ id: row.id, userAgent: row.userAgent ?? null, createdAt: row.createdAt, updatedAt: row.updatedAt }));
+		},
+		async revokeSession(userId, id) {
+			const ctx = await authFor(env, ownOrigin(env)).$context;
+			const row = (await ctx.internalAdapter.listSessions(userId)).find((r) => r.id === id);
+			if (!row) return false;
+			await ctx.internalAdapter.deleteSession(row.token);
+			return true;
 		},
 		store: d1Store(env.DB as D1Like),
 		s3: (request) => fetch(request),

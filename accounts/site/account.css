@@ -34,3 +34,23 @@ body { margin: 0; background: var(--page); }
   margin: 8px 0 12px; padding: 10px; border-radius: var(--radius); background: var(--hover);
   font: 600 22px/1.2 ui-monospace, monospace; letter-spacing: .12em; text-align: center;
 }
+/* the account page (/fs/account, src/devices.ts): who, storage, devices with Revoke, Sign out; no script */
+.fs-card.fs-wide { width: min(560px, 100%); }
+.fs-card h2 { margin: 18px 0 4px; font-size: 13px; font-weight: 600; }
+.fs-who { margin: 8px 0 4px; }
+.fs-notice { margin: 8px 0 4px; padding: 8px 10px; border-radius: var(--radius); background: var(--hover); }
+.fs-devices { list-style: none; margin: 8px 0 0; padding: 0; }
+.fs-device { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); }
+.fs-device:last-child { border-bottom: 1px solid var(--line); }
+.fs-device-text { flex: 1; min-width: 0; }
+.fs-device-text .fs-small { display: block; }
+/* a long name is clipped with an ellipsis; the whole of it is the title, one hover away */
+.fs-device-name { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; font-weight: 500; }
+.fs-tag { margin-left: 6px; padding: 1px 6px; border-radius: 999px; background: var(--hover); color: var(--ink-2); font-size: 11px; white-space: nowrap; }
+.fs-device form { margin: 0; flex: none; }
+.fs-signout { margin: 16px 0 0; }
+.fs-button {
+  display: block; padding: 6px 12px; border-radius: var(--radius); text-align: center; text-decoration: none;
+  background: var(--ink); color: var(--page);
+}
+.fs-button:hover { opacity: .9; }

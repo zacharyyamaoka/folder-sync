@@ -7,6 +7,8 @@
 //   GET  /fs/dev/mailbox?email=                   dev + loopback only: the last sign-in code
 //   GET  /fs/v1/me                                the session's person, root and app
 //   GET  /fs/v1/usage                             the session's storage, its quota, and whether it is over
+//   GET  /fs/v1/devices, POST …/devices/revoke    the person's sessions (machines, browsers); revoke one (devices.ts)
+//   GET  /fs/account, POST …/revoke | …/sign-out  the account page, no script (devices.ts)
 //   POST /fs/v1/sign-out                          ends this session
 //   GET  /fs/v1/folders                           my folders and the ones I may read
 //   GET  /fs/v1/folders/:project[?owner=]         the union view of a folder's hosts
@@ -38,6 +40,7 @@ import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store, Visibility } from "./store.ts";
 import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhost.ts";
 import type { EmailEnv } from "./email.ts";
+import { accountRoute, devicesApi, type SessionRow } from "./devices.ts";
 
 export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
 	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
@@ -86,6 +89,10 @@ export interface Deps {
 	/** Runs one web-host write or delete in its folder's queue (§3.4: one writer per host). Live, the folder's Durable
 	 *  Object (auth.ts, webhost-do.ts); absent, a queue in this isolate (the unit tests). */
 	webHost?(op: WebOp): Promise<WebAnswer>;
+	/** This person's sessions, never their tokens (devices.ts). */
+	sessions?(userId: string): Promise<SessionRow[]>;
+	/** Deletes this person's session `id`; false when they hold none by that id (another person's included). */
+	revokeSession?(userId: string, id: string): Promise<boolean>;
 }
 
 const READ_TTL_S = 300;
@@ -124,7 +131,7 @@ const SITE_FILES: Record<string, string> = { "signin.js": "text/javascript; char
 
 // ------------------------------------------------------------------------------------------------ answers
 
-function headers(extra: Record<string, string> = {}): Headers {
+export function headers(extra: Record<string, string> = {}): Headers {
 	const out = new Headers(extra);
 	out.set("Referrer-Policy", "no-referrer");
 	out.set("X-Content-Type-Options", "nosniff");
@@ -132,11 +139,11 @@ function headers(extra: Record<string, string> = {}): Headers {
 	return out;
 }
 
-function json(status: number, body: unknown, extra: Record<string, string> = {}): Response {
+export function json(status: number, body: unknown, extra: Record<string, string> = {}): Response {
 	return new Response(JSON.stringify(body), { status, headers: headers({ "Content-Type": "application/json; charset=utf-8", ...extra }) });
 }
 
-function fail(status: number, error: string, why: string, extra: Record<string, string> = {}): Response {
+export function fail(status: number, error: string, why: string, extra: Record<string, string> = {}): Response {
 	return json(status, { error, why }, extra);
 }
 
@@ -198,7 +205,7 @@ function loopback(request: Request): boolean {
 
 /** The request's session: a bearer token when one is sent (a machine, an app's server), else the cookie, and the
  *  cookie only on a registered origin. */
-async function session(request: Request, deps: Deps, app: App | null): Promise<{ person: Person; via: Via } | null> {
+export async function session(request: Request, deps: Deps, app: App | null): Promise<{ person: Person; via: Via } | null> {
 	const authorization = request.headers.get("Authorization");
 	if (authorization) {
 		if (!/^bearer\s+\S/i.test(authorization)) return null;
@@ -218,7 +225,7 @@ function csrfOk(request: Request, app: App | null): boolean {
 }
 
 /** The session a write needs, or the answer refusing it. */
-async function writer(request: Request, deps: Deps, app: App | null): Promise<{ person: Person; via: Via } | Response> {
+export async function writer(request: Request, deps: Deps, app: App | null): Promise<{ person: Person; via: Via } | Response> {
 	const who = await session(request, deps, app);
 	if (!who) return fail(401, "signed_out", "sign in first");
 	if (who.via === "cookie" && !csrfOk(request, app)) return fail(403, "csrf", "a browser's write must carry X-Folder-Sync: 1 from this site's own pages");
@@ -576,7 +583,7 @@ async function purgeWebTrash(request: Request, env: Env, deps: Deps, app: App | 
 	return json(answer.status, answer.body, answer.headers ?? {});
 }
 
-async function jsonBody(request: Request): Promise<Record<string, unknown> | Response> {
+export async function jsonBody(request: Request): Promise<Record<string, unknown> | Response> {
 	if (!(request.headers.get("Content-Type") || "").toLowerCase().startsWith("application/json")) return fail(415, "json_only", "send Content-Type: application/json");
 	try {
 		const body = await request.json();
@@ -644,7 +651,7 @@ function signInMethod(env: Env): string {
 	return ways.join(" ") || "none";
 }
 
-function escapeAttr(text: string): string {
+export function escapeAttr(text: string): string {
 	return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
@@ -752,6 +759,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 		const back = first === "signin" ? returnPath(new URL(request.url).searchParams.get("return")) : "/fs/device";
 		return first === "signin" ? page(env, app, "Sign in", "", back, head) : page(env, app, "Sign in a machine", "device.js", back, head);
 	}
+	if (first === "account") return accountRoute(request, env, deps, app, rest, method);
 	if (first !== "v1") return fail(404, "not_found", "no such route");
 	if (!deps) return fail(503, "not_configured", "accounts are not set up on this Worker yet");
 	const [what, project, sub, ...more] = rest;
@@ -760,6 +768,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 	if (what === "usage" && rest.length === 1) return read ? usage(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (what === "sign-out" && rest.length === 1) return method === "POST" ? signOut(request, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
 	if (what === "credentials" && rest.length === 1) return method === "POST" ? credentials(request, env, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
+	if (what === "devices") return devicesApi(request, env, deps, app, rest.slice(1), method);
 	if (what === "access" && rest.length === 1) return read ? access(request, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (what !== "folders") return fail(404, "not_found", "no such route");
 	if (rest.length === 1) return read ? folders(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });

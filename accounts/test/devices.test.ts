@@ -505,7 +505,7 @@ function looseDeps() {
 }
 
 test("mutation: without the route's own owner check, one person revokes another's machine (red)", async () => {
-	const edits = [{ marker: "if (!(await deps.sessions(owner)).some((row) => row.id === id)) return null; // fs-mutation: only the owner revokes", replacement: "" }];
+	const edits = [{ marker: "if (!(await deps.sessions!(owner)).some((row) => row.id === id)) return null; // fs-mutation: only the owner revokes", replacement: "" }];
 	const { deps } = looseDeps();
 	const sound = await call(handle, env(), deps, "/fs/v1/devices/revoke", revoke(page("tok-owner-browser", OWNER.userId), "sess-sister-laptop"));
 	assert.equal(sound.status, 404, "the real route refuses it even over a loose live layer");
