@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folder-sync.invalid/schema/folder-sync-retention-cases-1.json",
+  "title": "folder-sync retention worked examples, version 1",
+  "description": "testdata/retention/*.json: the worked examples of docs/CONTRACT.md 'What is kept'. Every implementation of the rule (the engine's burst rule and own-host pruner in Go, the web host's burst rule and the folder object's pruner in TypeScript) passes every case. write_cases are the write-time rule (is a leaving version copied to _history/?); prune_cases are the schedule (which kept versions survive a prune at `now`).",
+  "type": "object",
+  "required": ["cases", "write_cases", "prune_cases"],
+  "additionalProperties": false,
+  "properties": {
+    "cases": { "const": "folder-sync-retention-cases/1" },
+    "write_cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "now", "op", "path", "no_history", "leaving", "last_kept_left_at", "keep"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "now": {
+            "description": "When the version leaves the folder.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "op": { "enum": ["replace", "delete", "restore"] },
+          "path": { "$ref": "event.schema.json#/$defs/path" },
+          "no_history": { "type": "array", "items": { "type": "string" } },
+          "leaving": {
+            "description": "The manifest entry that leaves: its written_at.",
+            "type": "object",
+            "required": ["written_at"],
+            "additionalProperties": false,
+            "properties": { "written_at": { "type": "string", "format": "date-time" } }
+          },
+          "last_kept_left_at": {
+            "description": "left_at of the newest version of this path this writer already kept, or null.",
+            "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+          },
+          "keep": { "type": "boolean" },
+          "why": { "enum": ["burst", "no_history"] }
+        },
+        "if": { "properties": { "keep": { "const": false } } },
+        "then": { "required": ["why"] },
+        "else": { "not": { "required": ["why"] } }
+      }
+    },
+    "prune_cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "now", "keep_days", "versions", "keep"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "now": { "type": "string", "format": "date-time" },
+          "keep_days": { "type": "integer", "minimum": 1 },
+          "versions": {
+            "description": "Every kept version of one (host, path).",
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["id", "left_at"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "$ref": "history.schema.json#/$defs/version_id" },
+                "left_at": { "type": "string", "format": "date-time" }
+              }
+            }
+          },
+          "keep": {
+            "description": "The ids that survive, in any order.",
+            "type": "array",
+            "items": { "$ref": "history.schema.json#/$defs/version_id" }
+          }
+        }
+      }
+    }
+  }
+}

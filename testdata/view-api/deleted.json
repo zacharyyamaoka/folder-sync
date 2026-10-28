@@ -1,0 +1,46 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "deleted files, every host, newest deletion first",
+  "servers": [
+    "worker",
+    "serve"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/folders/notes/deleted",
+    "auth": "owner"
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "files": [
+        {
+          "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+          "host_name": "bam-GPU",
+          "path": "notes/old-ideas.md",
+          "deleted_at": "2026-10-28T20:41:00.420Z",
+          "size": 5121,
+          "version": "2026-10-21T09:12:44.500Z_5555666677778888"
+        },
+        {
+          "host": "e2a0b1c2-d3e4-4f50-9a1b-2c3d4e5f6a7b",
+          "host_name": "web",
+          "path": "hearts/arm-17.json",
+          "deleted_at": "2026-10-28T14:20:00.000Z",
+          "size": 233,
+          "version": "2026-10-26T10:00:00.999Z_aaaabbbbccccdddd"
+        },
+        {
+          "host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+          "host_name": "bam-laptop",
+          "path": "photos/IMG_2231.jpg",
+          "deleted_at": "2026-10-22T14:05:00.000Z",
+          "size": 2811409,
+          "version": "2026-10-22T14:03:51.090Z_2c4e6a8b0d1f3e5a"
+        }
+      ],
+      "more": false
+    }
+  },
+  "body_schema": "deleted"
+}

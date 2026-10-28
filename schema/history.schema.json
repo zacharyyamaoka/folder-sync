@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folder-sync.invalid/schema/folder-sync-history-1.json",
+  "title": "folder-sync kept version, version 1",
+  "description": "A kept version is one object, <root>_history/<project>/<host-id>/<path>/<version>, holding the file's exact bytes. It has no JSON body and no custom metadata: everything about it is in its key and in its LastModified, which is when it left the folder. This schema describes a kept version as a reader parses it from a listing (the API's history and deleted routes answer these fields). See docs/CONTRACT.md, 'History'.",
+  "type": "object",
+  "required": ["key", "root", "project", "host", "path", "version", "left_at", "size"],
+  "additionalProperties": false,
+  "properties": {
+    "key": {
+      "description": "<root>_history/<project>/<host>/<path>/<version>; at most 1,024 bytes (R2's key limit). A path whose key would be longer is published but never kept (was.why = key_too_long).",
+      "type": "string",
+      "pattern": "^([A-Za-z0-9][A-Za-z0-9._-]{0,127}/){0,8}_history/[a-z0-9][a-z0-9._-]{0,62}/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/[^:]+/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z_([0-9a-f]{16}|unlisted)$",
+      "maxLength": 1024
+    },
+    "root": {
+      "description": "The account root, '' for a v0 bucket-key folder.",
+      "type": "string",
+      "pattern": "^(([A-Za-z0-9][A-Za-z0-9._-]{0,127}/){1,8})?$"
+    },
+    "project": { "$ref": "event.schema.json#/$defs/project" },
+    "host": { "$ref": "event.schema.json#/$defs/host_id" },
+    "path": { "$ref": "event.schema.json#/$defs/path" },
+    "version": { "$ref": "#/$defs/version_id" },
+    "written_at": {
+      "description": "The version id's first half: the manifest entry's written_at, truncated to the millisecond. Absent for an unlisted version.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "sha16": {
+      "description": "The version id's second half: the first 16 hex digits of the bytes' sha256. Absent for an unlisted version.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "unlisted": {
+      "description": "true when the object was not the version the manifest listed (the copy's If-Match answered 412): it is kept under <its LastModified>_unlisted, and is never restored without its bytes being checked.",
+      "type": "boolean"
+    },
+    "left_at": {
+      "description": "The object's LastModified: when this version left the folder. The retention schedule reads only this.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "size": { "type": "integer", "minimum": 0 }
+  },
+  "if": { "properties": { "unlisted": { "const": true } }, "required": ["unlisted"] },
+  "then": { "not": { "anyOf": [{ "required": ["written_at"] }, { "required": ["sha16"] }] } },
+  "else": { "required": ["written_at", "sha16"] },
+  "$defs": {
+    "version_id": {
+      "description": "<written_at, UTC, to the millisecond>_<sha16>, or <LastModified, UTC, to the millisecond>_unlisted. Sorts oldest first. WHY a colon: no published path may contain ':' (names.CheckWindows, webhost.checkWebPath), so a version name can never be a file or folder of the published tree.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z_([0-9a-f]{16}|unlisted)$"
+    }
+  }
+}

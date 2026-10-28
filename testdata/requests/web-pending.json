@@ -1,0 +1,12 @@
+{
+  "schema": "folder-sync-restore/1",
+  "id": "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d",
+  "project": "notes",
+  "host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+  "at": "2026-10-28T20:44:10.512Z",
+  "by": { "kind": "web", "name": "Chrome on Linux" },
+  "items": [
+    { "path": "photos/IMG_2231.jpg", "version": "2026-10-22T14:03:51.090Z_2c4e6a8b0d1f3e5a" },
+    { "path": "photos/IMG_2232.jpg", "version": "2026-10-22T14:03:52.771Z_7d9f1b3d5f7a9c1e" }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "a file's versions, newest first",
+  "servers": [
+    "worker",
+    "serve"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/folders/notes/history/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md",
+    "auth": "owner"
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+      "host_name": "bam-GPU",
+      "path": "notes/plan.md",
+      "live": {
+        "size": 1980,
+        "sha256": "9f2c1a3b4c5d6e7f00112233445566778899aabbccddeeff0011223344556677",
+        "written_at": "2026-10-28T20:46:12.004Z"
+      },
+      "versions": [
+        {
+          "id": "2026-10-28T20:41:00.410Z_7e3b9d0a1c2f4e5d",
+          "written_at": "2026-10-28T20:41:00.410Z",
+          "sha16": "7e3b9d0a1c2f4e5d",
+          "left_at": "2026-10-28T20:46:12.004Z",
+          "size": 2140
+        },
+        {
+          "id": "2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f",
+          "written_at": "2026-10-28T20:31:00.117Z",
+          "sha16": "9f2c1a3b4c5d6e7f",
+          "left_at": "2026-10-28T20:41:00.410Z",
+          "size": 1980
+        },
+        {
+          "id": "2026-10-28T20:00:00.000Z_unlisted",
+          "unlisted": true,
+          "left_at": "2026-10-28T20:00:00.000Z",
+          "size": 2001
+        },
+        {
+          "id": "2026-10-28T18:02:41.502Z_1b2c3d4e5f607182",
+          "written_at": "2026-10-28T18:02:41.502Z",
+          "sha16": "1b2c3d4e5f607182",
+          "left_at": "2026-10-28T18:50:00.000Z",
+          "size": 1402
+        }
+      ],
+      "more": false
+    }
+  },
+  "body_schema": "history"
+}

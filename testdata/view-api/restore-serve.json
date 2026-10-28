@@ -1,0 +1,63 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "restore on the machine: its own file for the engine, a peer's in the bucket, the web host's forwarded",
+  "servers": [
+    "serve"
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/fs/v1/folders/notes/restore",
+    "auth": "owner",
+    "body": {
+      "items": [
+        {
+          "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+          "path": "notes/plan.md",
+          "version": "2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f"
+        },
+        {
+          "host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+          "path": "notes/laptop-todo.md",
+          "version": "2026-10-27T18:20:00.250Z_e1d2c3b4a5968778"
+        },
+        {
+          "host": "e2a0b1c2-d3e4-4f50-9a1b-2c3d4e5f6a7b",
+          "path": "hearts/clamp-24.json",
+          "version": "2026-10-28T19:02:11.481Z_beefbeefbeefbeef"
+        }
+      ]
+    }
+  },
+  "request_schema": "restore_request",
+  "response": {
+    "status": 200,
+    "body": {
+      "applied": [
+        {
+          "host": "e2a0b1c2-d3e4-4f50-9a1b-2c3d4e5f6a7b",
+          "path": "hearts/clamp-24.json",
+          "version": "2026-10-28T19:02:11.481Z_beefbeefbeefbeef",
+          "seq": 7
+        }
+      ],
+      "requested": [
+        {
+          "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+          "host_name": "bam-GPU",
+          "request": "3f0e1d2c-4b5a-4968-8776-a5b4c3d2e1f0",
+          "items": 1,
+          "where": "local"
+        },
+        {
+          "host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+          "host_name": "bam-laptop",
+          "request": "c4d5e6f7-0819-4a2b-8c3d-4e5f60718293",
+          "items": 1,
+          "where": "bucket"
+        }
+      ],
+      "failed": []
+    }
+  },
+  "body_schema": "restore_response"
+}

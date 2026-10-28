@@ -1,0 +1,21 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "a version id that is not one",
+  "servers": [
+    "worker",
+    "serve"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/folders/notes/history/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md?version=yesterday",
+    "auth": "owner"
+  },
+  "response": {
+    "status": 400,
+    "body": {
+      "error": "bad_version",
+      "why": "A version is <written_at>_<sha16>, as the history lists it."
+    }
+  },
+  "body_schema": "error"
+}

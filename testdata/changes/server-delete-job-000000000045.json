@@ -1,0 +1,30 @@
+{
+  "schema": "folder-sync-changes/1",
+  "project": "notes",
+  "host_id": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+  "host_name": "bam-GPU",
+  "seq": 45,
+  "at": "2026-10-28T21:05:00.000Z",
+  "by": "server",
+  "events": [
+    {
+      "schema": "folder-sync-event/1",
+      "event": "delete",
+      "at": "2026-10-28T21:05:00.000Z",
+      "level": "info",
+      "project": "notes",
+      "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+      "host_name": "bam-GPU",
+      "seq": 45,
+      "path": "videos/raw-take-3.mp4",
+      "permanent": true,
+      "was": {
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "size": 734003200,
+        "written_at": "2026-10-20T08:00:00.000Z",
+        "kept": null,
+        "why": "permanent"
+      }
+    }
+  ]
+}
