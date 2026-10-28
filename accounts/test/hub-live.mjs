@@ -1,4 +1,4 @@
-// A live proof of the folder hub (PEP 0004 §3) against a running dev stack: real workerd, a real Durable Object, real
+// A live proof of the folder hub (PEP 0005 §3) against a running dev stack: real workerd, a real Durable Object, real
 // WebSockets. Exits non-zero on the first failed check.
 //
 //   FS_STANDIN_PORT=4960 FS_STORE_PORT=4961 FS_ACCOUNTS_PORT=4962 FS_INSPECTOR_PORT=4963 node accounts/scripts/dev.mjs up --state-dir /tmp/hubproof

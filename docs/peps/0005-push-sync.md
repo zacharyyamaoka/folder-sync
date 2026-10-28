@@ -1,4 +1,4 @@
-# 0004 · Push sync: a hub that says "this folder changed", so nothing waits for a poll
+# 0005 · Push sync: a hub that says "this folder changed", so nothing waits for a poll
 
 - **Date:** 2026-10-26
 - **Status:** proposed, prototyped and measured on branch `lane/fast-sync` (cut from `lane/accounts`; §4b). Final when Zach merges it.

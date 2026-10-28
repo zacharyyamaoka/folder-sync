@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds the fast-sync review report (PEP 0004) from the measured JSON and the recorded clips.
+"""Builds the fast-sync review report (PEP 0005) from the measured JSON and the recorded clips.
 
     python3 docs/report/build_fast_sync.py [--media DIR] [--out FILE]
 
@@ -197,7 +197,7 @@ def build(media: pathlib.Path) -> str:
 <tr><td>Replicache / Zero</td><td>contentless "poke" → pull / persistent connection to zero-cache</td><td>Zero: next frame locally</td><td>reads yes</td><td>server + rebase</td><td>yes</td><td>needs Postgres</td></tr>
 <tr><td>ElectricSQL / PowerSync</td><td>HTTP long-poll or SSE / HTTP/2 or WebSocket stream</td><td>PowerSync "&lt; 1 s" (vendor)</td><td>local DB</td><td>your backend</td><td>yes</td><td>Electric Cloud winding down; PowerSync Pro $49+</td></tr>
 <tr><td>Yjs / Automerge / Liveblocks</td><td>WebSocket relay / hosted rooms</td><td>not published</td><td>full local doc</td><td>CRDT merge</td><td>yes</td><td>self-host / $25–30</td></tr>
-<tr><td><b>folder-sync + PEP 0004</b></td><td>hub "changed {host, seq}" over hibernating WebSocket → GET from R2</td><td><b>0.24–0.75 s (measured, local)</b></td><td>files are the truth; catch-up</td><td>single writer per host</td><td>machines + browsers</td><td>$0 inside allowances</td></tr></table>
+<tr><td><b>folder-sync + PEP 0005</b></td><td>hub "changed {host, seq}" over hibernating WebSocket → GET from R2</td><td><b>0.24–0.75 s (measured, local)</b></td><td>files are the truth; catch-up</td><td>single writer per host</td><td>machines + browsers</td><td>$0 inside allowances</td></tr></table>
 <p class="mut">Sources with URLs and access dates: the vault note <i>C - Fast file sync (prior art)</i> (Source Index, 2026-10-26).</p>"""
 
     first_note = (f"An earlier baseline on the pre-rebase build (first run, 10 trials) agreed: page write → laptop disk "
@@ -207,7 +207,7 @@ def build(media: pathlib.Path) -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Fast folder sync</title><style>{CSS}</style></head><body><main>
 <h1>Fast folder sync: push instead of poll</h1>
-<p class="mut">folder-sync PEP 0004 · prototype on <code>lane/fast-sync</code> (folder-sync and robotparts), not merged · measured 2026-10-26 on the local stack (2 machines + a page, R2 stand-in, wrangler dev)</p>
+<p class="mut">folder-sync PEP 0005 · prototype on <code>lane/fast-sync</code> (folder-sync and robotparts), not merged · measured 2026-10-26 on the local stack (2 machines + a page, R2 stand-in, wrangler dev)</p>
 <div class="verdict">
 <p><b>Copy Obsidian's model: a tiny "host H is now at seq N" push over one hibernating WebSocket per folder, then fetch as today. Built and measured: an agent's edit now reaches the open page in {s(sa, 'disk_to_site', 'page'):.2f} s instead of {s(sb, 'disk_to_site', 'page'):.1f} s, a page write reaches every machine in {s(sa, 'site_to_disk', 'laptop'):.2f} s instead of {s(sb, 'site_to_disk', 'laptop'):.1f} s, and a new machine is seen in {after['join']['ms'] / 1000:.2f} s instead of {before['join']['ms'] / 1000:.0f} s.</b></p>
 <p>Cost: <b>$0 extra</b> on Cloudflare at this scale (inside Workers Paid's $5 plan), and <b>less</b> compute: an idle machine went from {idle_b['cpu_pct']} % of a core to {idle_a['cpu_pct']} %. Works online only (browser → browser {online['mean'] / 1000:.2f} s with no machine running), local + online, and across machines. Qualification: local stack only — real R2 and the Cloudflare edge are not measured yet, and nothing is deployed.</p>
@@ -216,7 +216,7 @@ def build(media: pathlib.Path) -> str:
 <h2>See it</h2>
 <div class="two">
 <figure><video src="fast-sync-2026-10-26/push.mp4" autoplay muted loop playsinline controls poster="fast-sync-2026-10-26/push-step1-pane.png"></video>
-<figcaption><b>Push (PEP 0004)</b>, real time. Step 1: an agent writes a heart on the laptop → desktop disk <b>{push_clip['step1']['desktop_ms']} ms</b>, open page <b>{push_clip['step1']['page_ms']} ms</b>. Step 2: un-heart on the page → both disks <b>{push_clip['step2']['laptop_ms']} ms</b>. <a href="fast-sync-2026-10-26/push.gif">GIF</a></figcaption></figure>
+<figcaption><b>Push (PEP 0005)</b>, real time. Step 1: an agent writes a heart on the laptop → desktop disk <b>{push_clip['step1']['desktop_ms']} ms</b>, open page <b>{push_clip['step1']['page_ms']} ms</b>. Step 2: un-heart on the page → both disks <b>{push_clip['step2']['laptop_ms']} ms</b>. <a href="fast-sync-2026-10-26/push.gif">GIF</a></figcaption></figure>
 <figure><video src="fast-sync-2026-10-26/polling.mp4" muted loop playsinline controls poster="fast-sync-2026-10-26/polling-step1-pane.png"></video>
 <figcaption><b>Polling (same build, <code>--no-push</code>)</b>, real time, same script: desktop disk <b>{poll_clip['step1']['desktop_ms']} ms</b>, open page <b>{poll_clip['step1']['page_ms']} ms</b>; page → laptop <b>{poll_clip['step2']['laptop_ms']} ms</b>, desktop <b>{poll_clip['step2']['desktop_ms']} ms</b>. <a href="fast-sync-2026-10-26/polling.gif">GIF</a></figcaption></figure>
 </div>
@@ -268,7 +268,7 @@ def build(media: pathlib.Path) -> str:
 <div class="scroll">{prior}</div>
 
 <h2>The Obsidian-like app</h2>
-<p>PEP 0005 (draft, not built): <b>Tauri 2</b> with the folder-sync Go binary as its sidecar (scored 88 vs Electron 82 vs a no-shell service + tray 85). Sign-in opens the system browser on the existing device grant's <code>verification_uri_complete</code>, so it is one click on <i>Approve</i>, no code typed (RFC 8252); the app creates <code>~/robotparts</code>, runs <code>sync --watch</code> in the background with login autostart and a tray, and shows robotparts.dev in its window. Reuse: ClaudeParty's per-user install, sha256 update manifest and rollback; stable_preview_switcher's channels. Needs from folder-sync: <code>login --json</code> and hub/watcher state in <code>status --json</code>; later a local <code>serve</code> for offline.</p>
+<p>PEP 0006 (draft, not built): <b>Tauri 2</b> with the folder-sync Go binary as its sidecar (scored 88 vs Electron 82 vs a no-shell service + tray 85). Sign-in opens the system browser on the existing device grant's <code>verification_uri_complete</code>, so it is one click on <i>Approve</i>, no code typed (RFC 8252); the app creates <code>~/robotparts</code>, runs <code>sync --watch</code> in the background with login autostart and a tray, and shows robotparts.dev in its window. Reuse: ClaudeParty's per-user install, sha256 update manifest and rollback; stable_preview_switcher's channels. Needs from folder-sync: <code>login --json</code> and hub/watcher state in <code>status --json</code>; later a local <code>serve</code> for offline.</p>
 
 <h2>Decision surface</h2>
 <h3>Done and proved</h3>
@@ -280,7 +280,7 @@ def build(media: pathlib.Path) -> str:
 <li>Option (d): native S3 calls instead of rclone processes and pulling only the named host (next ≈150–250 ms).</li>
 <li>Show hub/watcher state in <code>folder-sync status --json</code> (for the app's tray).</li></ul>
 <h3>Needs Zach</h3>
-<ul class="tight"><li><b>Merge?</b> Recommend: review PEP 0004, then merge folder-sync <code>lane/fast-sync</code> after <code>lane/accounts</code> lands. Default if silent: it stays on its branch, rebased on <code>lane/accounts</code>.</li>
+<ul class="tight"><li><b>Merge?</b> Recommend: review PEP 0005, then merge folder-sync <code>lane/fast-sync</code> after <code>lane/accounts</code> lands. Default if silent: it stays on its branch, rebased on <code>lane/accounts</code>.</li>
 <li><b>Desktop app shell:</b> recommend Tauri, with the no-shell service + tray as the first tracer. Default if silent: nothing is built until asked.</li></ul>
 <h3>Deliberately not done</h3>
 <ul class="tight"><li>No deploy, no real credentials, no production bucket (test values from the dev stack only).</li>

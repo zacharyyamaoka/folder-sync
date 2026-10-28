@@ -1,4 +1,4 @@
-// The folder's hub (PEP 0004 §3): one Durable Object per (person, project) that holds the hibernating WebSockets of
+// The folder's hub (PEP 0005 §3): one Durable Object per (person, project) that holds the hibernating WebSockets of
 // that folder's machines and pages, and says "host H is now at seq N" to all of them the moment a manifest moves.
 // It carries no content: a client that hears `changed` reads the manifests in the bucket as it always did, and one
 // that missed it catches up from `hello` or its fallback poll.
@@ -18,7 +18,7 @@ export type HubRole = "owner" | "reader" | "public";
 /** machine = a bearer session (folder-sync on someone's computer), page = a browser (cookie) or a signed-out reader. */
 export type HubKind = "machine" | "page";
 
-/** What a socket's attachment records (PEP 0004 §3), which survives the object's hibernation. */
+/** What a socket's attachment records (PEP 0005 §3), which survives the object's hibernation. */
 export interface Attachment {
 	role: HubRole;
 	kind: HubKind;
@@ -32,7 +32,7 @@ export interface HubState {
 
 /** A host id is a lowercase UUID v4 (the same rule as app.ts's HOST_ID). */
 export const HOST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-/** PEP 0004 §3: a message is at most 1 KB; anything longer is ignored unread. */
+/** PEP 0005 §3: a message is at most 1 KB; anything longer is ignored unread. */
 export const MESSAGE_MAX_BYTES = 1024;
 /** WHY a cap: a host id is free to invent for the folder's own owner, and each one is a row in `hosts` and in every
  *  `hello`; a folder has a handful of machines, so this is generous and still bounds the object's storage. */
@@ -155,7 +155,7 @@ export class FolderHub extends DurableObject<Env> {
 	}
 
 	async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-		// WHY silent: PEP 0004 §3 — anything that is not a valid announcement from an owner's machine is ignored, so a
+		// WHY silent: PEP 0005 §3 — anything that is not a valid announcement from an owner's machine is ignored, so a
 		// client can't learn from an error which of the rules it broke
 		if (!mayAnnounce(ws.deserializeAttachment() as Attachment | null)) return;
 		const change = parseChanged(message);

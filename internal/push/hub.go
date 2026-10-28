@@ -24,7 +24,7 @@ type Event struct {
 	Web   bool
 }
 
-// Keep-alive (PEP 0004 §3): a text ping every PingEvery, answered "pong" by the hub's runtime without waking it.
+// Keep-alive (PEP 0005 §3): a text ping every PingEvery, answered "pong" by the hub's runtime without waking it.
 const (
 	PingEvery = 30 * time.Second
 	DeadAfter = 75 * time.Second
@@ -235,7 +235,7 @@ func ParseEvent(data []byte) (Event, bool) {
 }
 
 // AnnounceOnce tells the hub, over a short-lived socket, that host's manifest is at seq: for `sync --once`, which has
-// no long-lived socket. WHY (PEP 0004): a machine that publishes once (a new machine's first round, a cloud agent,
+// no long-lived socket. WHY (PEP 0005): a machine that publishes once (a new machine's first round, a cloud agent,
 // a scheduled task) must still reach the others at once, not at their next discovery 5 minutes later. Best effort:
 // it gives up after timeout and never fails the round.
 func AnnounceOnce(ctx context.Context, eventsURL, token, userAgent, host string, seq int, timeout time.Duration) error {

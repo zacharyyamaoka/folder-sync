@@ -444,7 +444,7 @@ func (p *Project) ManifestSeq() int {
 }
 
 // KnownPeers maps each peer this machine pulls to the seq of the manifest it last read from it (0 if none yet).
-// WHY (PEP 0004): a hub message naming a host not in this map starts a discover in that round, not in 5 minutes.
+// WHY (PEP 0005): a hub message naming a host not in this map starts a discover in that round, not in 5 minutes.
 func (p *Project) KnownPeers() map[string]int {
 	out := map[string]int{}
 	for _, id := range p.loadPeers().Known {

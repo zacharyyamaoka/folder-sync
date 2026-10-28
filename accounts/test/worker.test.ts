@@ -1744,7 +1744,7 @@ for (const how of ["fails", "is refused its claim"] as const) {
 	});
 }
 
-// ------------------------------------------------------------------------------------------------ the hub (PEP 0004)
+// ------------------------------------------------------------------------------------------------ the hub (PEP 0005)
 
 /** A HUB binding that records what the Worker sends it: the object's name and the request, with its JSON body. */
 function fakeHub(answer: (request: Request) => Promise<unknown> | unknown = () => new Response("hub", { status: 200 })) {

@@ -2,7 +2,7 @@ package push
 
 import "time"
 
-// Fallback is the safety-net round interval while both push sources are live (PEP 0004 §2.5).
+// Fallback is the safety-net round interval while both push sources are live (PEP 0005 §2.5).
 const Fallback = 60 * time.Second
 
 // NextWait is how long the watch loop waits for a signal before running a round anyway.

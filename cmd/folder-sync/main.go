@@ -420,7 +420,7 @@ func cmdSync(args []string, out io.Writer) error {
 	watch := fs.Bool("watch", false, "run a round every `interval` (from .folder-sync.toml) until stopped")
 	install := fs.Bool("install-service", false, "write the autostart definition for `sync --watch` and print how to enable it")
 	discover := fs.Bool("discover", false, "look for new machines this round (one LIST) instead of every 5 min")
-	noPush := fs.Bool("no-push", false, "poll every `interval` only: no folder watcher, no hub, no announce after --once (docs/peps/0004)")
+	noPush := fs.Bool("no-push", false, "poll every `interval` only: no folder watcher, no hub, no announce after --once (docs/peps/0005)")
 	dir := folderFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -455,7 +455,7 @@ func watchLoop(p *syncer.Project, out io.Writer, noPush bool) error {
 	defer stop()
 	interval := p.Config.IntervalDuration()
 
-	// PEP 0004: a round starts when something changed (the folder watcher, the folder's hub), not only on a timer;
+	// PEP 0005: a round starts when something changed (the folder watcher, the folder's hub), not only on a timer;
 	// the timer stays as the safety net. --no-push is the old loop exactly.
 	var watcher *push.Watcher
 	var hub *push.Hub
@@ -568,7 +568,7 @@ func hubState(h *push.Hub) string {
 	return "on (" + h.URL + ")"
 }
 
-// announceOnce tells the folder's hub about this round's manifest (sync --once; PEP 0004), when signed in.
+// announceOnce tells the folder's hub about this round's manifest (sync --once; PEP 0005), when signed in.
 func announceOnce(p *syncer.Project) {
 	server, token, ok := hubAccount(p)
 	if !ok {

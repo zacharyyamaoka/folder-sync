@@ -1,4 +1,4 @@
-# 0005 · A downloadable app: sign in, and your folder is just there
+# 0006 · A downloadable app: sign in, and your folder is just there
 
 - **Date:** 2026-10-26
 - **Status:** draft design note. Nothing is built; this says what the prototype would need.
@@ -6,7 +6,7 @@
   a standalone, fully integrated, complete app and don't need to think about how anything is happening in the
   backend. I just sign in and it works. Everything across all the things is the same." "When I download the app I
   think it can make this folder itself."
-- **Builds on** PEP 0003 (accounts, the device grant, `/fs/` on each app's domain) and PEP 0004 (push sync: the
+- **Builds on** PEP 0003 (accounts, the device grant, `/fs/` on each app's domain) and PEP 0005 (push sync: the
   watcher and the hub make an app's folder feel instant).
 
 ## 1. What a good answer looks like (weights first)
@@ -45,7 +45,7 @@ same pieces.
 3. **The folder makes itself.** `~/robotparts` (Documents\\robotparts on Windows), created with
    `folder-sync init --project robotparts`; if the person already syncs that project on another machine
    (`folder-sync projects --json`), the app says so and joins it.
-4. **Sync runs in the background**: the app starts `folder-sync sync --watch` as its sidecar (PEP 0004 push: a change
+4. **Sync runs in the background**: the app starts `folder-sync sync --watch` as its sidecar (PEP 0005 push: a change
    lands everywhere in under a second), and registers login autostart. Closing the window leaves the tray icon; the
    tray shows *Synced · 2 machines · web* or what is wrong, from `folder-sync status --json`.
 5. **The site opens in the app window**: robotparts.dev itself (same account, same cookie jar as the window), so the
@@ -55,7 +55,7 @@ same pieces.
 
 - `folder-sync login --open` (or `--json`): print the device grant as JSON and exit only when approved, so the app
   drives it without parsing human text. Today `login` prints text for a terminal.
-- `folder-sync status --json` already exists; add the hub and watcher state (PEP 0004) to it for the tray.
+- `folder-sync status --json` already exists; add the hub and watcher state (PEP 0005) to it for the tray.
 - A clean stop: the sidecar is stopped by the app with SIGTERM / CTRL_BREAK; `--watch` already finishes the manifest
   publish before exiting.
 - Later, for offline: `folder-sync serve` — the same `/fs/v1/folders/…` read routes answered from the local folder on
@@ -64,7 +64,7 @@ same pieces.
 
 ## 5. Reuse
 
-- **folder-sync** — the engine, unchanged: accounts (0003), push sync (0004), the service definitions (`--install-service`
+- **folder-sync** — the engine, unchanged: accounts (0003), push sync (0005), the service definitions (`--install-service`
   becomes the app's autostart fallback).
 - **ClaudeParty** (`/home/bam/claude-hub/packaging/`, `tray/`) — per-user install without admin, versioned installs with
   an atomic `current` link and one-step rollback, a sha256-checked update manifest, the tray's login autostart and a

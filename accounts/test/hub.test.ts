@@ -1,4 +1,4 @@
-// The folder hub on bare Node (node --test accounts/test/hub.test.ts; no workerd, no ports): PEP 0004 §3's rules.
+// The folder hub on bare Node (node --test accounts/test/hub.test.ts; no workerd, no ports): PEP 0005 §3's rules.
 //
 // What must hold:
 // - a `changed` is accepted from an owner's machine only, as text of at most 1 KB, with a lowercase UUID v4 host and a

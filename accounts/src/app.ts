@@ -15,7 +15,7 @@
 //   GET  /fs/v1/folders/:project/bundle?prefix=   a folder's small UTF-8 files in one answer
 //   GET  /fs/v1/folders/:project/files/:host/<p>  one file's bytes, sha256-checked; Range: one range -> 206 (ranges.ts)
 //   PUT|DELETE /fs/v1/folders/:project/web/<p>    the folder's web host (§3.4); X-Folder-Sync-Keep-Newest: <field>
-//   GET  /fs/v1/folders/:project/events           WebSocket upgrade: the folder's hub says "host H is at seq N" (PEP 0004)
+//   GET  /fs/v1/folders/:project/events           WebSocket upgrade: the folder's hub says "host H is at seq N" (PEP 0005)
 //   PATCH /fs/v1/folders/:project {visibility}    public or private
 //   POST /fs/v1/folders/:project/readers {email}, DELETE …/readers/:email
 //   GET  /fs/v1/access?project=&owner=            for an app's own server
@@ -58,7 +58,7 @@ export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
 	SIGN_UP_EMAILS?: string;
 	/** The web host's one writer per folder: a Durable Object namespace of webhost-do.ts's WebHostObject. */
 	WEB_HOST?: { idFromName(name: string): unknown; get(id: unknown): { run(op: WebOp): Promise<WebAnswer> } };
-	/** The folder's hub (PEP 0004): a Durable Object namespace of hub.ts's FolderHub. Absent, /events answers 503. */
+	/** The folder's hub (PEP 0005): a Durable Object namespace of hub.ts's FolderHub. Absent, /events answers 503. */
 	HUB?: { idFromName(name: string): unknown; get(id: unknown): { fetch(request: Request): Promise<Response> } };
 }
 
@@ -556,7 +556,7 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 	// WHY the quota is admitted and charged in there too: one at a time, by what the change really adds (review r2 #6)
 	const answer = await webHostOf(env, deps)(op);
 	if (answer.status === 200) {
-		// WHY after the answer (PEP 0004): telling the hub must not add its round trip to the page's write
+		// WHY after the answer (PEP 0005): telling the hub must not add its round trip to the page's write
 		const told = notifyHub(env, owner, project, answer.body);
 		if (deps.waitUntil) deps.waitUntil(told);
 		else await told;
@@ -613,7 +613,7 @@ async function purgeWebTrash(request: Request, env: Env, deps: Deps, app: App | 
 	return json(answer.status, answer.body, answer.headers ?? {});
 }
 
-// ------------------------------------------------------------------------------------------------ the hub (PEP 0004)
+// ------------------------------------------------------------------------------------------------ the hub (PEP 0005)
 
 /** The name of a folder's hub (a Durable Object of its own namespace, so it may share webHostName's spelling). */
 function hubName(owner: string, project: string): string {
@@ -649,7 +649,7 @@ async function notifyHub(env: Env, owner: string, project: string, body: unknown
 async function events(request: Request, env: Env, deps: Deps, app: App | null, project: string): Promise<Response> {
 	if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return fail(426, "upgrade_required", "this route is a WebSocket: send Upgrade: websocket", { Upgrade: "websocket" });
 	const who = await session(request, deps, app);
-	// WHY the Origin check (PEP 0004 §3): a browser sends its cookie on a WebSocket upgrade from any site, and a socket
+	// WHY the Origin check (PEP 0005 §3): a browser sends its cookie on a WebSocket upgrade from any site, and a socket
 	// is not bound by CORS; so a cookie session connects only from this site's own pages. A bearer can't be attached by
 	// a page, and a signed-out reader has no ambient credential to hijack.
 	if (who?.via === "cookie") {

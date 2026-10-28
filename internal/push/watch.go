@@ -1,4 +1,4 @@
-// Package push is the machine side of PEP 0004: a folder watcher and the folder hub's client. Both only say "run a
+// Package push is the machine side of PEP 0005: a folder watcher and the folder hub's client. Both only say "run a
 // round now"; the round, the manifest and the bucket are unchanged, so a missed signal costs one fallback interval,
 // never data.
 package push
