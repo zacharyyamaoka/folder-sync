@@ -18,9 +18,11 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"folder-sync/internal/creds"
 	"folder-sync/internal/layout"
+	"folder-sync/internal/trace"
 )
 
 // Remote is the rclone remote name folder-sync defines through the environment.
@@ -34,9 +36,18 @@ type Runner struct {
 	Bin    string
 	Layout layout.Layout
 	Creds  creds.Creds
-	Log    io.Writer // rclone's stderr, scrubbed of the key
-	Debug  bool      // -vv instead of NOTICE-level logging
+	Log    io.Writer     // rclone's stderr, scrubbed of the key
+	Debug  bool          // -vv instead of NOTICE-level logging
+	Trace  *trace.Writer // per-process timing (FOLDER_SYNC_TRACE); nil = off
+	// FailFast trims rclone's own retries (`sync --watch`): a call against a storage server that is down then fails
+	// in seconds instead of minutes. WHY only for --watch: its loop runs the next round anyway, and a person (the
+	// desktop app's tray) must see "offline" while it is true, not "syncing" for minutes; a one-off `sync --once`
+	// from cron keeps rclone's full retries.
+	FailFast bool
 }
+
+// FailFastFlags are added to every call when FailFast is set.
+var FailFastFlags = []string{"--retries", "1", "--low-level-retries", "2", "--contimeout", "5s"}
 
 // GlobalFlags are passed to every rclone call.
 func (r Runner) GlobalFlags() []string {
@@ -44,12 +55,16 @@ func (r Runner) GlobalFlags() []string {
 	if r.Debug {
 		level = "DEBUG"
 	}
-	return []string{
+	flags := []string{
 		"--config", r.Layout.RcloneConf,
 		"--cache-dir", r.Layout.Cache,
 		"--temp-dir", r.Layout.Tmp,
 		"--log-level", level,
 	}
+	if r.FailFast {
+		flags = append(flags, FailFastFlags...)
+	}
+	return flags
 }
 
 // Env is the process environment for rclone: the caller's, minus any RCLONE_*
@@ -92,7 +107,9 @@ func (r Runner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	started := time.Now()
 	err := cmd.Run()
+	r.Trace.Since("rclone", started, map[string]any{"verb": args[0]})
 	scrubbed := r.Creds.Scrub(stderr.String())
 	if r.Log != nil && scrubbed != "" {
 		fmt.Fprintf(r.Log, "rclone %s\n%s", args[0], scrubbed)

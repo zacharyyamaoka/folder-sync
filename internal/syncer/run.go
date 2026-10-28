@@ -104,9 +104,12 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 
 	var result Result
 	runErr := func() error {
+		step := time.Now()
 		if err := p.refreshCreds(); err != nil {
 			return err
 		}
+		p.Trace.Since("step", step, map[string]any{"name": "creds"})
+		step = time.Now()
 		// WHY no reconcile with read-only keys (review r2 #7): it moves strays to the trash, a write; peers are still
 		// looked for, so the pull below finds them
 		reconcile := opts.ForceReconcile || ReconcileDue(last, started)
@@ -126,6 +129,7 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 				return fmt.Errorf("discover peers: %w", err)
 			}
 			last.LastDiscover = p.Now().UTC().Format(time.RFC3339Nano)
+			p.Trace.Since("step", step, map[string]any{"name": "discover"})
 		}
 		// WHY an empty folder still pulls (review r1 #6): the refusal guards this machine's files in the bucket, not
 		// its copies of the others'; an edit on another machine or the web must still arrive. The round still
@@ -134,6 +138,7 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 		var refused error
 		var empty *EmptyFolderError
 		var readOnly *ReadOnlyError
+		step = time.Now()
 		if err := p.Push(ctx, stamp, &result); errors.As(err, &empty) || errors.As(err, &readOnly) {
 			refused = fmt.Errorf("push: %w", err)
 		} else if err != nil {
@@ -141,6 +146,8 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 		} else {
 			last.LastPush = p.Now().UTC().Format(time.RFC3339Nano)
 		}
+		p.Trace.Since("step", step, map[string]any{"name": "push", "uploaded": len(result.Uploaded), "deleted": len(result.Deleted), "manifest": result.ManifestWritten})
+		step = time.Now()
 		if opts.PushOnly {
 			return refused
 		}
@@ -148,10 +155,16 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 			return errors.Join(refused, fmt.Errorf("pull: %w", err))
 		}
 		last.LastPull = p.Now().UTC().Format(time.RFC3339Nano)
+		fetchedFiles := 0
+		for _, peer := range result.Peers {
+			fetchedFiles += peer.Fetched
+		}
+		p.Trace.Since("step", step, map[string]any{"name": "pull", "peers": len(result.Peers), "fetched": fetchedFiles})
 		return refused
 	}()
 
 	finished := p.Now()
+	p.Trace.Event("round", map[string]any{"start": started.UnixMilli(), "ms": finished.Sub(started).Milliseconds(), "ok": runErr == nil})
 	last.RoundFinished = finished.UTC().Format(time.RFC3339Nano)
 	last.OK = runErr == nil
 	last.Error = ""

@@ -25,6 +25,7 @@ import (
 	"folder-sync/internal/manifest"
 	"folder-sync/internal/rclone"
 	"folder-sync/internal/s3"
+	"folder-sync/internal/trace"
 )
 
 // ReconcileEvery is how often a full listing reconcile runs (docs/peps/0001 §4: "at start and hourly").
@@ -115,6 +116,7 @@ type Project struct {
 	// over its storage quota, docs/peps/0003 §3.7), as job (an id kept until the answer comes), from the manifest at
 	// fromSeq; the server answers the manifest it built. Nil when not signed in.
 	RemoteDelete func(ctx context.Context, job string, fromSeq int64, paths []string) (DeleteAnswer, error)
+	Trace    *trace.Writer // FOLDER_SYNC_TRACE: step timings; nil = off
 
 	// reportedSkips are the names last round already reported, so --watch says each once.
 	reportedSkips map[string]bool
@@ -164,6 +166,8 @@ func Open(folder string, l layout.Layout, getenv func(string) string, rcloneBin 
 	}
 	p.Log = logFile
 	p.Rclone = rclone.Runner{Bin: rcloneBin, Layout: l, Creds: c, Log: logFile, Debug: getenv("FOLDER_SYNC_DEBUG") != ""}
+	p.Trace = trace.Open(getenv(trace.Env))
+	p.Rclone.Trace = p.Trace
 	p.S3 = &s3.Client{}
 	p.useCreds(c)
 	return p, nil
@@ -428,4 +432,27 @@ func (p *Project) say(format string, args ...any) {
 		fmt.Fprintf(p.Out, format+"\n", args...)
 	}
 	p.logf(format, args...)
+}
+
+// ManifestSeq is the seq of the last manifest this machine uploaded (0 before the first).
+func (p *Project) ManifestSeq() int {
+	m, err := p.ownManifest()
+	if err != nil {
+		return 0
+	}
+	return int(m.Seq)
+}
+
+// KnownPeers maps each peer this machine pulls to the seq of the manifest it last read from it (0 if none yet).
+// WHY (PEP 0005): a hub message naming a host not in this map starts a discover in that round, not in 5 minutes.
+func (p *Project) KnownPeers() map[string]int {
+	out := map[string]int{}
+	for _, id := range p.loadPeers().Known {
+		seq := 0
+		if m, ok, err := manifest.Load(p.peerManifestPath(id)); err == nil && ok {
+			seq = int(m.Seq)
+		}
+		out[id] = seq
+	}
+	return out
 }

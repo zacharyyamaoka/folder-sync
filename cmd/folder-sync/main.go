@@ -27,6 +27,7 @@ import (
 	"folder-sync/internal/creds"
 	"folder-sync/internal/host"
 	"folder-sync/internal/layout"
+	"folder-sync/internal/push"
 	"folder-sync/internal/rclone"
 	"folder-sync/internal/rclonebin"
 	"folder-sync/internal/s3"
@@ -314,16 +315,21 @@ func cmdLogin(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	server := fs.String("server", "", "the accounts server or an app's own mount (default: $"+account.EnvServer+", else "+account.DefaultServer+")")
 	key := fs.Bool("key", false, "store a bucket-scoped R2 key instead (v0's login)")
+	asJSON := fs.Bool("json", false, "print folder-sync-login/1 events, one JSON object per line, for an app to drive (docs/peps/0006)")
+	printToken := fs.Bool("print-token", false, "with --json: hand the session to the caller in the last event instead of writing account.json")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *key {
-		if *server != "" {
-			return fmt.Errorf("--key and --server are exclusive")
+		if *server != "" || *asJSON || *printToken {
+			return fmt.Errorf("--key is exclusive with --server, --json and --print-token")
 		}
 		return loginKey(out)
 	}
-	return loginDevice(*server, out)
+	if *printToken && !*asJSON {
+		return fmt.Errorf("--print-token needs --json: it is for an app reading a pipe, never a terminal")
+	}
+	return loginDevice(*server, out, loginMode{json: *asJSON, printToken: *printToken})
 }
 
 // loginKey is v0's login: a bucket key from the environment, else asked for on the terminal.
@@ -419,6 +425,8 @@ func cmdSync(args []string, out io.Writer) error {
 	watch := fs.Bool("watch", false, "run a round every `interval` (from .folder-sync.toml) until stopped")
 	install := fs.Bool("install-service", false, "write the autostart definition for `sync --watch` and print how to enable it")
 	discover := fs.Bool("discover", false, "look for new machines this round (one LIST) instead of every 5 min")
+	noPush := fs.Bool("no-push", false, "poll every `interval` only: no folder watcher, no hub, no announce after --once (docs/peps/0005)")
+	events := fs.Bool("events", false, "with --watch: print folder-sync-event/1 JSON lines on stdout (human lines go to stderr), for an app's status")
 	dir := folderFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -428,6 +436,14 @@ func cmdSync(args []string, out io.Writer) error {
 	}
 	if *install {
 		return installService(*dir, out)
+	}
+	if *events && !*watch {
+		return fmt.Errorf("--events needs --watch")
+	}
+	var ev *eventWriter
+	if *events {
+		ev = &eventWriter{out: out}
+		out = os.Stderr
 	}
 	p, err := openProject(*dir, out)
 	if err != nil {
@@ -440,37 +456,207 @@ func cmdSync(args []string, out io.Writer) error {
 			return err
 		}
 		printResult(out, p, result)
+		if result.ManifestWritten && !*noPush {
+			announceOnce(p)
+		}
 		return nil
 	}
-	return watchLoop(p, out)
+	return watchLoop(p, out, *noPush, ev)
 }
 
-func watchLoop(p *syncer.Project, out io.Writer) error {
+func watchLoop(p *syncer.Project, out io.Writer, noPush bool, ev *eventWriter) error {
+	p.Rclone.FailFast = true // a down server shows as a failed round in seconds; the loop tries again (rclone.FailFast)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	interval := p.Config.IntervalDuration()
-	fmt.Fprintf(out, "Watching %s every %s (project %q, host %s). Stop with Ctrl-C.\n", p.Folder, interval, p.Config.Project, p.Host.ID)
+
+	// PEP 0005: a round starts when something changed (the folder watcher, the folder's hub), not only on a timer;
+	// the timer stays as the safety net. --no-push is the old loop exactly.
+	var watcher *push.Watcher
+	var hub *push.Hub
+	if !noPush {
+		watcher = push.Watch(p.Folder, p.Config.PeersDir)
+		defer watcher.Close()
+		hub = startHub(ctx, p, ev)
+	}
+	{
+		state := syncEvent{Event: "watching", Folder: p.Folder, Project: p.Config.Project, Host: p.Host.ID, Hub: "off"}
+		if watcher != nil {
+			state.Watcher = boolPtr(watcher.Healthy())
+		}
+		if hub != nil {
+			state.Hub = "on"
+		}
+		ev.emit(state)
+	}
+	mode := "polling only (--no-push)"
+	if !noPush {
+		mode = fmt.Sprintf("folder watcher %s, hub %s", onOff(watcher.Healthy()), hubState(hub))
+	}
+	fmt.Fprintf(out, "Watching %s every %s (project %q, host %s); %s. Stop with Ctrl-C.\n", p.Folder, interval, p.Config.Project, p.Host.ID, mode)
+
+	var fsChanged <-chan struct{}
+	var hubEvents <-chan push.Event
+	if watcher != nil {
+		fsChanged = watcher.Changed
+	}
+	if hub != nil {
+		hubEvents = hub.Events
+	}
 	opts := syncer.Options{ForceReconcile: true} // docs/peps/0001 §4: reconcile at start, then hourly
+	source := "start"
 	for {
+		ev.emit(syncEvent{Event: "round_start", Source: source})
+		started := time.Now()
 		result, err := p.Round(ctx, opts)
-		opts.ForceReconcile = false
+		opts = syncer.Options{}
 		if err != nil {
 			if ctx.Err() != nil {
 				break
 			}
+			kind, why := classifyRound(err, p.Rclone.Creds.Endpoint, hubServer(p))
+			ev.emit(syncEvent{Event: "round", OK: boolPtr(false), Kind: kind, Why: why, Ms: time.Since(started).Milliseconds()})
 			fmt.Fprintf(out, "%s round failed: %v\n", time.Now().Format("15:04:05"), err)
-		} else if len(result.Uploaded)+len(result.Deleted)+fetched(result) > 0 || result.Reconciled {
-			printResult(out, p, result)
+		} else {
+			ev.emit(syncEvent{Event: "round", OK: boolPtr(true), Uploaded: len(result.Uploaded), Deleted: len(result.Deleted),
+				Fetched: fetched(result), Peers: len(result.Peers), Ms: time.Since(started).Milliseconds()})
+			if result.ManifestWritten {
+				hub.Announce(p.Host.ID, p.ManifestSeq())
+			}
+			if len(result.Uploaded)+len(result.Deleted)+fetched(result) > 0 || result.Reconciled {
+				printResult(out, p, result)
+			}
 		}
-		select {
-		case <-ctx.Done():
+		wait := push.NextWait(hub.Connected(), watcher.Healthy(), interval)
+		if noPush {
+			wait = interval
+		}
+		var discover, stopped bool
+		source, discover, stopped = nextKick(ctx, p, fsChanged, hubEvents, wait)
+		if stopped {
+			ev.emit(syncEvent{Event: "stopped"})
 			fmt.Fprintln(out, "Stopped.")
 			return nil
-		case <-time.After(interval):
 		}
+		opts.ForceDiscover = discover
+		p.Trace.Event("kick", map[string]any{"source": source, "discover": discover})
 	}
+	ev.emit(syncEvent{Event: "stopped"})
 	fmt.Fprintln(out, "Stopped.")
 	return nil
+}
+
+// nextKick waits for the next reason to run a round: the folder changed, the hub named a host (a new one also asks
+// for a discover), the hub said hello (catch up), or the fallback timer. Hub messages about this machine itself are
+// echoes and are skipped.
+func nextKick(ctx context.Context, p *syncer.Project, fsChanged <-chan struct{}, hubEvents <-chan push.Event, wait time.Duration) (source string, discover, stopped bool) {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return "", false, true
+		case <-fsChanged:
+			return "fs", false, false
+		case ev := <-hubEvents:
+			known := p.KnownPeers()
+			if ev.Hello {
+				behind, unknown := false, false
+				for id, seq := range ev.Hosts {
+					if id == p.Host.ID {
+						continue
+					}
+					have, ok := known[id]
+					behind = behind || !ok || have < seq
+					unknown = unknown || !ok
+				}
+				if behind {
+					return "hello", unknown, false
+				}
+				continue // nothing new
+			}
+			if ev.Host == p.Host.ID {
+				continue
+			}
+			if have, ok := known[ev.Host]; ok && have >= ev.Seq {
+				continue // already have it
+			} else {
+				return "hub", !ok, false
+			}
+		case <-timer.C:
+			return "timer", false, false
+		}
+	}
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+func hubState(h *push.Hub) string {
+	if h == nil {
+		return "off (not signed in to an account)"
+	}
+	return "on (" + h.URL + ")"
+}
+
+// announceOnce tells the folder's hub about this round's manifest (sync --once; PEP 0005), when signed in.
+func announceOnce(p *syncer.Project) {
+	server, token, ok := hubAccount(p)
+	if !ok {
+		return
+	}
+	u, err := push.EventsURL(server, p.Config.Project)
+	if err != nil {
+		return
+	}
+	if err := push.AnnounceOnce(context.Background(), u, token, userAgent(p.Layout), p.Host.ID, p.ManifestSeq(), 5*time.Second); err != nil {
+		p.Trace.Event("hub", map[string]any{"state": "announce failed"})
+	}
+}
+
+// hubServer is the account server this machine syncs through, or "" (for the offline probe of a failed round).
+func hubServer(p *syncer.Project) string {
+	server, _, ok := hubAccount(p)
+	if !ok {
+		return ""
+	}
+	return server
+}
+
+// hubAccount is the account server and token the hub is reached with, when this machine syncs through its account.
+func hubAccount(p *syncer.Project) (server, token string, ok bool) {
+	if os.Getenv(creds.EnvCredentialProcess) != "" || os.Getenv(creds.EnvAccessKeyID) != "" || os.Getenv(creds.EnvSecretAccessKey) != "" {
+		return "", "", false
+	}
+	a, err := account.Current(p.Layout.Account, os.Getenv)
+	if err != nil || a.Server == "" || a.Token == "" {
+		return "", "", false
+	}
+	return a.Server, a.Token, true
+}
+
+// startHub connects to the folder's hub when this machine syncs through its account (the same condition under which
+// folder-sync is its own credential process): a stored key or a key in the environment has no account to ask.
+func startHub(ctx context.Context, p *syncer.Project, ev *eventWriter) *push.Hub {
+	server, token, ok := hubAccount(p)
+	if !ok {
+		return nil
+	}
+	u, err := push.EventsURL(server, p.Config.Project)
+	if err != nil {
+		return nil
+	}
+	hub := push.NewHub(u, token, userAgent(p.Layout))
+	hub.OnState = func(state string) {
+		p.Trace.Event("hub", map[string]any{"state": state})
+		ev.emit(syncEvent{Event: "hub", Hub: state})
+	}
+	go hub.Run(ctx)
+	return hub
 }
 
 func fetched(r syncer.Result) int {

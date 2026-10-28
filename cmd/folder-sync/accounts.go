@@ -34,7 +34,7 @@ func credentialEnv(l layout.Layout, getenv func(string) string, executable func(
 	if getenv(creds.EnvCredentialProcess) != "" || getenv(creds.EnvAccessKeyID) != "" || getenv(creds.EnvSecretAccessKey) != "" {
 		return getenv
 	}
-	if _, err := os.Stat(l.Account); err != nil {
+	if !account.SignedIn(l.Account, getenv) {
 		return getenv
 	}
 	self, err := executable()
@@ -42,7 +42,7 @@ func credentialEnv(l layout.Layout, getenv func(string) string, executable func(
 		return getenv
 	}
 	args := []string{self, "credentials"}
-	if a, err := account.Load(l.Account); err == nil {
+	if a, err := account.Current(l.Account, getenv); err == nil {
 		args = append(args, "--account", a.Identity())
 	}
 	argv, err := json.Marshal(args)
@@ -69,9 +69,9 @@ func userAgent(l layout.Layout) string {
 	return account.UserAgent(version, name, runtime.GOOS)
 }
 
-// signedIn loads account.json and a client for its server.
+// signedIn loads this machine's sign-in (the account process, else account.json) and a client for its server.
 func signedIn(l layout.Layout) (account.Account, *account.Client, error) {
-	a, err := account.Load(l.Account)
+	a, err := account.Current(l.Account, os.Getenv)
 	if err != nil {
 		return account.Account{}, nil, err
 	}
@@ -82,8 +82,46 @@ func signedIn(l layout.Layout) (account.Account, *account.Client, error) {
 	return a, account.NewClient(server, userAgent(l)), nil
 }
 
-// loginDevice signs this machine in with the device grant and stores account.json.
-func loginDevice(serverFlag string, out io.Writer) error {
+// loginMode is how `login` talks: text for a person at a terminal, or folder-sync-login/1 events for an app.
+type loginMode struct {
+	json       bool // one JSON object per line on stdout
+	printToken bool // the session goes to the caller in the last event; account.json is not written
+}
+
+// LoginSchema names `login --json`'s events.
+const LoginSchema = "folder-sync-login/1"
+
+// loginEvent is one line of `login --json`: "device" (open Link; Code is shown only as a cross-check), then
+// "signed_in", or "error". Account is set only with --print-token.
+type loginEvent struct {
+	Schema    string           `json:"schema"`
+	Event     string           `json:"event"`
+	Link      string           `json:"link,omitempty"`
+	Code      string           `json:"user_code,omitempty"`
+	ExpiresIn int              `json:"expires_in,omitempty"`
+	Server    string           `json:"server,omitempty"`
+	User      *account.User    `json:"user,omitempty"`
+	Root      string           `json:"root,omitempty"`
+	Account   *account.Account `json:"account,omitempty"`
+	Error     string           `json:"error,omitempty"`
+}
+
+func emit(out io.Writer, ev loginEvent) {
+	ev.Schema = LoginSchema
+	data, _ := json.Marshal(ev)
+	out.Write(append(data, '\n'))
+}
+
+// loginDevice signs this machine in with the device grant and stores account.json (or, with --print-token, hands
+// the session to the app that ran it: the desktop app keeps it in the OS keychain, docs/peps/0006).
+func loginDevice(serverFlag string, out io.Writer, mode loginMode) (err error) {
+	if mode.json {
+		defer func() {
+			if err != nil {
+				emit(out, loginEvent{Event: "error", Error: err.Error()})
+			}
+		}()
+	}
 	l := mustLayout()
 	if err := ensureDirs(l); err != nil {
 		return err
@@ -99,9 +137,13 @@ func loginDevice(serverFlag string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	minutes := (device.ExpiresIn + 59) / 60
-	fmt.Fprintf(out, "To sign this machine in, open %s and approve the code %s (it expires in %d min).\n", device.Link(), device.Shown(), minutes)
-	fmt.Fprintf(out, "Waiting for the approval…\n")
+	if mode.json {
+		emit(out, loginEvent{Event: "device", Link: device.Link(), Code: device.Shown(), ExpiresIn: device.ExpiresIn, Server: server})
+	} else {
+		minutes := (device.ExpiresIn + 59) / 60
+		fmt.Fprintf(out, "To sign this machine in, open %s and approve the code %s (it expires in %d min).\n", device.Link(), device.Shown(), minutes)
+		fmt.Fprintf(out, "Waiting for the approval…\n")
+	}
 	token, err := client.AwaitApproval(ctx, device, account.Sleep)
 	if err != nil {
 		return err
@@ -110,12 +152,23 @@ func loginDevice(serverFlag string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := account.Save(l.Account, account.Account{Server: server, Token: token, User: user, SignedIn: time.Now().UTC().Format(time.RFC3339)}); err != nil {
-		return err
-	}
+	signed := account.Account{Schema: account.Schema, Server: server, Token: token, User: user, SignedIn: time.Now().UTC().Format(time.RFC3339)}
 	// WHY: keys cached for whoever was signed in before are never this person's (review r1 #1)
 	if err := os.Remove(l.Session); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	if mode.printToken {
+		// WHY no account.json: the caller keeps the session (the desktop app's OS keychain) and hands it back through
+		// FOLDER_SYNC_ACCOUNT_PROCESS; a plain-text copy on disk would defeat that.
+		emit(out, loginEvent{Event: "signed_in", Server: server, User: &user, Root: root, Account: &signed})
+		return nil
+	}
+	if err := account.Save(l.Account, signed); err != nil {
+		return err
+	}
+	if mode.json {
+		emit(out, loginEvent{Event: "signed_in", Server: server, User: &user, Root: root})
+		return nil
 	}
 	fmt.Fprintf(out, "Signed in as %s at %s (account root %s); kept in %s (mode 0600).\n", user.Email, server, root, l.Account)
 	if _, ok, _ := creds.FromEnv(os.Getenv); ok {
