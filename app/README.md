@@ -1,6 +1,6 @@
 # folder-sync desktop
 
-The downloadable app from [PEP 0005](../docs/peps/0005-desktop-app.md): sign in, and your folder is just there.
+The downloadable app from [PEP 0006](../docs/peps/0006-desktop-app.md): sign in, and your folder is just there.
 No terminal, no code to type. Tauri 2.11.5 wraps the folder-sync Go binary, which runs as its sidecar unchanged.
 
 ## What the person sees
@@ -23,7 +23,7 @@ No terminal, no code to type. Tauri 2.11.5 wraps the folder-sync Go binary, whic
 | Session | `src-tauri/src/vault.rs` | the stock `keyring` crate: Secret Service on Linux, Keychain on macOS, Credential Manager on Windows. One entry per server (`dev.folder-sync.desktop` / `session@<server>`), so a local or staging sign-in is never used against robotparts.dev. **The token is never written to disk in plain text.** There is no `account.json` |
 | Engine ↔ session | `FOLDER_SYNC_ACCOUNT_PROCESS` | the engine runs `folder-sync-desktop --account-process` whenever it needs the sign-in (keys, hub, logout). That reads the keychain and prints it; exit 3 means signed out |
 | Folder | `core.rs` `use_folder` | `mkdir -p`, then `folder-sync init --project robotparts --dir <folder>` |
-| Sync | `core.rs` `start_engine` | `folder-sync sync --watch --events --dir <folder>`, so push is on (PEP 0004). Each round is a `folder-sync-event/1` JSON line, and the tray state comes from those lines. The engine is restarted if it dies and stopped with SIGTERM so it finishes its round |
+| Sync | `core.rs` `start_engine` | `folder-sync sync --watch --events --dir <folder>`, so push is on (PEP 0005). Each round is a `folder-sync-event/1` JSON line, and the tray state comes from those lines. The engine is restarted if it dies and stopped with SIGTERM so it finishes its round |
 | Tray | `src-tauri/src/tray.rs` | an icon per state (`icons/tray/*.png`, drawn by `scripts/make_icons.py`) and a menu rebuilt on every change |
 | Login autostart | `tauri-plugin-autostart` | turned on at the first sign-in; *Start at login* toggles it. On Linux it writes `~/.config/autostart/folder-sync.desktop` with `--hidden` (tray only) |
 | Window | `ui/` | one plain HTML page. Every button is the same `action` as a menu item |
@@ -104,7 +104,7 @@ cross-compiles (`GOOS=darwin|windows`). What is missing is per-OS packaging, sig
 - The default folder is `Documents\robotparts` (`core::default_folder` already does this).
 - **Stopping the engine:** today `stop_engine` kills it on Windows. It must start the engine in its own process group
   (`CREATE_NEW_PROCESS_GROUP`) and send `CTRL_BREAK_EVENT` first, so `--watch` finishes its manifest publish (PEP
-  0005 §4). This is marked `TODO(windows)` in `core.rs`.
+  0006 §4). This is marked `TODO(windows)` in `core.rs`.
 - The engine needs `CREATE_NO_WINDOW`, or a console flashes up on every round.
 - Login autostart: the plugin writes the `HKCU\…\Run` key.
 

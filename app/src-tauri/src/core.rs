@@ -1,7 +1,7 @@
 //! What the app is doing, and the folder-sync engine it runs as its sidecar.
 //!
-//! The engine is the same Go binary the CLI is (docs/peps/0005 §4): `login --json --print-token` signs in,
-//! `init` makes the folder a synced folder, `sync --watch --events` keeps it in sync with push on (PEP 0004) and
+//! The engine is the same Go binary the CLI is (docs/peps/0006 §4): `login --json --print-token` signs in,
+//! `init` makes the folder a synced folder, `sync --watch --events` keeps it in sync with push on (PEP 0005) and
 //! reports each round as a folder-sync-event/1 line, `logout` ends the session on the server. The app only keeps
 //! the session (keychain), the settings, and the tray.
 

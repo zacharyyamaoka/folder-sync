@@ -315,7 +315,7 @@ func cmdLogin(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	server := fs.String("server", "", "the accounts server or an app's own mount (default: $"+account.EnvServer+", else "+account.DefaultServer+")")
 	key := fs.Bool("key", false, "store a bucket-scoped R2 key instead (v0's login)")
-	asJSON := fs.Bool("json", false, "print folder-sync-login/1 events, one JSON object per line, for an app to drive (docs/peps/0005)")
+	asJSON := fs.Bool("json", false, "print folder-sync-login/1 events, one JSON object per line, for an app to drive (docs/peps/0006)")
 	printToken := fs.Bool("print-token", false, "with --json: hand the session to the caller in the last event instead of writing account.json")
 	if err := fs.Parse(args); err != nil {
 		return err

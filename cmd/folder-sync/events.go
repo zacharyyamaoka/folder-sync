@@ -1,7 +1,7 @@
 package main
 
 // `sync --watch --events`: one folder-sync-event/1 JSON object per line on stdout, for an app (the desktop app's
-// tray, docs/peps/0005) to show what the engine is doing without parsing human text. The human lines go to stderr.
+// tray, docs/peps/0006) to show what the engine is doing without parsing human text. The human lines go to stderr.
 
 import (
 	"encoding/json"
@@ -22,7 +22,7 @@ import (
 // EventSchema names `sync --events`' lines.
 const EventSchema = "folder-sync-event/1"
 
-// Error kinds a failed round is sorted into. WHY these four: they are the tray's states (PEP 0005) — the person can
+// Error kinds a failed round is sorted into. WHY these four: they are the tray's states (PEP 0006) — the person can
 // act on "signed out" (sign in) and "over quota" (delete files, see Why), waits out "offline", and reads the rest.
 const (
 	KindSignedOut = "signed_out"

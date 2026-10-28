@@ -113,7 +113,7 @@ func emit(out io.Writer, ev loginEvent) {
 }
 
 // loginDevice signs this machine in with the device grant and stores account.json (or, with --print-token, hands
-// the session to the app that ran it: the desktop app keeps it in the OS keychain, docs/peps/0005).
+// the session to the app that ran it: the desktop app keeps it in the OS keychain, docs/peps/0006).
 func loginDevice(serverFlag string, out io.Writer, mode loginMode) (err error) {
 	if mode.json {
 		defer func() {

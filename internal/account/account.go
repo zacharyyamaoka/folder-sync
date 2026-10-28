@@ -91,7 +91,7 @@ func Load(path string) (Account, error) {
 
 // EnvAccountProcess names a program (a JSON array, its argv, argv[0] absolute) that prints this machine's sign-in as a
 // folder-sync-account/1 document on stdout, in place of account.json; its exit 3 means not signed in. The desktop
-// app (docs/peps/0005) sets it: the session token stays in the OS keychain and is handed to folder-sync in memory, so
+// app (docs/peps/0006) sets it: the session token stays in the OS keychain and is handed to folder-sync in memory, so
 // no token is ever written to disk in plain text. WHY a program and not an environment variable holding the token:
 // the token would then sit in /proc/<pid>/environ of every round's helper for as long as they run, and a stale copy
 // would outlive a sign-out; the program is asked each time, so a sign-out in the app takes effect at the next ask.

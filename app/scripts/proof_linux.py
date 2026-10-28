@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The desktop app's first-run proof on Linux, headless (docs/peps/0005 §6.3).
+"""The desktop app's first-run proof on Linux, headless (docs/peps/0006 §6.3).
 
     /home/bam/psu-atlas/.venv/bin/python app/scripts/proof_linux.py --app <AppImage or binary> --out <dir>
 

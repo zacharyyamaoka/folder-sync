@@ -1,6 +1,6 @@
 package main
 
-// The engine side of the desktop app (docs/peps/0005): the session from an account process instead of account.json,
+// The engine side of the desktop app (docs/peps/0006): the session from an account process instead of account.json,
 // `login --json --print-token`, and `sync --events`' error kinds.
 
 import (

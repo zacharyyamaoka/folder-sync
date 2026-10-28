@@ -1,4 +1,4 @@
-//! folder-sync desktop (docs/peps/0005): sign in, and your folder is just there.
+//! folder-sync desktop (docs/peps/0006): sign in, and your folder is just there.
 //!
 //! `folder-sync-desktop`            the tray app (and its window)
 //! `folder-sync-desktop --hidden`   the same, tray only (login autostart)

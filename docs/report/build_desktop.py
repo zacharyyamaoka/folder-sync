@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds the desktop-app review report (PEP 0005) from a run of app/scripts/proof_linux.py.
+"""Builds the desktop-app review report (PEP 0006) from a run of app/scripts/proof_linux.py.
 
     python3 docs/report/build_desktop.py --proof <proof out dir> [--extra <dir of extra shots>] [--out FILE]
 
@@ -196,7 +196,7 @@ ul {{ padding-left:20px }} li {{ margin:4px 0 }}
 details summary {{ cursor:pointer; color:var(--muted) }}
 </style></head><body><main>
 <h1>folder-sync desktop app</h1>
-<p class="muted">PEP 0005 prototype · lane <code>lane/desktop</code> (folder-sync), not merged · 2026-10-27 · proved against the local accounts stack only, never production</p>
+<p class="muted">PEP 0006 prototype · lane <code>lane/desktop</code> (folder-sync), not merged · 2026-10-27 · proved against the local accounts stack only, never production</p>
 <div class="verdict"><b>Sign in, click Create folder, and the folder syncs. Across {len(run_rows)} full runs, a file dropped in it showed on the robotparts page in a median of {agg_med} ms ({agg_under} of {len(app_all)} under 1 s); the CLI, measured at the same moments, {cli_agg_med} ms ({cli_agg_under} of {len(cli_all)}).</b>
 The 1 s target holds for the median, not for every file: this machine ran at load {min(l for _, l, _, _ in run_rows):.0f}–{max(l for _, l, _, _ in run_rows):.0f} on 24 cores during the runs. Run by run the app's median was below the CLI's in {sum(1 for _, _, a, c in run_rows if a and c and statistics.median(a) < statistics.median(c))} of {len(run_rows)} runs: the gap is noise in both directions, not app overhead, since the app runs the same engine path the CLI does.
 The token lives only in the OS keychain. Linux .deb and AppImage are built locally. macOS and Windows are written down, not built. There is no download link yet (needs a build host).</div>
@@ -332,7 +332,7 @@ The token lives only in the OS keychain. Linux .deb and AppImage are built local
 <li>No merge, no deploy, no production server touched.</li>
 <li>No macOS or Windows builds (written down above).</li>
 <li>No run against robotparts.dev: production was never touched. <code>app/scripts/try_local.sh</code> runs the app on the local stack with its own HOME.</li>
-<li>No in-app web view of robotparts.dev (PEP 0005 §3.5): the tray app came first, as asked.</li>
+<li>No in-app web view of robotparts.dev (PEP 0006 §3.5): the tray app came first, as asked.</li>
 </ul></div></div>
 </main></body></html>
 """

@@ -2,7 +2,7 @@
 //! Credential Manager on Windows), through the stock `keyring` crate.
 //!
 //! WHY the whole folder-sync-account/1 document as the secret: the engine asks for it through
-//! FOLDER_SYNC_ACCOUNT_PROCESS (`folder-sync-desktop --account-process`, docs/peps/0005), so the app never writes
+//! FOLDER_SYNC_ACCOUNT_PROCESS (`folder-sync-desktop --account-process`, docs/peps/0006), so the app never writes
 //! account.json, and the token never touches the disk in plain text.
 
 use keyring::Entry;

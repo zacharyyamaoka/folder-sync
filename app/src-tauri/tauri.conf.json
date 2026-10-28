@@ -33,7 +33,7 @@
     "publisher": "BAM Robotics",
     "category": "Utility",
     "shortDescription": "Your folder, on every machine and online",
-    "longDescription": "Sign in once; the app makes your folder and keeps it in sync in the background (folder-sync, docs/peps/0005).",
+    "longDescription": "Sign in once; the app makes your folder and keeps it in sync in the background (folder-sync, docs/peps/0006).",
     "externalBin": [
       "binaries/folder-sync"
     ],
