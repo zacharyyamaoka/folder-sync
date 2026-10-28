@@ -105,7 +105,8 @@ jobs:
         run: |
           set -euo pipefail
           cd "${{ matrix.bundle_dir }}"
-          ls -laR . | head -80
+          # WHY no `| head`: under pipefail its SIGPIPE fails the step (exit 141) once the listing is long
+          find . -maxdepth 2 -not -path '*/.*' | sort
           case "${{ matrix.name }}" in
             macos)   lipo -info macos/folder-sync.app/Contents/MacOS/folder-sync
                      ls -la macos/folder-sync.app/Contents/MacOS/
