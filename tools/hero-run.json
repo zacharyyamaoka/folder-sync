@@ -1,0 +1,102 @@
+{
+  "result": {
+    "plan_online_ms": 283,
+    "sketch_online_ms": 351,
+    "bom_online_ms": 331,
+    "edit_online_ms": 332,
+    "edit_peer_ms": 304
+  },
+  "marks": [
+    {
+      "name": "start",
+      "t": 1793228057445.6223
+    },
+    {
+      "name": "watching",
+      "t": 1793228061177.957
+    },
+    {
+      "name": "dropped",
+      "t": 1793228064539.9895
+    },
+    {
+      "name": "edited",
+      "t": 1793228066998.8916
+    },
+    {
+      "name": "end",
+      "t": 1793228071802.2344,
+      "result": {
+        "plan_online_ms": 283,
+        "sketch_online_ms": 351,
+        "bom_online_ms": 331,
+        "edit_online_ms": 332,
+        "edit_peer_ms": 304
+      }
+    }
+  ],
+  "measures": {
+    "plan.md@3f595706ac8e462b858e14caa8e8dca15271ef2a036f131a1c314f9c467db9ca": {
+      "write_ms": 1793228061529.681,
+      "online_ms": 283,
+      "peer_ms": 334
+    },
+    "bom.json@5ddd08fed787e8724ac713b472a1862a228385063837c24de402c628e5bd2e11": {
+      "write_ms": 1793228062132.645,
+      "online_ms": 331,
+      "peer_ms": 334
+    },
+    "sketch.png@8a887f58434ca72c2542a008096ded1c9a489c664d43b8c634fb57d0b354c98f": {
+      "write_ms": 1793228062736.2913,
+      "peer_ms": 344,
+      "online_ms": 351
+    },
+    "plan.md@f4ca09b0a7dd1a00e0af229bf841194112fd7b8b2a2fb13c4b30e94b3397db65": {
+      "write_ms": 1793228066046.4468,
+      "peer_ms": 304,
+      "online_ms": 332
+    }
+  },
+  "video": "<scratch>/hero/take3/raw/6c4738c280b41d1b82c04bd93f94e0f5.webm",
+  "offset_s": 0.0,
+  "length_s": 14.756612060546875,
+  "hosts": {
+    "a": "c96ea156-d81f-4ff2-b267-7fe18f47b816",
+    "b": "23745736-1877-42e0-a858-0fd2cfbdd957"
+  },
+  "log_a": [
+    "Watching ~/notes every 10s (project \"notes\", host c96ea156-d81f-4ff2-b267-7fe18f47b816); folder watcher on, hub on (ws://127.0.0.1:5242/fs/v1/folders/notes/events). Stop with Ctrl-C.",
+    "found peer 23745736-1877-42e0-a858-0fd2cfbdd957",
+    "15:54:20 push: 0 uploaded, 0 deleted to _trash/, manifest rewritten (after a full reconcile)",
+    "15:54:20 pull: 23745736 bam-GPU (0 files): 0 fetched, 0 removed \u2192 hosts/23745736/",
+    "15:54:21 push: 1 uploaded, 0 deleted to _trash/, manifest rewritten",
+    "  \u2191 plan.md",
+    "15:54:21 pull: 23745736 bam-GPU (0 files): unchanged (304) \u2192 hosts/23745736/",
+    "15:54:22 push: 1 uploaded, 0 deleted to _trash/, manifest rewritten",
+    "  \u2191 bom.json",
+    "15:54:22 pull: 23745736 bam-GPU (0 files): unchanged (304) \u2192 hosts/23745736/",
+    "15:54:22 push: 1 uploaded, 0 deleted to _trash/, manifest rewritten",
+    "  \u2191 sketch.png",
+    "15:54:22 pull: 23745736 bam-GPU (0 files): unchanged (304) \u2192 hosts/23745736/",
+    "15:54:26 push: 1 uploaded, 0 deleted to _trash/, manifest rewritten",
+    "  \u2191 plan.md",
+    "15:54:26 pull: 23745736 bam-GPU (0 files): unchanged (304) \u2192 hosts/23745736/",
+    "Stopped."
+  ],
+  "log_b": [
+    "Watching ~/notes every 10s (project \"notes\", host 23745736-1877-42e0-a858-0fd2cfbdd957); folder watcher on, hub on (ws://127.0.0.1:5242/fs/v1/folders/notes/events). Stop with Ctrl-C.",
+    "15:54:17 push: 0 uploaded, 0 deleted to _trash/, manifest rewritten (after a full reconcile)",
+    "15:54:17 pull: no peers known yet (new machines are looked for every 5 min)",
+    "found peer c96ea156-d81f-4ff2-b267-7fe18f47b816",
+    "15:54:21 push: 0 uploaded, 0 deleted to _trash/",
+    "15:54:21 pull: c96ea156 bam-GPU (1 file): 1 fetched, 0 removed \u2192 hosts/c96ea156/",
+    "15:54:22 push: 0 uploaded, 0 deleted to _trash/",
+    "15:54:22 pull: c96ea156 bam-GPU (2 files): 1 fetched, 0 removed \u2192 hosts/c96ea156/",
+    "15:54:23 push: 0 uploaded, 0 deleted to _trash/",
+    "15:54:23 pull: c96ea156 bam-GPU (3 files): 1 fetched, 0 removed \u2192 hosts/c96ea156/",
+    "15:54:26 push: 0 uploaded, 0 deleted to _trash/",
+    "15:54:26 pull: c96ea156 bam-GPU (3 files): 1 fetched, 0 removed \u2192 hosts/c96ea156/",
+    "Stopped."
+  ],
+  "recorded": "2026-10-28T15:54:32-0700"
+}

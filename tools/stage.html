@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>folder-sync hero</title>
+<!--
+  The hero video's stage, served by record_hero.py. Every pane shows something real:
+  - Laptop terminal: the folder-sync CLI's own output (init, publish --public, sync --watch), run by the harness.
+  - Laptop editor: the text typed here is written to ~/notes/plan.md on save, by the harness (a plain file write).
+  - Online: the accounts Worker's public folder API (GET /fs/v1/folders/notes and /files/<host>/<path>), fetched
+    through the harness (this page is on another origin) and drawn as a list; images and text are the served bytes.
+  - Second machine: machine B's real folder on disk (another HOME, its own sync --watch), read by the harness.
+  Captions carry times the harness measured: write on disk -> the Worker serves the same bytes, and -> B's disk.
+-->
+<style>
+  :root {
+    --paper: #fbfbf8; --paper-2: #f3f3ee; --ink: #0e100e; --muted: #5b605b;
+    --line: rgba(14,16,14,.10); --line-strong: rgba(14,16,14,.22);
+    --accent: #2f6f4f; --accent-soft: rgba(47,111,79,.12);
+    --term: #0c0e0c; --term-ink: #dfe5dc; --term-muted: #8a918a; --term-accent: #6cc495;
+    --mono: "JetBrains Mono", "DejaVu Sans Mono", ui-monospace, monospace;
+    --sans: "Inter", "DejaVu Sans", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { width: 1280px; height: 720px; overflow: hidden; background: var(--paper); color: var(--ink); font: 14px/1.5 var(--sans);
+    background-image: linear-gradient(rgba(14,16,14,.04) 1px, transparent 1px), linear-gradient(90deg, rgba(14,16,14,.04) 1px, transparent 1px); background-size: 32px 32px; }
+  header { height: 64px; display: flex; align-items: center; gap: 18px; padding: 0 22px; border-bottom: 1px solid var(--line-strong); background: var(--paper); }
+  .brand { display: flex; align-items: center; gap: 9px; font: 600 15px/1 var(--mono); flex: none; }
+  .mark { width: 18px; height: 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
+  .mark i { background: var(--ink); border-radius: 1px; } .mark i:nth-child(2) { background: var(--accent); }
+  #caption { font: 700 24px/1.15 var(--sans); letter-spacing: -.02em; flex: 1; transition: opacity .25s; }
+  #caption em { font-style: normal; color: var(--accent); }
+  #stamp { font: 12px/1.3 var(--mono); color: var(--muted); text-align: right; flex: none; }
+  main { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 12px; padding: 12px; height: 656px; }
+  .pane { border: 1px solid var(--line-strong); background: var(--paper); display: flex; flex-direction: column; min-height: 0; border-radius: 4px; overflow: hidden; }
+  .pane > .bar { height: 30px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--line); background: var(--paper-2); font: 600 11.5px/1 var(--mono); color: var(--muted); letter-spacing: .02em; }
+  .pane > .bar b { color: var(--ink); font-weight: 600; }
+  .pane > .bar .tag { margin-left: auto; color: var(--accent); }
+  .body { flex: 1; min-height: 0; overflow: hidden; position: relative; }
+
+  /* terminal */
+  #term .body { background: var(--term); color: var(--term-ink); font: 12.5px/1.55 var(--mono); padding: 10px 12px; white-space: pre-wrap; word-break: break-all; display: flex; flex-direction: column; justify-content: flex-end; }
+  #term .bar { background: #171a17; color: var(--term-muted); border-color: #222; } #term .bar b { color: var(--term-ink); }
+  .t-p { color: var(--term-accent); } .t-c { color: var(--term-muted); } .t-hi { color: #fff; }
+
+  /* editor */
+  #editor .body { display: grid; grid-template-columns: 170px 1fr; }
+  .files { border-right: 1px solid var(--line); padding: 8px 0; font: 12.5px/1 var(--mono); background: var(--paper-2); }
+  .files div { padding: 6px 12px; display: flex; gap: 6px; align-items: center; }
+  .files div.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .files div.new { animation: flash 1.2s ease-out; }
+  .files .ic { width: 14px; color: var(--muted); }
+  .code { padding: 10px 14px; font: 13px/1.65 var(--mono); white-space: pre-wrap; counter-reset: ln; }
+  .code .ln { display: block; padding-left: 30px; position: relative; }
+  .code .ln::before { counter-increment: ln; content: counter(ln); position: absolute; left: 0; width: 20px; text-align: right; color: var(--muted); opacity: .6; }
+  .caret { display: inline-block; width: 2px; height: 1.1em; background: var(--accent); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
+  .saved { position: absolute; right: 12px; bottom: 10px; font: 600 11.5px/1 var(--mono); color: var(--accent); background: var(--accent-soft); padding: 6px 8px; border-radius: 3px; opacity: 0; transition: opacity .2s; }
+
+  /* browser */
+  #online .bar { gap: 6px; }
+  .dots i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--line-strong); margin-right: 4px; }
+  .url { flex: 1; background: var(--paper); border: 1px solid var(--line); border-radius: 3px; padding: 4px 8px; font: 11.5px/1 var(--mono); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #online .body { display: grid; grid-template-columns: 210px 1fr; }
+  .list { border-right: 1px solid var(--line); font: 12px/1.2 var(--mono); overflow: hidden; }
+  .list .row { padding: 7px 10px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 6px; }
+  .list .row small { color: var(--muted); }
+  .list .row.new { animation: flash 1.4s ease-out; }
+  .list .empty { padding: 12px 10px; color: var(--muted); }
+  .preview { padding: 10px 14px; overflow: hidden; font: 12.5px/1.6 var(--mono); white-space: pre-wrap; }
+  .preview img { max-width: 100%; max-height: 220px; display: block; border: 1px solid var(--line); }
+  .preview .head { font: 600 11px/1 var(--mono); color: var(--muted); margin-bottom: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  mark { background: rgba(108,196,149,.35); color: inherit; }
+
+  /* second machine */
+  #peer .body { display: grid; grid-template-columns: 230px 1fr; }
+  .tree { border-right: 1px solid var(--line); padding: 8px 0; font: 12px/1 var(--mono); background: var(--paper-2); }
+  .tree div { padding: 5px 12px; white-space: nowrap; }
+  .tree .dir { color: var(--muted); }
+  .tree .new { animation: flash 1.4s ease-out; }
+
+  .badge { position: absolute; right: 12px; bottom: 12px; font: 700 13px/1 var(--mono); color: #fff; background: var(--accent); padding: 7px 10px; border-radius: 3px; box-shadow: 0 4px 14px rgba(0,0,0,.18); opacity: 0; transform: translateY(-4px); transition: opacity .25s, transform .25s; }
+  .badge.on { opacity: 1; transform: none; }
+  @keyframes flash { from { background: rgba(108,196,149,.55); } to { background: transparent; } }
+  @keyframes blink { 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="mark"><i></i><i></i><i></i><i></i></span>folder-sync</div>
+  <div id="caption">Any folder, on every machine and online.</div>
+  <div id="stamp"></div>
+</header>
+<main>
+  <section class="pane" id="term"><div class="bar"><b>Laptop</b> · terminal<span class="tag" id="term-tag"></span></div><div class="body" id="term-body"></div></section>
+  <section class="pane" id="online"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="url" id="url"></span></div>
+    <div class="body"><div class="list" id="list"><div class="empty">no files yet</div></div><div class="preview" id="preview"></div><div class="badge" id="badge-online"></div></div></section>
+  <section class="pane" id="editor"><div class="bar"><b>Laptop</b> · ~/notes<span class="tag">any editor, script or agent</span></div>
+    <div class="body"><div class="files" id="files"></div><div class="code" id="code"></div><div class="saved" id="saved">saved</div></div></section>
+  <section class="pane" id="peer"><div class="bar"><b>Second machine</b> · ~/notes (another HOME, its own sync --watch)</div>
+    <div class="body"><div class="tree" id="tree"></div><div class="preview" id="peer-preview"></div><div class="badge" id="badge-peer"></div></div></section>
+</main>
+<script>
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+const api = async (path, body) => {
+  const r = await fetch("/api/" + path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(path + ": " + r.status + " " + await r.text());
+  return r.headers.get("Content-Type")?.includes("json") ? r.json() : r.text();
+};
+const $ = (id) => document.getElementById(id);
+let CFG;
+
+function caption(html) { $("caption").innerHTML = html; }
+const secs = (ms) => (ms / 1000).toFixed(2) + " s";
+
+// ---------- terminal: typed commands, the CLI's real output
+const termLines = [];
+function termRender(live = "") {
+  $("term-body").innerHTML = "<div>" + termLines.slice(-15).join("\n") + live + "</div>";
+}
+async function type(cmd) {
+  let typed = "";
+  for (const ch of cmd) { typed += ch; termRender((termLines.length ? "\n" : "") + '<span class="t-p">$ </span><span class="t-hi">' + esc(typed) + '</span><span class="caret"></span>'); await sleep(18); }
+  termLines.push('<span class="t-p">$ </span><span class="t-hi">' + esc(cmd) + "</span>");
+  termRender();
+}
+function out(text) {
+  for (const line of text.replace(/\s+$/, "").split("\n")) if (line.trim()) termLines.push('<span class="t-c">' + esc(line) + "</span>");
+  termRender();
+}
+async function run(args) {
+  await type("folder-sync " + args.join(" "));
+  const r = await api("run", { m: "a", args });
+  out(r.out);
+  return r;
+}
+let watchSeen = 0;
+async function pollWatch() {
+  const text = await api("log?m=a");
+  const lines = text.split("\n").filter((l) => l.trim());
+  for (const line of lines.slice(watchSeen)) termLines.push('<span class="t-c">' + esc(line) + "</span>");
+  watchSeen = lines.length;
+  termRender();
+}
+
+// ---------- editor
+const localFiles = [];
+let current = null;
+function filesRender(fresh) {
+  $("files").innerHTML = localFiles.map((f) => '<div class="' + (f === current ? "on " : "") + (f === fresh ? "new" : "") + '"><span class="ic">' + (f.endsWith(".png") ? "▣" : f.endsWith(".json") ? "{}" : "≡") + "</span>" + esc(f) + "</div>").join("");
+}
+function codeRender(text, caret) {
+  const lines = text.split("\n");
+  $("code").innerHTML = lines.map((l, i) => '<span class="ln">' + esc(l) + (caret && i === lines.length - 1 ? '<span class="caret"></span>' : "") + "</span>").join("");
+}
+async function drop(path, b64, shown) {
+  const w = await api("write", { m: "a", path, b64 });
+  localFiles.push(path); current = path; filesRender(path);
+  codeRender(shown, false);
+  return w;
+}
+
+// ---------- online: the Worker's public folder API, through the harness
+let onlineKnown = new Map();
+let onlineShow = null;
+async function pollOnline() {
+  const view = await api("online/listing").catch(() => null);
+  if (!view || !view.files) return;
+  const a = view.files.filter((f) => f.host === CFG.hostA).sort((x, y) => x.path.localeCompare(y.path));
+  const fresh = a.filter((f) => onlineKnown.get(f.path) !== f.sha256).map((f) => f.path);
+  for (const f of a) onlineKnown.set(f.path, f.sha256);
+  $("list").innerHTML = a.length ? a.map((f) => '<div class="row' + (fresh.includes(f.path) ? " new" : "") + '"><span>' + esc(f.path) + "</span><small>" + f.size + " B</small></div>").join("") : '<div class="empty">no files yet</div>';
+  if (fresh.length) onlineShow = fresh[fresh.length - 1];
+  if (fresh.length && onlineShow) await showOnline(onlineShow);
+}
+async function showOnline(path) {
+  const rel = "/fs/v1/folders/notes/files/" + CFG.hostA + "/" + path;
+  $("url").textContent = CFG.serverHost + rel;
+  const src = "/api/online/file?path=" + encodeURIComponent(path) + "&t=" + Date.now();
+  if (path.endsWith(".png")) { $("preview").innerHTML = '<div class="head">' + esc(path) + " · image/png, served by the Worker</div><img src=\"" + src + '">'; return; }
+  const text = await (await fetch(src)).text();
+  let body = esc(text);
+  if (window.markLine && text.includes(window.markLine)) body = body.replace(esc(window.markLine), "<mark>" + esc(window.markLine) + "</mark>");
+  $("preview").innerHTML = '<div class="head">' + esc(path) + " · served by the Worker</div>" + body;
+}
+
+// ---------- second machine: B's disk
+let peerKnown = new Map();
+async function pollPeer() {
+  const t = await api("tree?m=b");
+  const fresh = t.files.filter((f) => peerKnown.get(f.path) !== f.sha).map((f) => f.path);
+  for (const f of t.files) peerKnown.set(f.path, f.sha);
+  const rows = ['<div class="dir">~/notes/</div>', '<div class="dir">&nbsp;&nbsp;hosts/</div>'];
+  if (t.files.length) rows.push('<div class="dir">&nbsp;&nbsp;&nbsp;&nbsp;' + esc(CFG.hostA.slice(0, 14)) + "…/</div>");
+  for (const f of t.files) rows.push('<div class="' + (fresh.includes(f.path) ? "new" : "") + '">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;' + esc(f.name) + "</div>");
+  $("tree").innerHTML = rows.join("");
+  const md = t.files.find((f) => f.name === "plan.md");
+  if (md && fresh.includes(md.path)) {
+    let body = esc(md.text);
+    if (window.markLine && md.text.includes(window.markLine)) body = body.replace(esc(window.markLine), "<mark>" + esc(window.markLine) + "</mark>");
+    $("peer-preview").innerHTML = '<div class="head">hosts/' + esc(CFG.hostA.slice(0, 10)) + "…/plan.md · on this disk</div>" + body;
+  }
+}
+
+async function measured(path, field, sha) {
+  for (let i = 0; i < 400; i++) {
+    const m = await api("measure?path=" + encodeURIComponent(path) + "&sha=" + sha);
+    if (m[field] != null) return m[field];
+    await sleep(25);
+  }
+  throw new Error("no " + field + " for " + path);
+}
+function badge(id, text) { $(id).textContent = text; $(id).classList.add("on"); }
+function unbadge(id) { $(id).classList.remove("on"); }
+
+const b64 = (s) => btoa(unescape(encodeURIComponent(s)));
+
+async function main() {
+  CFG = await api("config");
+  $("url").textContent = CFG.serverHost + "/fs/v1/folders/notes";
+  filesRender(); codeRender("", false); await pollPeer();
+  const loops = [setInterval(() => pollWatch().catch(() => {}), 120), setInterval(() => pollOnline().catch(() => {}), 90), setInterval(() => pollPeer().catch(() => {}), 90)];
+  await api("mark", { name: "start" });
+  await sleep(700);
+
+  caption("Point it at <em>any folder</em>.");
+  await run(["init", "--project", "notes"]);
+  CFG = await api("config"); // A's host id exists now
+  await sleep(250);
+  await run(["publish", "--public"]);
+  await sleep(200);
+  await type("folder-sync sync --watch");
+  await api("watch", { m: "a" });
+  for (let i = 0; i < 100 && !watchSeen; i++) await sleep(50);
+  await sleep(700);
+  await api("mark", { name: "watching" });
+  await sleep(350);
+
+  caption("Put <em>anything</em> in it.");
+  const plan = "# Arm v11\n- [ ] order 6 servos\n- [ ] print the wrist bracket\n";
+  const w1 = await drop("plan.md", b64(plan), plan);
+  await sleep(600);
+  const data = JSON.stringify({ part: "ST3215", qty: 6, saved: true }, null, 2) + "\n";
+  const w3 = await drop("bom.json", b64(data), data);
+  await sleep(600);
+  const png = await api("asset?name=sketch.png");
+  const w2 = await drop("sketch.png", png.b64, "(sketch.png · " + png.size + " bytes, an image)");
+  const t1 = await measured("plan.md", "online_ms", w1.sha);
+  const t3 = await measured("bom.json", "online_ms", w3.sha);
+  caption("Put <em>anything</em> in it: online in " + secs(t1) + ".");
+  badge("badge-online", "plan.md online in " + secs(t1));
+  await sleep(1800);
+  await api("mark", { name: "dropped" });
+  await sleep(350);
+
+  caption("Edit it. <em>It syncs.</em>");
+  unbadge("badge-online");
+  current = "plan.md"; filesRender();
+  let text = plan;
+  codeRender(text, true);
+  await sleep(250);
+  const add = "- [x] wire the shoulder motor\n";
+  window.markLine = add.trim();
+  for (const ch of add) { text += ch === "\n" ? "" : ch; codeRender(text, true); await sleep(30); }
+  text += "\n";
+  const w4 = await api("write", { m: "a", path: "plan.md", b64: b64(text) });
+  codeRender(text, false);
+  $("saved").style.opacity = 1; setTimeout(() => { $("saved").style.opacity = 0; }, 900);
+  const t4 = await measured("plan.md", "online_ms", w4.sha);
+  onlineKnown.delete("plan.md");
+  caption("Edit → online in <em>" + secs(t4) + "</em>.");
+  badge("badge-online", "edit online in " + secs(t4));
+  const t5 = await measured("plan.md", "peer_ms", w4.sha);
+  await sleep(600);
+  caption("Edit → online in " + secs(t4) + ", <em>other machine in " + secs(t5) + "</em>.");
+  badge("badge-peer", "on the other machine in " + secs(t5));
+  await api("mark", { name: "edited" });
+  await sleep(2600);
+  caption("Obsidian Sync <em>for any application</em>.");
+  await sleep(2200);
+  const t2 = await measured("sketch.png", "online_ms", w2.sha);
+  window.RESULT = { plan_online_ms: t1, sketch_online_ms: t2, bom_online_ms: t3, edit_online_ms: t4, edit_peer_ms: t5 };
+  await api("mark", { name: "end", result: window.RESULT });
+  loops.forEach(clearInterval);
+  window.DONE = true;
+}
+main().catch((e) => { caption("error: " + esc(e.message)); window.ERROR = e.message; });
+</script>
+</body>
+</html>

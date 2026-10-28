@@ -3,105 +3,519 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>folder-sync</title>
-<meta name="description" content="A folder on your computer, kept in sync online and across your machines.">
+<title>folder-sync — your folder, on every computer and online</title>
+<link rel="icon" href="data:,">
+<meta name="description" content="Obsidian Sync for any application: a plain folder of files, the same on every computer and readable online. Local editors, scripts and AI agents just open the files.">
+<!--
+  Rebuilt 2026-10-28 from the earlier, richer page (lane/brand, site/landing/index.html, written as "localfilesync").
+  Zach, 2026-10-28: "I like the minimalism but the Unix thing is too minimalist. Go back to what you had before."
+  WHY every number is written into the HTML with its source beside it: the page must say only what main
+  (d603c9f) does, and a number with no source is the first thing to drift. Sources: README.md on this branch.
+  WHY no web fonts and no CDN: one self-contained page that renders the same offline and on a static host.
+-->
 <style>
-  /* WHY so plain: Zach, 2026-10-28: "super straight forward... not much more to it" and "do 1 thing very well".
-     No web fonts, no script, no external requests; it should read like a good Unix tool's homepage. */
   :root {
-    color-scheme: light dark;
-    --bg: #ffffff;
-    --fg: #1a1a1a;
-    --muted: #595959;
-    --rule: #dcdcdc;
-    --code-bg: #f4f4f2;
-    --link: #0b5cad;
+    color-scheme: light;
+    --paper: #fbfbf8;
+    --paper-2: #f3f3ee;
+    --ink: #0e100e;
+    --muted: #5b605b;
+    --line: rgba(14, 16, 14, 0.10);
+    --line-strong: rgba(14, 16, 14, 0.22);
+    --accent: #2f6f4f;
+    --accent-soft: rgba(47, 111, 79, 0.10);
+    --accent-ink: #ffffff;
+    --grid: rgba(14, 16, 14, 0.045);
+    --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", "Inter", Roboto, sans-serif;
+    --gutter: clamp(16px, 4vw, 48px);
+    --max: 1120px;
   }
   @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #121212;
-      --fg: #e6e6e6;
-      --muted: #a0a0a0;
-      --rule: #333333;
-      --code-bg: #1d1d1d;
-      --link: #7ab7ff;
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --paper: #0c0e0c;
+      --paper-2: #131613;
+      --ink: #eef1ec;
+      --muted: #929891;
+      --line: rgba(238, 241, 236, 0.09);
+      --line-strong: rgba(238, 241, 236, 0.20);
+      --accent: #6cc495;
+      --accent-soft: rgba(108, 196, 149, 0.12);
+      --accent-ink: #06120b;
+      --grid: rgba(238, 241, 236, 0.035);
     }
   }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --paper: #0c0e0c;
+    --paper-2: #131613;
+    --ink: #eef1ec;
+    --muted: #929891;
+    --line: rgba(238, 241, 236, 0.09);
+    --line-strong: rgba(238, 241, 236, 0.20);
+    --accent: #6cc495;
+    --accent-soft: rgba(108, 196, 149, 0.12);
+    --accent-ink: #06120b;
+    --grid: rgba(238, 241, 236, 0.035);
+  }
+
   *, *::before, *::after { box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; }
   body {
     margin: 0;
-    background: var(--bg);
-    color: var(--fg);
-    font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background-color: var(--paper);
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 32px 32px;
+    color: var(--ink);
+    font: 16px/1.6 var(--sans);
+    overflow-x: hidden;
   }
-  main { max-width: 40rem; margin: 0 auto; padding: 40px 16px 64px; }
-  h1, h2, code, pre { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace; }
-  h1 { font-size: 2rem; margin: 0 0 8px; letter-spacing: -0.02em; }
-  h2 { font-size: 1.05rem; margin: 40px 0 8px; padding-top: 16px; border-top: 1px solid var(--rule); }
-  p, ul { margin: 0 0 12px; }
-  ul { padding-left: 1.25rem; }
-  li { margin-bottom: 6px; }
-  .tag { font-size: 1.15rem; margin: 0; }
+  a { color: inherit; }
+  .wrap { max-width: var(--max); margin: 0 auto; padding: 0 var(--gutter); }
+  .mono, code, pre { font-family: var(--mono); }
+  p code, li code, td code { font-size: 0.92em; background: var(--paper-2); border: 1px solid var(--line); border-radius: 3px; padding: 1px 5px; overflow-wrap: anywhere; }
+  .label {
+    font: 600 12px/1 var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .label .dot { color: var(--accent); }
+
+  /* ---------- nav ---------- */
+  header.nav { border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--paper) 88%, transparent); position: sticky; top: 0; z-index: 2; backdrop-filter: blur(6px); }
+  header.nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 56px; gap: 16px; }
+  .brand { display: flex; align-items: center; gap: 10px; font: 600 15px/1 var(--mono); text-decoration: none; flex: none; }
+  .mark { width: 20px; height: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
+  .mark i { background: var(--ink); border-radius: 1px; }
+  .mark i:nth-child(2) { background: var(--accent); }
+  nav.links { display: flex; align-items: center; gap: 18px; font: 13px/1 var(--mono); color: var(--muted); }
+  nav.links a { text-decoration: none; white-space: nowrap; }
+  nav.links a:hover { color: var(--ink); }
+  nav.links a.signin { color: var(--ink); border: 1px solid var(--line-strong); border-radius: 4px; padding: 6px 9px; }
+  nav.links a.signin:hover { border-color: var(--accent); }
+  .theme-btn {
+    font: 12px/1 var(--mono); color: var(--muted); background: transparent;
+    border: 1px solid var(--line-strong); border-radius: 4px; padding: 6px 8px; cursor: pointer;
+  }
+  .theme-btn:hover { color: var(--ink); }
+
+  /* ---------- sections ---------- */
+  section { border-bottom: 1px solid var(--line); padding: clamp(48px, 7vw, 88px) 0; }
+  h1, h2, h3 { margin: 0; letter-spacing: -0.03em; line-height: 1.08; }
+  h1 { font-size: clamp(36px, 6.4vw, 72px); font-weight: 700; max-width: 15ch; }
+  h1 em { font-style: normal; color: var(--accent); }
+  h2 { font-size: clamp(26px, 3.6vw, 40px); font-weight: 700; max-width: 22ch; margin-top: 14px; }
+  h3 { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
+  p.lede { font-size: clamp(17px, 2vw, 20px); color: var(--muted); max-width: 56ch; margin: 22px 0 0; }
+  p { margin: 0; }
   .muted { color: var(--muted); }
-  a { color: var(--link); }
-  code { font-size: 0.9em; background: var(--code-bg); padding: 1px 5px; border-radius: 3px; white-space: nowrap; }
-  pre {
-    margin: 0 0 12px; padding: 12px 14px; background: var(--code-bg); border-radius: 4px;
-    font-size: 0.88rem; line-height: 1.6;
-    white-space: pre-wrap; overflow-wrap: break-word;
+
+  .hero { padding-top: clamp(56px, 9vw, 112px); }
+  .position { margin-top: 22px; font: 600 clamp(15px, 1.8vw, 18px)/1.4 var(--mono); color: var(--accent); }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; height: 44px; padding: 0 18px;
+    font: 600 14px/1 var(--mono); text-decoration: none; border-radius: 4px;
+    border: 1px solid var(--line-strong); background: var(--paper);
   }
-  pre code { background: none; padding: 0; font-size: inherit; white-space: pre-wrap; }
-  footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 0.9rem; }
+  .btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .btn:hover { border-color: var(--accent); }
+  .soon {
+    display: inline-block; font: 600 11px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--accent); background: var(--accent-soft); border-radius: 3px; padding: 5px 7px;
+  }
+
+  /* ---------- video + stills ---------- */
+  .film { margin-top: 44px; border: 1px solid var(--line-strong); background: var(--paper); }
+  .film video, .film img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; background: var(--paper-2); }
+  .film figcaption, .stills figcaption { padding: 12px 16px; font: 12.5px/1.6 var(--mono); color: var(--muted); border-top: 1px solid var(--line); }
+  .stills { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 36px; }
+  .stills figure { margin: 0; border: 1px solid var(--line-strong); background: var(--paper); }
+  .stills img { display: block; width: 100%; height: auto; }
+  .stills a { display: block; }
+
+  /* ---------- how it works ---------- */
+  .flow {
+    margin-top: 44px; display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch;
+    border: 1px solid var(--line-strong); background: var(--paper);
+  }
+  .node { padding: 24px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .node .step { font: 600 12px/1 var(--mono); color: var(--accent); }
+  .node .chip {
+    font: 12.5px/1.5 var(--mono); border: 1px solid var(--line); background: var(--paper-2);
+    padding: 10px 12px; border-radius: 3px; color: var(--ink); overflow-wrap: anywhere;
+  }
+  .node .chip .muted { display: block; }
+  .node p { color: var(--muted); font-size: 14.5px; }
+  .arrow {
+    display: flex; align-items: center; justify-content: center; width: 56px;
+    border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+    color: var(--accent); font: 600 20px/1 var(--mono);
+  }
+  .node.hub { background: var(--accent-soft); }
+
+  /* ---------- grids ---------- */
+  .cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; margin-top: 44px; border: 1px solid var(--line-strong); background: var(--paper); }
+  .cols > div { padding: 24px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .cols > div:last-child { border-right: 0; }
+  .cols p { color: var(--muted); font-size: 15px; }
+  .cols .num { font: 600 12px/1 var(--mono); color: var(--accent); }
+
+  pre.term {
+    margin: 0; padding: 16px 18px; border: 1px solid var(--line-strong); background: var(--paper-2);
+    font-size: 13px; line-height: 1.75; overflow-x: auto; border-radius: 3px;
+  }
+  pre.term .c { color: var(--muted); }
+  pre.term .p { color: var(--accent); user-select: none; }
+
+  .features { display: grid; grid-template-columns: 1fr 1fr; margin-top: 44px; border: 1px solid var(--line-strong); background: var(--paper); }
+  .features > div { padding: 24px; min-width: 0; }
+  .features > div + div { border-left: 1px solid var(--line); }
+  .features ul { list-style: none; padding: 0; margin: 18px 0 0; display: grid; gap: 14px; }
+  .features li { display: grid; grid-template-columns: 18px 1fr; gap: 10px; font-size: 15px; }
+  .features li::before { content: "■"; font-size: 10px; line-height: 24px; color: var(--ink); }
+  .features .later li::before { content: "□"; color: var(--accent); }
+  .features li span { color: var(--muted); display: block; font-size: 14px; }
+
+  /* ---------- speed ---------- */
+  .tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 36px; border: 1px solid var(--line-strong); background: var(--paper); }
+  .tiles > div { padding: 20px 22px; border-right: 1px solid var(--line); min-width: 0; }
+  .tiles > div:last-child { border-right: 0; }
+  .tiles .big { font: 700 clamp(30px, 4vw, 42px)/1 var(--mono); color: var(--accent); letter-spacing: -0.02em; }
+  .tiles .what { margin-top: 10px; font-size: 15px; }
+  .tiles .src { margin-top: 8px; font: 12px/1.5 var(--mono); color: var(--muted); }
+  table.speed { width: 100%; border-collapse: collapse; margin-top: 24px; font-size: 14.5px; background: var(--paper); border: 1px solid var(--line-strong); }
+  table.speed th, table.speed td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  table.speed th { font: 600 11.5px/1.2 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+  table.speed td.n { font-family: var(--mono); white-space: nowrap; text-align: right; }
+  table.speed th.n { text-align: right; }
+  table.speed td.fast { color: var(--accent); font-weight: 700; }
+  table.speed td.x { font-family: var(--mono); color: var(--muted); text-align: right; }
+  .bar { height: 4px; background: var(--line); margin-top: 8px; position: relative; max-width: 260px; }
+  .bar b { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); }
+  .note { font: 12.5px/1.6 var(--mono); color: var(--muted); margin-top: 14px; max-width: 86ch; }
+  .note a { color: var(--ink); }
+
+  /* ---------- install ---------- */
+  .install-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: clamp(20px, 3vw, 36px); margin-top: 40px; align-items: start; }
+  .card { border: 1px solid var(--line-strong); background: var(--paper); padding: 22px; min-width: 0; }
+  .card h3 { margin-bottom: 10px; }
+  .card > p { color: var(--muted); font-size: 15px; }
+  .card ol { margin: 14px 0 0; padding-left: 20px; display: grid; gap: 10px; font-size: 15px; }
+  .card ol li::marker { font: 600 13px var(--mono); color: var(--accent); }
+  .card pre.term { margin-top: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+  .tabs button { font: 600 12px/1 var(--mono); border: 1px solid var(--line-strong); background: var(--paper); color: var(--muted); padding: 8px 10px; border-radius: 3px; cursor: pointer; }
+  .tabs button[aria-selected="true"] { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+  .dl { display: flex; align-items: flex-start; gap: 10px; margin-top: 10px; border: 1px solid var(--line-strong); background: var(--paper-2); padding: 12px 14px; border-radius: 3px; }
+  .dl code { font-size: 13px; line-height: 1.7; flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .dl .p { color: var(--accent); user-select: none; }
+  .copy { font: 600 12px/1 var(--mono); border: 1px solid var(--line-strong); background: var(--paper); color: var(--ink); padding: 8px 10px; border-radius: 3px; cursor: pointer; flex: none; }
+  .assets { margin-top: 12px; font: 12.5px/1.8 var(--mono); color: var(--muted); }
+  .assets a { color: var(--ink); }
+  .callout { margin-top: 20px; border-left: 3px solid var(--accent); background: var(--accent-soft); padding: 14px 16px; font-size: 15px; }
+  .callout a { font-weight: 600; }
+
+  .users { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
+  .user { display: flex; align-items: center; gap: 12px; border: 1px solid var(--line-strong); background: var(--paper); padding: 14px 18px; text-decoration: none; min-width: 240px; }
+  .user .sq { width: 28px; height: 28px; border: 1px solid var(--line-strong); display: grid; place-items: center; font: 700 12px/1 var(--mono); }
+  .user small { display: block; color: var(--muted); font: 12px/1.3 var(--mono); }
+
+  footer { padding: 36px 0 48px; font: 12.5px/1.7 var(--mono); color: var(--muted); }
+  footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; }
+  footer a { text-decoration: none; }
+  footer a:hover { color: var(--ink); }
+
+  /* ---------- phone ---------- */
+  @media (max-width: 820px) {
+    nav.links a.hide-sm { display: none; }
+    .flow { grid-template-columns: 1fr; }
+    .arrow { width: auto; height: 44px; border: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .arrow span { display: inline-block; transform: rotate(90deg); }
+    .cols, .features, .install-grid, .tiles, .stills { grid-template-columns: minmax(0, 1fr); }
+    .cols > div, .tiles > div { border-right: 0; border-bottom: 1px solid var(--line); }
+    .cols > div:last-child, .tiles > div:last-child { border-bottom: 0; }
+    .features > div + div { border-left: 0; border-top: 1px solid var(--line); }
+    table.speed th.x, table.speed td.x { display: none; }
+    table.speed th, table.speed td { padding: 10px 10px; }
+    .bar { display: none; }
+    .user { min-width: 0; flex: 1 1 100%; }
+    pre.term { white-space: pre-wrap; overflow-wrap: anywhere; }
+  }
+  @media (max-width: 420px) {
+    nav.links { gap: 10px; }
+    .theme-btn .word { display: none; }
+  }
 </style>
 </head>
 <body>
-<main>
-  <h1>folder-sync</h1>
-  <p class="tag">A folder on your computer, kept in sync online and across your machines.</p>
-  <p class="muted">Early (v0). Source on <a href="https://github.com/zacharyyamaoka/folder-sync">GitHub</a>.</p>
 
-  <h2>Install</h2>
-  <p>From source, with Go 1.27.3 or newer. There are no prebuilt binaries yet.</p>
-<pre><code>git clone https://<wbr>github.com/<wbr>zacharyyamaoka/<wbr>folder-sync
-go -C folder-sync build -o ~/.folder-sync/<wbr>bin/<wbr>folder-sync ./cmd/<wbr>folder-sync</code></pre>
-  <p>Put <code>~/.folder-sync/bin</code> on your <code>PATH</code>. The first <code>init</code> downloads rclone, checks it against a pinned checksum, and keeps everything under <code>~/.folder-sync/</code>.</p>
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="#top"><span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>folder-sync</span></a>
+    <nav class="links">
+      <a href="#how" class="hide-sm">How it works</a>
+      <a href="#speed" class="hide-sm">Speed</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/zacharyyamaoka/folder-sync" class="hide-sm">GitHub</a>
+      <!-- WHY a plain link: hosted accounts live on the accounts Worker; /fs/signin only returns to a path on its own
+           origin, so the return is /fs/account there (checked 2026-10-28: 200, "Sign in · folder-sync"). -->
+      <a class="signin" href="https://folder-sync-accounts.zach-yamaoka.workers.dev/fs/signin?return=/fs/account">Sign in</a>
+      <button class="theme-btn" type="button" id="theme" aria-label="Switch light or dark">◐<span class="word"> theme</span></button>
+    </nav>
+  </div>
+</header>
 
-  <h2>Use</h2>
-<pre><code>folder-sync login
-cd ~/notes
-folder-sync init
-folder-sync sync --watch
-folder-sync status</code></pre>
-  <ul>
-    <li><code>login</code> signs this machine in: it prints a code, you approve it in a browser. <code>login --key</code> stores a Cloudflare R2 bucket key instead.</li>
-    <li><code>init</code> makes the current folder a synced folder.</li>
-    <li><code>sync --watch</code> pushes this machine's changes and pulls your other machines' until you stop it. <code>sync --install-service</code> writes the autostart file for your system and prints the command that enables it.</li>
-    <li><code>status</code> shows the last push and pull and which machines it has seen.</li>
-  </ul>
-  <p>To make a folder readable on the web: <code>folder-sync publish --public</code>. <code>--private</code> undoes it.</p>
+<main id="top">
+  <section class="hero">
+    <div class="wrap">
+      <div class="label"><span class="dot">●</span> Sync for plain-file folders</div>
+      <h1 style="margin-top:22px">Your folder, on every computer <em>and online.</em></h1>
+      <p class="position">Obsidian Sync for any application.</p>
+      <p class="lede">File-first, agent-friendly. Pick any folder of plain files and folder-sync keeps it the same on your laptop, your desktop and the web. Any editor, script or local AI agent can just open the files.</p>
+      <div class="cta">
+        <a class="btn primary" href="#install">Download v0.1.0</a>
+        <a class="btn" href="#how">How it works →</a>
+      </div>
+      <figure class="film" style="margin-left:0;margin-right:0;margin-bottom:0">
+        <video autoplay muted loop playsinline preload="metadata" poster="media/hero-poster.png" width="1280" height="720" aria-label="A folder synced: files dropped in and edited on one machine appear online and on a second machine">
+          <source src="media/hero.mp4" type="video/mp4" id="hero-mp4">
+          <a href="media/hero.gif">Watch it as a GIF</a>
+        </video>
+        <!-- Recorded 2026-10-28 by tools/record_hero.py on this branch: the v0.1.0 linux-amd64 binary and main's
+             accounts Worker under wrangler dev, run with tools/setup.mjs. Times from that run's hero-run.json. -->
+        <figcaption>Recorded, not mocked: the v0.1.0 CLI and main's accounts Worker on one machine (local stack), two HOMEs as two computers. Captions are that run's measured times: a save on disk until the Worker serves the same bytes, and until they are on the second machine's disk.</figcaption>
+      </figure>
+    </div>
+  </section>
 
-  <h2>How it works</h2>
-  <ul>
-    <li>Your files stay plain files in a plain folder. Any editor or tool works on them.</li>
-    <li>rclone moves them to a Cloudflare R2 bucket, the always-on copy.</li>
-    <li>Each machine pushes its own files. Your other machines' files arrive read-only under <code>hosts/&lt;machine&gt;/</code> in the folder.</li>
-    <li>A file you delete or overwrite is first moved to <code>_trash/</code> in the bucket.</li>
-  </ul>
+  <section id="how">
+    <div class="wrap">
+      <div class="label">How it works</div>
+      <h2>A plain folder on your disk, a copy that's always online, sync in between.</h2>
+      <div class="flow" role="img" aria-label="Local folder, sync, online copy">
+        <div class="node">
+          <div class="step">01 · LOCAL FOLDER</div>
+          <h3>Your files stay files</h3>
+          <div class="chip">~/notes/<span class="muted">plan.md · bom.json · sketch.png</span></div>
+          <p>Edit them with anything. Nothing has to go through an app.</p>
+        </div>
+        <div class="arrow" aria-hidden="true"><span>⇄</span></div>
+        <div class="node hub">
+          <div class="step">02 · SYNC</div>
+          <h3>Only what changed moves</h3>
+          <div class="chip">rclone engine<span class="muted">manifest diff · push on change</span></div>
+          <p>A watcher sees each save, uploads the changed files and tells your other machines at once.</p>
+        </div>
+        <div class="arrow" aria-hidden="true"><span>⇄</span></div>
+        <div class="node">
+          <div class="step">03 · ONLINE</div>
+          <h3>Always-on copy, readable on the web</h3>
+          <div class="chip">Cloudflare R2<span class="muted">your bucket, or a hosted account</span></div>
+          <p>Your other computers pull it down; apps and the browser read the same files.</p>
+        </div>
+      </div>
+      <div class="stills">
+        <figure><a href="media/still-2-anything-online.png"><img src="media/still-2-anything-online.png" alt="A markdown note, a JSON file and an image dropped into the laptop's folder, each served online by the Worker" width="1280" height="720" loading="lazy"></a>
+          <figcaption>Anything goes in: a note, a JSON file, an image. Each is online in about 0.3 s.</figcaption></figure>
+        <figure><a href="media/still-3-edit-synced.png"><img src="media/still-3-edit-synced.png" alt="An edit to plan.md, online in 0.33 s and on the second machine in 0.30 s" width="1280" height="720" loading="lazy"></a>
+          <figcaption>An edit is online in 0.33 s and on the other machine in 0.30 s, under hosts/&lt;laptop&gt;/.</figcaption></figure>
+        <figure><a href="media/still-1-init-watch.png"><img src="media/still-1-init-watch.png" alt="The terminal: folder-sync init, publish --public and sync --watch, with the folder watcher and hub on" width="1280" height="720" loading="lazy"></a>
+          <figcaption>Three commands: <code>init</code>, <code>publish --public</code>, <code>sync --watch</code>. Folder watcher on, hub on.</figcaption></figure>
+        <figure><a href="media/still-4-signin.png"><img src="media/still-4-signin.png" alt="The hosted folder-sync sign-in page: Continue with Google" width="640" height="360" loading="lazy"></a>
+          <figcaption>Hosted accounts sign in with Google, from the browser. Invite-only for now.</figcaption></figure>
+      </div>
+    </div>
+  </section>
 
-  <h2>What it is not</h2>
-  <ul>
-    <li><strong>Not a collaborative editor.</strong> Two machines do not edit one file together, and nothing is merged. Two-way shared folders are not built yet.</li>
-    <li><strong>Not a backup app.</strong> A delete on one machine is a delete in the synced copy. <code>_trash/</code> is a safety net, not a backup plan.</li>
-    <li><strong>Not aware of what is in your files.</strong> It moves them and does nothing else with them.</li>
-  </ul>
+  <section id="why">
+    <div class="wrap">
+      <div class="label">Why file-first</div>
+      <h2>The folder is the database.</h2>
+      <div class="cols">
+        <div>
+          <span class="num">A</span>
+          <h3>Local agents just work</h3>
+          <p>An AI agent on your machine reads and writes plain files with the tools it already has. No API, no SDK, no export step. It edits; the folder syncs.</p>
+        </div>
+        <div>
+          <span class="num">B</span>
+          <h3>No lock-in, no lost work</h3>
+          <p>The files on your disk are the truth. An overwrite or delete keeps the old copy online in <code>_trash/</code>, and an empty or unmounted folder can't wipe the online one.</p>
+        </div>
+        <div>
+          <span class="num">C</span>
+          <h3>One backend for every app</h3>
+          <p>An app keeps its data in a folder and gets sync, an online copy and accounts for free. One sign-in works across every app that uses it.</p>
+        </div>
+      </div>
+    </div>
+  </section>
 
-  <h2>Platforms</h2>
-  <p>Linux and macOS. Windows is next: it builds, but has not been run on Windows yet.</p>
+  <section id="features">
+    <div class="wrap">
+      <div class="label">Features</div>
+      <h2>What works now, and what's coming.</h2>
+      <div class="features">
+        <div>
+          <span class="soon" style="background:transparent;color:var(--ink);padding-left:0">Works now</span>
+          <ul>
+            <li><div>Sync any folder across your computers<span>Linux and macOS; each machine's files land on the others under <code>hosts/&lt;machine&gt;/</code></span></div></li>
+            <li><div>Push, not polling<span>a save goes up at once; signed-in machines and pages hear about it in a fraction of a second</span></div></li>
+            <li><div>An online copy you can read on the web<span>private by default; <code>publish --public</code> when you choose</span></div></li>
+            <li><div>Sign in from the browser<span>a new machine shows a code you approve; it holds short-lived keys for your own files only, and you can revoke it</span></div></li>
+            <li><div>Runs in the background<span><code>sync --install-service</code> writes the systemd, launchd or Task Scheduler entry</span></div></li>
+            <li><div>Ignore rules<span>gitignore syntax</span></div></li>
+            <li><div>A desktop tray app<span>Linux, built from source for now (<code>app/</code>)</span></div></li>
+          </ul>
+        </div>
+        <div class="later">
+          <span class="soon">Coming</span>
+          <ul>
+            <li><div>Version history<span>step back through any file's past copies</span></div></li>
+            <li><div>Activity log<span>which machine changed what, and when</span></div></li>
+            <li><div>Deleted files<span>browse and restore what's in <code>_trash/</code></span></div></li>
+            <li><div>The sync view<span>one shared "synced · 2 computers · just now" panel any app drops in (PEP 0007, in progress)</span></div></li>
+            <li><div>Windows<span>the binary cross-compiles; it has not been run on Windows yet</span></div></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
 
-  <footer>
-    <a href="https://github.com/zacharyyamaoka/folder-sync">github.com/zacharyyamaoka/folder-sync</a>
-  </footer>
+  <section id="speed">
+    <div class="wrap">
+      <div class="label">Speed</div>
+      <h2>Push, not polling: a save shows up in about a third of a second.</h2>
+      <p class="lede">Each machine tells a small per-folder hub "this changed", so nothing waits for a timer. These numbers are illustrative: they are measured on one machine over loopback, so the internet's round trips are not in them.</p>
+      <!-- Tiles: bench/latency/bench.mjs (lane/latency-kpi) run 2026-10-28 22:45Z against main d603c9f's CLI and accounts
+           Worker, --stack local, 10 trials each way at random phases: up p50 296 ms (p95 357), down p50 257 ms (p95 318).
+           The third tile is the hero video's run (tools/record_hero.py, 2026-10-28 22:54Z): edit_peer_ms 304. -->
+      <div class="tiles">
+        <div><div class="big">0.30 s</div><div class="what">Save on disk → served online</div><div class="src">median of 10 · p95 0.36 s · 2026-10-28</div></div>
+        <div><div class="big">0.26 s</div><div class="what">Written online → on your disk</div><div class="src">median of 10 · p95 0.32 s · 2026-10-28</div></div>
+        <div><div class="big">0.30 s</div><div class="what">Edit → your other computer</div><div class="src">one run, the video above · 2026-10-28</div></div>
+      </div>
+      <p class="note">Main at d603c9f, local stack (wrangler dev, a local D1, rclone serve s3 behind the R2 stand-in), the latency bench driving the CLI as a person does: <code>init</code>, then <code>sync --watch</code>. Clocks start just before the write and stop when the reader holds the same bytes.</p>
+
+      <!-- Table: PEP 0005 §4b, raw data in reports/media/fast-sync-2026-10-26/{before-ab,after,idle-before,idle-after}.json
+           (measured 2026-10-27 05:34-05:36Z, i.e. 2026-10-26 evening PT). Means of 10; ratios from the raw milliseconds. -->
+      <table class="speed">
+        <thead><tr><th>Push vs polling (mean of 10)</th><th class="n">Polling</th><th class="n">Push</th><th class="n x">Faster</th></tr></thead>
+        <tbody>
+          <tr><td>Web page write → your laptop<div class="bar"><b style="width:27.6%"></b></div></td><td class="n">1.01 s</td><td class="n fast">0.28 s</td><td class="x">3.6×</td></tr>
+          <tr><td>Laptop → your other computer<div class="bar"><b style="width:22.3%"></b></div></td><td class="n">2.80 s</td><td class="n fast">0.63 s</td><td class="x">4.5×</td></tr>
+          <tr><td>Laptop → an open browser page<div class="bar"><b style="width:12.1%"></b></div></td><td class="n">6.20 s</td><td class="n fast">0.75 s</td><td class="x">8.2×</td></tr>
+          <tr><td>A new computer joins → laptop has its file<div class="bar"><b style="width:2%"></b></div></td><td class="n">144 s</td><td class="n fast">0.16 s</td><td class="x">880×</td></tr>
+          <tr><td>Idle machine, per minute</td><td class="n">3.3% CPU</td><td class="n fast">0.1% CPU</td><td class="x">33×</td></tr>
+        </tbody>
+      </table>
+      <p class="note">Measured 2026-10-26 on a local stack, 2 machines and a browser page, 10 trials each way at random phases; "polling" is the same build with push off (2 s rounds, the page re-reading every 10 s). That push code merged to main on 2026-10-28 (99560d9). Source: <a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/peps/0005-push-sync.md">PEP 0005 §4b</a>.</p>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="wrap">
+      <div class="label">Install</div>
+      <h2>Download one file, then point it at a folder.</h2>
+      <div class="install-grid">
+        <div class="card">
+          <h3>1 · Download the CLI</h3>
+          <p>One static binary, <a href="https://github.com/zacharyyamaoka/folder-sync/releases/tag/v0.1.0">v0.1.0</a> (a pre-release). It fetches its pinned rclone on first <code>init</code> and checks its SHA-256.</p>
+          <div class="tabs" role="tablist" aria-label="Platform">
+            <button type="button" role="tab" data-target="linux-amd64" aria-selected="true">Linux x86-64</button>
+            <button type="button" role="tab" data-target="linux-arm64" aria-selected="false">Linux arm64</button>
+            <button type="button" role="tab" data-target="darwin-arm64" aria-selected="false">macOS Apple silicon</button>
+            <button type="button" role="tab" data-target="darwin-amd64" aria-selected="false">macOS Intel</button>
+          </div>
+          <div class="dl">
+            <code><span class="p">$ </span><span id="dl-line">mkdir -p ~/.folder-sync/bin; curl -fsSL https://github.com/zacharyyamaoka/folder-sync/releases/download/v0.1.0/folder-sync-linux-amd64 -o ~/.folder-sync/bin/folder-sync; chmod +x ~/.folder-sync/bin/folder-sync</span></code>
+            <button class="copy" type="button" id="copy">copy</button>
+          </div>
+          <p class="assets">Then put <code>~/.folder-sync/bin</code> on your PATH. Check it: <a href="https://github.com/zacharyyamaoka/folder-sync/releases/download/v0.1.0/SHA256SUMS">SHA256SUMS</a>. The macOS builds are not signed.</p>
+          <h3 style="margin-top:22px">Or build from source</h3>
+          <pre class="term"><span class="p">$ </span>git clone https://github.com/zacharyyamaoka/folder-sync
+<span class="p">$ </span>go -C folder-sync build -o ~/.folder-sync/bin/folder-sync ./cmd/folder-sync</pre>
+        </div>
+        <div class="card">
+          <h3>2 · Bring your own bucket</h3>
+          <p>folder-sync stores the online copy in a Cloudflare R2 bucket. Use your own: it's on your Cloudflare account, so you pay R2's prices (it has a free tier) and nobody else can see it.</p>
+          <ol>
+            <li>Cloudflare dashboard → R2 → <b>Create bucket</b>, say <code>folder-sync</code>. Leave public access off.</li>
+            <li>R2 → <b>Manage API tokens</b> → Create API token: <i>Object Read &amp; Write</i>, for that bucket only. Copy the account id, the access key id and the secret.</li>
+            <li>Store the key on each machine (asked for once, kept in <code>~/.folder-sync/credentials.json</code>, mode 0600):</li>
+          </ol>
+          <pre class="term"><span class="p">$ </span>folder-sync login --key
+<span class="c"># then, in the folder you want synced:</span>
+<span class="p">$ </span>folder-sync init --project notes --bucket folder-sync
+<span class="p">$ </span>folder-sync sync --watch
+<span class="c"># the same two lines on your other computer, in its own folder</span></pre>
+          <p class="note">With your own bucket a save uploads at once and your other computers pull every 10 s (push between machines needs an account). <code>folder-sync publish --viewer</code> writes a read-only web viewer (R2-Explorer, behind Cloudflare Access) for you to deploy. Cloud agents can set <code>FOLDER_SYNC_ACCOUNT_ID</code>, <code>FOLDER_SYNC_ACCESS_KEY_ID</code> and <code>FOLDER_SYNC_SECRET_ACCESS_KEY</code> instead of <code>login --key</code>.</p>
+        </div>
+      </div>
+      <div class="callout">Hosted accounts (Google sign-in, push between machines, the web view) are <b>invite-only</b>. Have one? <a href="https://folder-sync-accounts.zach-yamaoka.workers.dev/fs/signin?return=/fs/account">Sign in</a> here, and run <code>folder-sync login</code> on each computer: it prints a code you approve in the browser.</div>
+    </div>
+  </section>
+
+  <section id="users">
+    <div class="wrap">
+      <div class="label">In use</div>
+      <h2>Used by Vibe Tracks and Robot Parts.</h2>
+      <div class="users">
+        <a class="user" href="https://vibetracks.dev"><span class="sq">VT</span><span>Vibe Tracks<small>vibetracks.dev</small></span></a>
+        <a class="user" href="https://robotparts.dev"><span class="sq">RP</span><span>Robot Parts<small>robotparts.dev</small></span></a>
+      </div>
+    </div>
+  </section>
 </main>
+
+<footer>
+  <div class="wrap">
+    <span>folder-sync · MIT licensed · <a href="https://github.com/zacharyyamaoka/folder-sync">source on GitHub</a></span>
+    <span><a href="#how">How it works</a> · <a href="#speed">Speed</a> · <a href="#install">Install</a> · <a href="https://folder-sync-accounts.zach-yamaoka.workers.dev/fs/signin?return=/fs/account">Sign in</a></span>
+  </div>
+</footer>
+
+<script>
+  // The download line follows the platform tab; the page reads fine without this script (Linux x86-64 is the default).
+  const RELEASE = "https://github.com/zacharyyamaoka/folder-sync/releases/download/v0.1.0/";
+  const lineFor = (target) => "mkdir -p ~/.folder-sync/bin; curl -fsSL " + RELEASE + "folder-sync-" + target +
+    " -o ~/.folder-sync/bin/folder-sync; chmod +x ~/.folder-sync/bin/folder-sync";
+  const tabs = [...document.querySelectorAll(".tabs button")];
+  const pick = (target) => {
+    tabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.target === target)));
+    document.getElementById("dl-line").textContent = lineFor(target);
+  };
+  tabs.forEach((tab) => tab.addEventListener("click", () => pick(tab.dataset.target)));
+  if (/Mac/.test(navigator.platform || navigator.userAgent)) pick("darwin-arm64");
+  else if (/aarch64|arm64/i.test(navigator.userAgent)) pick("linux-arm64");
+  document.getElementById("copy").addEventListener("click", async (event) => {
+    try { await navigator.clipboard.writeText(document.getElementById("dl-line").textContent); event.target.textContent = "copied"; }
+    catch (error) { event.target.textContent = "select it"; }
+  });
+
+  // The GIF only when the MP4 cannot play (an <img> inside <video> would be downloaded by every browser).
+  const hero = document.querySelector(".film video");
+  const toGif = () => {
+    const gif = document.createElement("img");
+    Object.assign(gif, { src: "media/hero.gif", alt: hero.getAttribute("aria-label"), width: 640, height: 360 });
+    hero.replaceWith(gif);
+  };
+  if (!hero.canPlayType("video/mp4")) toGif();
+  else document.getElementById("hero-mp4").addEventListener("error", toGif);
+
+  // Theme: follows the system; the button pins light or dark for this browser.
+  const root = document.documentElement;
+  try { const saved = localStorage.getItem("theme"); if (saved) root.dataset.theme = saved; } catch (error) {}
+  document.getElementById("theme").addEventListener("click", () => {
+    const current = root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    root.dataset.theme = current === "dark" ? "light" : "dark";
+    try { localStorage.setItem("theme", root.dataset.theme); } catch (error) {}
+  });
+</script>
 </body>
 </html>
