@@ -13,7 +13,7 @@
 //   GET  /fs/v1/folders                           my folders and the ones I may read
 //   GET  /fs/v1/folders/:project[?owner=]         the union view of a folder's hosts
 //   GET  /fs/v1/folders/:project/bundle?prefix=   a folder's small UTF-8 files in one answer
-//   GET  /fs/v1/folders/:project/files/:host/<p>  one file's bytes; Range: one range -> 206 (ranges.ts)
+//   GET  /fs/v1/folders/:project/files/:host/<p>  one file's bytes, sha256-checked; Range: one range -> 206 (ranges.ts)
 //   PUT|DELETE /fs/v1/folders/:project/web/<p>    the folder's web host (§3.4); X-Folder-Sync-Keep-Newest: <field>
 //   PATCH /fs/v1/folders/:project {visibility}    public or private
 //   POST /fs/v1/folders/:project/readers {email}, DELETE …/readers/:email
@@ -41,7 +41,7 @@ import type { Store, Visibility } from "./store.ts";
 import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhost.ts";
 import type { EmailEnv } from "./email.ts";
 import { accountRoute, devicesApi, type SessionRow } from "./devices.ts";
-import { rangedFile } from "./ranges.ts";
+import { servedFile } from "./ranges.ts";
 
 export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
 	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
@@ -488,21 +488,11 @@ async function file(request: Request, env: Env, deps: Deps, app: App | null, pro
 	const name = path.slice(path.lastIndexOf("/") + 1);
 	const dot = name.lastIndexOf(".");
 	const suffix = dot > 0 ? name.slice(dot).toLowerCase() : "";
-	const etag = `"${entry.sha256}"`;
-	const base: Record<string, string> = { "Content-Type": TYPES[suffix] || "application/octet-stream", ETag: etag, "Accept-Ranges": "bytes", ...cacheFor(decided.visibility) };
+	const base: Record<string, string> = { "Content-Type": TYPES[suffix] || "application/octet-stream", "Accept-Ranges": "bytes", ...cacheFor(decided.visibility) };
 	// WHY sandboxed: a folder's .html or .svg is someone's file, never this site's page
 	if (ACTIVE.has(suffix)) base["Content-Security-Policy"] = "sandbox";
-	if ((request.headers.get("If-None-Match") || "") === etag) return new Response(null, { status: 304, headers: headers(base) });
-	const ranged = await rangedFile(request, reader, host, entry, base, head);
-	if (ranged) return ranged;
-	let data: ArrayBuffer;
-	try {
-		data = await reader.read(host, path);
-	} catch (error) {
-		if (error instanceof ContractError) return fail(404, "not_found", "that file changed or went away while it was read");
-		throw error;
-	}
-	return new Response(head ? null : data, { status: 200, headers: headers({ ...base, "Content-Length": String(data.byteLength) }) });
+	// the ETag, 304, Range and the body all come from the bytes read and sha256-checked (ranges.ts, judge r1 #2)
+	return servedFile(request, reader, host, path, base, head);
 }
 
 /** This isolate's web-host queue for deps without one (the unit tests): one per Deps, so tests never share it; each
