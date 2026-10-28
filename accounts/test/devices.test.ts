@@ -509,7 +509,8 @@ test("judge r2 #3: an equal-size replacement of a versioned file is never served
 	}
 });
 
-const UNVERSIONED_MAX = 64 * 1024 * 1024;
+// judge r3 #4: 24 MiB, read into one buffer of the manifest's size and hashed as it streams, so one file costs its size once
+const UNVERSIONED_MAX = 24 * 1024 * 1024;
 
 /** `s3`'s answers, each GET body re-chunked into 1 MiB pieces and counted as it is pulled. */
 function counted(s3: MemoryS3) {
@@ -534,7 +535,7 @@ function counted(s3: MemoryS3) {
 	return { fetch, pulled };
 }
 
-test("judge r2 #3: a file with no object_etag over 64 MiB answers 413 too_large_for_unversioned_range, reading no more than the cap", async () => {
+test("judge r2 #3, r3 #4: a file with no object_etag over 24 MiB answers 413 too_large_for_unversioned_range; one that lies about its size is read no further than it says", async () => {
 	const s3 = new MemoryS3(ENDPOINT, BUCKET);
 	const big = new Uint8Array(129 * 1024 * 1024);
 	const small = new TextEncoder().encode("a manifest that says it is small\n");
@@ -551,15 +552,46 @@ test("judge r2 #3: a file with no object_etag over 64 MiB answers 413 too_large_
 	s3.put(`${base}media/liar.mp4`, big);
 	const { fetch, pulled } = counted(s3);
 	const { deps } = fakeDeps(s3, sessions(), { s3: fetch });
-	for (const [path, range] of [["media/huge.mp4", "bytes=0-0"], ["media/huge.mp4", null], ["media/liar.mp4", "bytes=0-0"]] as const) {
-		const answer = await call(handle, env(), deps, fileUrl(path), { headers: { ...cookie("tok-owner-browser"), ...(range ? { Range: range } : {}) } });
-		assert.equal(answer.status, 413, `${path} ${range}`);
+	for (const range of ["bytes=0-0", null]) {
+		const answer = await call(handle, env(), deps, fileUrl("media/huge.mp4"), { headers: { ...cookie("tok-owner-browser"), ...(range ? { Range: range } : {}) } });
+		assert.equal(answer.status, 413, `huge ${range}`);
 		const body = await answer.json();
 		assert.equal(body.error, "too_large_for_unversioned_range");
-		assert.match(body.why, /64 MiB/);
+		assert.match(body.why, /24 MiB/);
 	}
+	// the liar's object is not the version its manifest names: read only as far as the size it claims, then refused
+	const liar = await call(handle, env(), deps, fileUrl("media/liar.mp4"), { headers: { ...cookie("tok-owner-browser"), Range: "bytes=0-0" } });
+	assert.equal(liar.status, 404);
 	assert.equal(pulled.get(`${base}media/huge.mp4`) ?? 0, 0, "the manifest's size refused it before any read");
-	assert.ok((pulled.get(`${base}media/liar.mp4`) ?? 0) <= UNVERSIONED_MAX + 1024 * 1024, `read ${pulled.get(`${base}media/liar.mp4`)} bytes of a file that lied about its size`);
+	assert.ok((pulled.get(`${base}media/liar.mp4`) ?? 0) <= small.byteLength + 1024 * 1024, `read ${pulled.get(`${base}media/liar.mp4`)} bytes of a file that lied about its size`);
+});
+
+test("judge r3 #4: an unversioned file is hashed as it streams into one buffer: no whole-file digest (WebCrypto copies its input)", async () => {
+	const s3 = new MemoryS3(ENDPOINT, BUCKET);
+	const data = new Uint8Array(20 * 1024 * 1024);
+	for (let i = 0; i < data.length; i += 4096) data[i] = i & 0xff;
+	const base = `users/${OWNER.userId}/robotparts/hosts/${MACHINE}/`;
+	s3.put(`${base}manifest.json`, JSON.stringify({
+		schema: "folder-sync-manifest/1", project: "robotparts", host_id: MACHINE, host_name: "ws", seq: 3, generated_at: "2026-10-26T12:00:00Z",
+		files: [{ path: "media/clip.mp4", size: data.byteLength, mtime: "2026-10-26T11:00:00Z", sha256: createHash("sha256").update(data).digest("hex"), written_at: "2026-10-26T12:00:00Z" }],
+	}));
+	s3.put(`${base}media/clip.mp4`, data);
+	const { fetch } = counted(s3);
+	const { deps } = fakeDeps(s3, sessions(), { s3: fetch });
+	const digest = crypto.subtle.digest.bind(crypto.subtle);
+	const big: number[] = [];
+	crypto.subtle.digest = (async (algorithm: AlgorithmIdentifier, input: BufferSource) => {
+		if (input.byteLength > 1024 * 1024) big.push(input.byteLength);
+		return digest(algorithm, input);
+	}) as typeof crypto.subtle.digest;
+	try {
+		const answer = await call(handle, env(), deps, fileUrl("media/clip.mp4"), { headers: { ...cookie("tok-owner-browser"), Range: "bytes=4096-4099" } });
+		assert.equal(answer.status, 206);
+		assert.deepEqual(new Uint8Array(await answer.arrayBuffer()), data.slice(4096, 4100));
+	} finally {
+		crypto.subtle.digest = digest;
+	}
+	assert.deepEqual(big, [], "a whole-file digest held a second copy of the file");
 });
 
 // ------------------------------------------------------------------------------------------------ judge round 1

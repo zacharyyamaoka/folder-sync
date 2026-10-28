@@ -182,3 +182,88 @@ test("judge r2 #5: a web PUT queued behind another when its device is revoked wr
 	assert.equal(answer.status, 401, await answer.text());
 	assert.deepEqual(written(s, "queued.txt"), []);
 });
+
+// ------------------------------------------------------------------------------------------------ judge round 3
+
+test("judge r3 #1: a redemption whose approver check is answered before a revoke lands, and delivered after it, creates no session", async () => {
+	const s = await realStack();
+	const a = await s.browser(EMAIL);
+	const other = await s.browser(EMAIL); // the browser that approves, then is revoked (stolen with the laptop)
+	const code = await s.deviceCode();
+	assert.equal((await s.approve(code.user_code, { Cookie: other.cookie })).approved, 200);
+	// the redemption's read of its approver is held after SQLite answered it (alive), as the judge paused it
+	let release!: () => void;
+	let reached!: () => void;
+	const gate = new Promise<void>((r) => (release = r));
+	const atHold = new Promise<void>((r) => (reached = r));
+	let held = false;
+	s.d1.hold = async (sql, values) => {
+		if (held || !/from\s+"?session"?(\s|$)/i.test(sql) || !values.includes(other.sessionId)) return;
+		held = true;
+		reached();
+		await gate;
+	};
+	const pending = s.redeem(code.device_code);
+	await atHold;
+	s.d1.hold = null;
+	assert.equal((await s.post("/fs/v1/devices/revoke", { id: other.sessionId }, a.page)).status, 200);
+	s.clock.now += 301_000;
+	release();
+	const redeemed = await pending;
+	assert.equal(redeemed.token, null, `a grant redeemed across its approver's revoke: ${JSON.stringify(redeemed.body)}`);
+	const machines = s.db.prepare(`SELECT COUNT(*) AS n FROM "session" WHERE "kind" = 'machine'`).get() as { n: number };
+	assert.equal(machines.n, 0, "no machine session was created");
+});
+
+test("judge r3 #1: a machine session is created only beside a live approver, by the database itself", async () => {
+	const s = await realStack();
+	const a = await s.browser(EMAIL);
+	const laptop = await s.machine(a.cookie);
+	const row = s.db.prepare(`SELECT "kind", "approvedBy" FROM "session" WHERE "id" = ?`).get(laptop.sessionId) as { kind: string; approvedBy: string };
+	assert.deepEqual({ ...row }, { kind: "machine", approvedBy: a.sessionId });
+	// a direct insert naming a revoked approver is refused by SQLite (the trigger), whoever tries it
+	const now = new Date().toISOString();
+	const insert = (approver: string) => s.db.prepare(`INSERT INTO "session" ("id", "expiresAt", "token", "createdAt", "updatedAt", "userId", "kind", "approvedBy") VALUES (?, ?, ?, ?, ?, ?, 'machine', ?)`)
+		.run(`direct-${approver}`, new Date(Date.now() + 86_400_000).toISOString(), `tok-${approver}`, now, now, a.userId, approver);
+	assert.throws(() => insert("no-such-session"), /approver_ended/);
+	assert.doesNotThrow(() => insert(a.sessionId));
+});
+
+test("judge r3 #3: a refused approval leaves the grant as it was; only the approving owner's pending -> approved binds it", async () => {
+	const s = await realStack();
+	const a = await s.browser(EMAIL);
+	const a2 = await s.browser(EMAIL);
+	const b = await s.browser("stranger@example.com");
+	const code = await s.deviceCode();
+	assert.equal((await s.approve(code.user_code, { Cookie: a.cookie })).approved, 200);
+	const bound = () => (s.db.prepare(`SELECT "approvedSessionId" FROM "deviceCode" WHERE "deviceCode" = ?`).get(code.device_code) as { approvedSessionId: string }).approvedSessionId;
+	assert.equal(bound(), a.sessionId);
+	const byB = await s.post("/fs/api/auth/device/approve", { userCode: code.user_code }, { Cookie: b.cookie });
+	assert.notEqual(byB.status, 200);
+	assert.equal(bound(), a.sessionId, "another person's refused approval rebound the grant");
+	const again = await s.post("/fs/api/auth/device/approve", { userCode: code.user_code }, { Cookie: a2.cookie });
+	assert.notEqual(again.status, 200);
+	assert.equal(bound(), a.sessionId, "a second approval of an approved grant rebound it");
+	const list = await (await s.call("/fs/v1/devices", { headers: { Cookie: a.cookie } })).json();
+	assert.equal(list.pending.length, 1);
+	assert.ok((await s.redeem(code.device_code)).token, "A's grant still redeems");
+});
+
+test("judge r3 #5: a sign-in from before machine approval existed is told to sign out and in again, on the device API and the account page", async () => {
+	const s = await realStack();
+	const a = await s.browser(EMAIL);
+	s.db.prepare(`UPDATE "session" SET "kind" = NULL WHERE "id" = ?`).run(a.sessionId); // as a pre-0008 session reads
+	const code = await s.deviceCode();
+	const tried = await s.approve(code.user_code, { Cookie: a.cookie });
+	assert.equal(tried.approved, 403);
+	const said = JSON.parse(tried.body);
+	assert.equal(said.code, "SIGN_IN_AGAIN");
+	assert.equal(said.message, "This sign-in is from before machine approval was added. Sign out and sign in again to approve a machine.");
+	const page = await (await s.call("/fs/account", { headers: { Cookie: a.cookie } })).text();
+	assert.match(page, /This sign-in is from before machine approval was added\. Sign out and sign in again to approve a machine\./);
+	assert.match(page, /<form method="post" action="\/fs\/account\/sign-out">/);
+	// a fresh sign-in approves
+	const fresh = await s.browser(EMAIL);
+	assert.equal((await s.approve(code.user_code, { Cookie: fresh.cookie })).approved, 200);
+	assert.doesNotMatch(await (await s.call("/fs/account", { headers: { Cookie: fresh.cookie } })).text(), /before machine approval was added/);
+});
