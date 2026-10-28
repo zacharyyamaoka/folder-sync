@@ -35,8 +35,8 @@ const ClientID = "folder-sync"
 // EnvServer overrides DefaultServer: the accounts Worker, or an app's own /fs/ mount (https://robotparts.dev).
 const EnvServer = "FOLDER_SYNC_SERVER"
 
-// DefaultServer is the accounts Worker's own host. A placeholder until Zach's first deploy names it.
-const DefaultServer = "https://folder-sync-accounts.example.workers.dev"
+// DefaultServer is the accounts Worker's own host (its workers.dev address since the first deploy, 2026-10-28).
+const DefaultServer = "https://folder-sync-accounts.zach-yamaoka.workers.dev"
 
 const deviceGrant = "urn:ietf:params:oauth:grant-type:device_code"
 

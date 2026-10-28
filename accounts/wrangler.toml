@@ -25,7 +25,7 @@ run_worker_first = true
 [[d1_databases]]
 binding = "DB"
 database_name = "folder-sync-accounts"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "822b87c5-668f-4621-8da0-bdda116e8f33"
 migrations_dir = "migrations"
 
 # No R2 binding (§3.1): the Worker reads and writes each person's files through a temporary credential it signs for
@@ -44,10 +44,10 @@ new_sqlite_classes = ["WebHostObject"]
 [vars]
 ENVIRONMENT = "production"
 # This Worker's own host: the CLI's default server and the account pages (placeholder until the first deploy)
-PUBLIC_URL = "https://folder-sync-accounts.example.workers.dev"
+PUBLIC_URL = "https://folder-sync-accounts.zach-yamaoka.workers.dev"
 # The sync store: folder-sync's bucket, one prefix per person (users/<account id>/). Placeholder: Zach sets the real
 # account id at deploy.
-R2_ACCOUNT_ID = "0123456789abcdef0123456789abcdef"
+R2_ACCOUNT_ID = "c2747ee6a8842e150e38acc3d044adde"
 SYNC_BUCKET = "folder-sync"
 # Empty: https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com (a local stand-in in the proof)
 R2_ENDPOINT = ""
@@ -64,7 +64,7 @@ QUOTA_RECHECK_S = "300"
 QUOTA_MAX_AGE_S = "3600"
 # Who sign-in codes come from (an address on a domain verified in Resend); empty: no email codes in production.
 # Codes go out once this and the secret RESEND_API_KEY are both set (src/email.ts, PEP 0003 §3.3).
-EMAIL_FROM = ""
+EMAIL_FROM = "Robot Parts <signin@robotparts.dev>"
 # Secrets, set once by the operator (never in this file): BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
 # RESEND_API_KEY, R2_PARENT_ACCESS_KEY_ID, R2_PARENT_SECRET_ACCESS_KEY, and SIGN_UP_EMAILS (who may create an account, comma-separated;
 # unset means nobody new, "*" anyone; it holds real emails, so it is a secret). Until they are set, sign-in answers 503
