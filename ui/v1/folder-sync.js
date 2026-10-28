@@ -177,7 +177,7 @@ const FILTER_TEST = {
 };
 
 class FolderSyncStatus extends HTMLElement {
-	static observedAttributes = ["project", "owner", "base", "view"];
+	static observedAttributes = ["project", "owner", "folder", "base", "view"];
 
 	constructor() {
 		super();
@@ -206,6 +206,8 @@ class FolderSyncStatus extends HTMLElement {
 	get base() { return (this.getAttribute("base") || "/fs").replace(/\/+$/, ""); }
 	get project() { return this.getAttribute("project") || ""; }
 	get owner() { return this.getAttribute("owner") || ""; }
+	/** On a machine, which of two folders that sync this project (serve's ?folder=). */
+	get folder() { return this.getAttribute("folder") || ""; }
 	get inline() { return VIEWS[this.getAttribute("view")] ? this.getAttribute("view") : null; }
 	/** serve answers with this_device; the Worker never does. */
 	get onMachine() { return !!(this.status && this.status.this_device); }
@@ -239,11 +241,13 @@ class FolderSyncStatus extends HTMLElement {
 		if (this.inline) this.open(this.inline);
 	}
 
-	/** A same-origin URL under <base>/v1/folders/<project>/, with ?owner= for a folder shared with this person. */
+	/** A same-origin URL under <base>/v1/folders/<project>/, with ?owner= for a folder shared with this person and
+	 *  ?folder= for one of two folders on a machine that sync one project. */
 	url(route, params = {}) {
 		const q = new URLSearchParams();
 		for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== "") q.set(k, v);
 		if (this.owner) q.set("owner", this.owner);
+		if (this.folder) q.set("folder", this.folder);
 		const qs = q.toString();
 		return `${this.base}/v1/folders/${encodeURIComponent(this.project)}/${route}${qs ? `?${qs}` : ""}`;
 	}
@@ -619,7 +623,16 @@ ${h.why ? `<p class="note ${h.state === "error" ? "error" : h.state === "attenti
 	versionUrl(id) {
 		const f = this.file;
 		return id ? this.url(`history/${encodeURIComponent(f.host)}/${encPath(f.path)}`, { version: id })
-			: `${this.base}/v1/folders/${encodeURIComponent(this.project)}/files/${encodeURIComponent(f.host)}/${encPath(f.path)}${this.owner ? `?owner=${encodeURIComponent(this.owner)}` : ""}`;
+			: `${this.base}/v1/folders/${encodeURIComponent(this.project)}/files/${encodeURIComponent(f.host)}/${encPath(f.path)}${this.scope()}`;
+	}
+
+	/** ?owner= and ?folder=, as url() adds them, for a URL built by hand. */
+	scope() {
+		const q = new URLSearchParams();
+		if (this.owner) q.set("owner", this.owner);
+		if (this.folder) q.set("folder", this.folder);
+		const qs = q.toString();
+		return qs ? `?${qs}` : "";
 	}
 
 	/** One version's bytes as text, or null when they are not text (or too big to show). */
