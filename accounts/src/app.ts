@@ -502,8 +502,8 @@ async function file(request: Request, env: Env, deps: Deps, app: App | null, pro
 	const base: Record<string, string> = { "Content-Type": TYPES[suffix] || "application/octet-stream", "Accept-Ranges": "bytes", ...cacheFor(decided.visibility) };
 	// WHY sandboxed: a folder's .html or .svg is someone's file, never this site's page
 	if (ACTIVE.has(suffix)) base["Content-Security-Policy"] = "sandbox";
-	// the ETag, 304, Range and the body all come from the bytes read and sha256-checked (ranges.ts, judge r1 #2)
-	return servedFile(request, reader, host, path, base, head);
+	// the ETag, 304, Range and the body: from the manifest's version, streamed, or the whole sha256-checked bytes (ranges.ts)
+	return servedFile(request, reader, host, entry, base, head);
 }
 
 /** This isolate's web-host queue for deps without one (the unit tests): one per Deps, so tests never share it; each
