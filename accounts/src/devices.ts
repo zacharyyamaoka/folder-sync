@@ -269,10 +269,12 @@ ${inner}
 </body>
 </html>
 `;
-	return new Response(head ? null : html, {
-		status: 200,
-		headers: headers({ "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": PAGE_POLICY, "X-Frame-Options": "DENY" }),
-	});
+	const out = headers({ "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": PAGE_POLICY, "X-Frame-Options": "DENY" });
+	// WHY same-origin, not this Worker's no-referrer: under no-referrer a browser sends Origin: null on the page's own
+	// form POST (Fetch, "serializing a request origin"), and formOk checks Origin; same-origin still sends no referrer
+	// to any other site (found clicking Revoke in Chrome)
+	out.set("Referrer-Policy", "same-origin");
+	return new Response(head ? null : html, { status: 200, headers: out });
 }
 
 async function accountPage(request: Request, env: Env, deps: Deps, app: App, head: boolean): Promise<Response> {

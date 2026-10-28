@@ -244,6 +244,9 @@ test("GET /fs/account: the whole page with no script: who, usage, devices with R
 	assert.match(answer.headers.get("Content-Type") || "", /^text\/html/);
 	assert.match(answer.headers.get("Content-Security-Policy") || "", /form-action 'self'/);
 	assert.equal(answer.headers.get("X-Frame-Options"), "DENY");
+	// a browser sends Origin: null on a form POST from a no-referrer page (Fetch, "serializing a request origin"), and
+	// the forms are checked by Origin: found by clicking Revoke in Chrome, where the form was refused
+	assert.equal(answer.headers.get("Referrer-Policy"), "same-origin");
 	const html = await answer.text();
 	assert.ok(!/<script/i.test(html), "no script: the page works with JavaScript off");
 	assert.ok(!/(href|action|src)="(https?:)?\/\//.test(html), "every link stays on the app's own domain");
