@@ -13,7 +13,7 @@
 // WHY the page has no script: it is where a person goes when something is wrong, so it must work with JavaScript off,
 // and with storage down (its usage line then says it cannot be measured; the devices still list and revoke).
 
-import type { App } from "./apps.ts";
+import { apps, OWN_APP, type App } from "./apps.ts";
 import { escapeAttr, fail, headers, json, jsonBody, PAGE_POLICY, session, writer, type Deps, type Env, type Person, type Via } from "./app.ts";
 import { mint, ttlOf, userRoot } from "./creds.ts";
 import { Measuring, overQuota, quotaOf, TooOld, usageOf } from "./quota.ts";
@@ -335,13 +335,29 @@ ${notice(env, done === "signed-out" ? done : null)}<p>You're not signed in here.
 		? `<ul class="fs-devices" data-testid="fs-devices">\n${list.map((d) => deviceItem(d.device, d.agent, person.userId)).join("\n")}\n</ul>`
 		: '<p class="fs-small">Devices are not set up on this server yet.</p>';
 	return shell(app, `<h1>Your account</h1>
-${notice(env, done)}<p class="fs-who">${person.name ? `<strong>${escapeAttr(person.name)}</strong><br><span class="fs-small">${escapeAttr(person.email)}</span>` : `<strong>${escapeAttr(person.email)}</strong>`}</p>
+${notice(env, done)}<p class="fs-who">Signed in as <strong>${escapeAttr(person.email)}</strong>${person.name ? `<br><span class="fs-small">${escapeAttr(person.name)}</span>` : ""}</p>
 <h2>Storage</h2>
 ${await usageLine(env, deps, person.userId)}
 <h2>Devices</h2>
 <p class="fs-small">Revoking a device signs it out: this server refuses whatever it asks after that, and it gets no new storage keys. A change this server had already started for it may still finish. Storage keys a machine already holds stop working within ${lifetime(ttlOf(env))}, when they expire.</p>
 ${devices}${grantList(await deps.grants?.(person.userId), person.userId)}
-<div class="fs-signout"><form method="post" action="/fs/account/sign-out"><input type="hidden" name="user" value="${escapeAttr(person.userId)}"><button type="submit">Sign out</button></form></div>`, head);
+<div class="fs-signout"><form method="post" action="/fs/account/sign-out"><input type="hidden" name="user" value="${escapeAttr(person.userId)}"><button type="submit">Sign out</button></form></div>
+${appsList(env)}`, head);
+}
+
+/** Where /fs/signin sends a person back to: on the accounts Worker's own host "/" is no page (it answers under /fs/
+ *  only), so there the account page; on an app's own origin, what was asked ("/" by default). WHY (Zach's first
+ *  production sign-in, 2026-10-28): with no return it landed on the Worker's 404. */
+export function signInReturn(app: App, asked: string): string {
+	return app.id === OWN_APP && asked === "/" ? "/fs/account" : asked;
+}
+
+/** "Back to your apps": each registered app (apps.json) by name, at its first https origin (in dev, its first). */
+function appsList(env: Env): string {
+	const items = [...apps(env.PUBLIC_URL, undefined, env.ENVIRONMENT === "dev").values()]
+		.filter((app) => app.id !== OWN_APP && app.origins.length)
+		.map((app) => `<li><a href="${escapeAttr(app.origins.find((o) => o.startsWith("https://")) ?? app.origins[0])}">${escapeAttr(app.name)}</a></li>`);
+	return items.length ? `<nav class="fs-apps" aria-label="Your apps"><h2>Back to your apps</h2><ul>${items.join("")}</ul></nav>` : "";
 }
 
 /** /fs/account[/revoke|/sign-out]: the page and its two forms. */

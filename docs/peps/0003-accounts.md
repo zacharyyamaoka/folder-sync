@@ -81,7 +81,7 @@ is refused, `409 wrong_user`, and the page reloads (review r1 #2).
 | Route | Who | Answer |
 |---|---|---|
 | `/fs/api/auth/*` | anyone | Better Auth: Google, and 6-digit codes by email (`emailOTP`): in dev to `/fs/dev/mailbox`, in production through **Resend** once `RESEND_API_KEY` (secret) and `EMAIL_FROM` (var) are both set (review r3 #8; `src/email.ts`). WHY Resend: one HTTPS call from a Worker; Cloudflare's `send_email` binding reaches only addresses verified in Email Routing, never a stranger signing up |
-| `GET /fs/signin?return=<same-origin path>` | browser | the sign-in page (Google button; dev: email + code); back to `return` signed in |
+| `GET /fs/signin?return=<same-origin path>` | browser | the sign-in page (Google button; dev: email + code); back to `return` signed in. With no `return` (or `return=/`) on the accounts Worker's own host, where `/` is no page, back to `/fs/account` (Zach's first sign-in, 2026-10-28); on an app's origin, `/` |
 | `GET /fs/device` | browser | approve a machine's code (RFC 8628 verification page) |
 | `GET /fs/dev/mailbox?email=` | loopback + dev only | `{ email, code }`, the last sign-in code |
 | `GET /fs/v1/me` | session | `{ user: {id,email,name,image}, root: "users/<id>/", app: {id, project} \| null }` |

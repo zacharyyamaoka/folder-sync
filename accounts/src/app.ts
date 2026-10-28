@@ -40,7 +40,7 @@ import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store, Visibility } from "./store.ts";
 import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhost.ts";
 import type { EmailEnv } from "./email.ts";
-import { accountRoute, devicesApi, type GrantRow, type SessionRow } from "./devices.ts";
+import { accountRoute, devicesApi, signInReturn, type GrantRow, type SessionRow } from "./devices.ts";
 import { servedFile } from "./ranges.ts";
 
 export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
@@ -775,7 +775,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 	if ((first === "signin" || first === "device") && rest.length === 0) {
 		if (!read) return fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 		if (!app) return fail(404, "unknown_origin", "this origin is not a registered app: no sign-in here");
-		const back = first === "signin" ? returnPath(new URL(request.url).searchParams.get("return")) : "/fs/device";
+		const back = first === "signin" ? signInReturn(app, returnPath(new URL(request.url).searchParams.get("return"))) : "/fs/device";
 		return first === "signin" ? page(env, app, "Sign in", "", back, head) : page(env, app, "Sign in a machine", "device.js", back, head);
 	}
 	if (first === "account") return accountRoute(request, env, deps, app, rest, method);

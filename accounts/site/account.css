@@ -54,3 +54,6 @@ body { margin: 0; background: var(--page); }
   background: var(--ink); color: var(--page);
 }
 .fs-button:hover { opacity: .9; }
+.fs-apps h2 { margin-top: 18px; }
+.fs-apps ul { margin: 4px 0 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.fs-apps a { color: var(--ink); }
