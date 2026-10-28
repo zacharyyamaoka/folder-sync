@@ -1,0 +1,17 @@
+{
+  "name": "folder-sync-ui",
+  "private": true,
+  "type": "module",
+  "description": "<folder-sync-status> (PEP 0007 §5.1, docs/API.md \"The element\"): one plain ES module, served at /fs/ui/v1/ by the accounts Worker and by `folder-sync serve`. Its tests drive it over testdata/view-api/ through a stub server.",
+  "scripts": {
+    "test": "playwright test",
+    "stub": "node test/stub.mjs",
+    "webkitgtk": "xvfb-run -a python3 test/webkitgtk.py"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}
