@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>folder-sync</title>
+<meta name="description" content="A folder on your computer, kept in sync online and across your machines.">
+<style>
+  /* WHY so plain: Zach, 2026-10-28: "super straight forward... not much more to it" and "do 1 thing very well".
+     No web fonts, no script, no external requests; it should read like a good Unix tool's homepage. */
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #595959;
+    --rule: #dcdcdc;
+    --code-bg: #f4f4f2;
+    --link: #0b5cad;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121212;
+      --fg: #e6e6e6;
+      --muted: #a0a0a0;
+      --rule: #333333;
+      --code-bg: #1d1d1d;
+      --link: #7ab7ff;
+    }
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 40rem; margin: 0 auto; padding: 40px 16px 64px; }
+  h1, h2, code, pre { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace; }
+  h1 { font-size: 2rem; margin: 0 0 8px; letter-spacing: -0.02em; }
+  h2 { font-size: 1.05rem; margin: 40px 0 8px; padding-top: 16px; border-top: 1px solid var(--rule); }
+  p, ul { margin: 0 0 12px; }
+  ul { padding-left: 1.25rem; }
+  li { margin-bottom: 6px; }
+  .tag { font-size: 1.15rem; margin: 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--link); }
+  code { font-size: 0.9em; background: var(--code-bg); padding: 1px 5px; border-radius: 3px; white-space: nowrap; }
+  pre {
+    margin: 0 0 12px; padding: 12px 14px; background: var(--code-bg); border-radius: 4px;
+    font-size: 0.88rem; line-height: 1.6;
+    white-space: pre-wrap; overflow-wrap: break-word;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; white-space: pre-wrap; }
+  footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>folder-sync</h1>
+  <p class="tag">A folder on your computer, kept in sync online and across your machines.</p>
+  <p class="muted">Early (v0). Open source on <a href="https://github.com/zacharyyamaoka/folder-sync">GitHub</a>.</p>
+
+  <h2>Install</h2>
+  <p>From source, with Go 1.27.3 or newer. There are no prebuilt binaries yet.</p>
+<pre><code>git clone https://<wbr>github.com/<wbr>zacharyyamaoka/<wbr>folder-sync
+go -C folder-sync build -o ~/.folder-sync/<wbr>bin/<wbr>folder-sync ./cmd/<wbr>folder-sync</code></pre>
+  <p>Put <code>~/.folder-sync/bin</code> on your <code>PATH</code>. The first <code>init</code> downloads rclone, checks it against a pinned checksum, and keeps everything under <code>~/.folder-sync/</code>.</p>
+
+  <h2>Use</h2>
+<pre><code>folder-sync login
+cd ~/notes
+folder-sync init
+folder-sync sync --watch
+folder-sync status</code></pre>
+  <ul>
+    <li><code>login</code> signs this machine in: it prints a code, you approve it in a browser. <code>login --key</code> stores a Cloudflare R2 bucket key instead.</li>
+    <li><code>init</code> makes the current folder a synced folder.</li>
+    <li><code>sync --watch</code> pushes this machine's changes and pulls your other machines' until you stop it. <code>sync --install-service</code> writes the autostart file for your system and prints the command that enables it.</li>
+    <li><code>status</code> shows the last push and pull and which machines it has seen.</li>
+  </ul>
+  <p>To make a folder readable on the web: <code>folder-sync publish --public</code>. <code>--private</code> undoes it.</p>
+
+  <h2>How it works</h2>
+  <ul>
+    <li>Your files stay plain files in a plain folder. Any editor or tool works on them.</li>
+    <li>rclone moves them to a Cloudflare R2 bucket, the always-on copy.</li>
+    <li>Each machine pushes its own files. Your other machines' files arrive read-only under <code>hosts/&lt;machine&gt;/</code> in the folder.</li>
+    <li>A file you delete or overwrite is first moved to <code>_trash/</code> in the bucket.</li>
+  </ul>
+
+  <h2>What it is not</h2>
+  <ul>
+    <li><strong>Not a collaborative editor.</strong> Two machines do not edit one file together, and nothing is merged. Two-way shared folders are not built yet.</li>
+    <li><strong>Not a backup app.</strong> A delete on one machine is a delete in the synced copy. <code>_trash/</code> is a safety net, not a backup plan.</li>
+    <li><strong>Not aware of what is in your files.</strong> It moves them and does nothing else with them.</li>
+  </ul>
+
+  <h2>Platforms</h2>
+  <p>Linux and macOS. Windows is next: it builds, but has not been run on Windows yet.</p>
+
+  <footer>
+    <a href="https://github.com/zacharyyamaoka/folder-sync">github.com/zacharyyamaoka/folder-sync</a>
+  </footer>
+</main>
+</body>
+</html>
