@@ -134,6 +134,7 @@ func restoreOwn(p *syncer.Project, items []history.RequestItem, out io.Writer) e
 			At: time.Now().UTC().Format(time.RFC3339Nano), By: history.RequestBy{Kind: "machine", Name: p.Host.Name, Host: p.Host.ID},
 			Items: items[start:end]}
 		result, err := p.Round(context.Background(), syncer.Options{PushOnly: true, Restore: &req})
+		newEventWriter(p, nil).fileEvents(result)
 		if errors.Is(err, syncer.ErrBusy) {
 			if err := syncer.WriteLocalRequest(p.StateDir, req); err != nil {
 				return err
@@ -168,4 +169,13 @@ func restoreOwn(p *syncer.Project, items []history.RequestItem, out io.Writer) e
 		return fmt.Errorf("%s not restored", plural(failed, "file"))
 	}
 	return nil
+}
+
+// fileEvents writes a round's file events (upload, delete, restore, download, remove_copy, skip, conflict, hold,
+// synced; docs/peps/0007 §4) through the activity log: the folder's local log, and stdout with --events. The tray's
+// own events on stdout are unchanged (readers ignore event names they do not know).
+func (w *eventWriter) fileEvents(r syncer.Result) {
+	for _, ev := range r.Events {
+		w.emit(ev)
+	}
 }

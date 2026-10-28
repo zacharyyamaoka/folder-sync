@@ -75,6 +75,7 @@ func (w *eventWriter) onceRound(started time.Time, result syncer.Result, err err
 		return
 	}
 	w.emit(syncEvent{Event: "round_start", At: started.UTC().Format(time.RFC3339Nano), Source: "once"})
+	w.fileEvents(result)
 	ms := time.Since(started).Milliseconds()
 	if err != nil {
 		kind, why := classify(err)

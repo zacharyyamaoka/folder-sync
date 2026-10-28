@@ -514,4 +514,37 @@ func TestHistory(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("the local log has the round's file events", func(t *testing.T) {
+		days, _ := filepath.Glob(filepath.Join(stateDir(t, a), "log", "*.jsonl"))
+		var all []byte
+		for _, day := range days {
+			data, _ := os.ReadFile(day)
+			all = append(all, data...)
+		}
+		for _, want := range []string{`"event":"upload"`, `"event":"delete"`, `"event":"restore"`} {
+			if !bytes.Contains(all, []byte(want)) {
+				t.Errorf("A's local log lacks %s", want)
+			}
+		}
+		days, _ = filepath.Glob(filepath.Join(stateDir(t, b), "log", "*.jsonl"))
+		all = nil
+		for _, day := range days {
+			data, _ := os.ReadFile(day)
+			all = append(all, data...)
+		}
+		if !bytes.Contains(all, []byte(`"event":"download"`)) || !bytes.Contains(all, []byte(`"down_ms"`)) {
+			t.Errorf("B's local log lacks its downloads with down_ms")
+		}
+		// every line both machines logged is a folder-sync-event/1
+		days, _ = filepath.Glob(filepath.Join(stateDir(t, a), "log", "*.jsonl"))
+		more, _ := filepath.Glob(filepath.Join(stateDir(t, b), "log", "*.jsonl"))
+		var lines []string
+		for _, day := range append(days, more...) {
+			data, _ := os.ReadFile(day)
+			lines = append(lines, strings.Split(strings.TrimSpace(string(data)), "\n")...)
+		}
+		validateAgainst(t, "event.schema.json", lines...)
+		t.Logf("%d local log lines valid against schema/event.schema.json", len(lines))
+	})
 }
