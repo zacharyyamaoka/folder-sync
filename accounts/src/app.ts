@@ -13,7 +13,7 @@
 //   GET  /fs/v1/folders                           my folders and the ones I may read
 //   GET  /fs/v1/folders/:project[?owner=]         the union view of a folder's hosts
 //   GET  /fs/v1/folders/:project/bundle?prefix=   a folder's small UTF-8 files in one answer
-//   GET  /fs/v1/folders/:project/files/:host/<p>  one file's bytes
+//   GET  /fs/v1/folders/:project/files/:host/<p>  one file's bytes; Range: one range -> 206 (ranges.ts)
 //   PUT|DELETE /fs/v1/folders/:project/web/<p>    the folder's web host (§3.4); X-Folder-Sync-Keep-Newest: <field>
 //   PATCH /fs/v1/folders/:project {visibility}    public or private
 //   POST /fs/v1/folders/:project/readers {email}, DELETE …/readers/:email
@@ -41,6 +41,7 @@ import type { Store, Visibility } from "./store.ts";
 import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhost.ts";
 import type { EmailEnv } from "./email.ts";
 import { accountRoute, devicesApi, type SessionRow } from "./devices.ts";
+import { rangedFile } from "./ranges.ts";
 
 export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
 	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
@@ -125,6 +126,12 @@ const TYPES: Record<string, string> = {
 	".stl": "model/stl",
 	".step": "application/step",
 	".stp": "application/step",
+	".log": "text/plain; charset=utf-8",
+	".mp4": "video/mp4",
+	// WHY video/mp4: an .m4v is an MPEG-4 file, and video/x-m4v is no registered type
+	".m4v": "video/mp4",
+	".webm": "video/webm",
+	".mov": "video/quicktime",
 };
 const ACTIVE = new Set([".html", ".htm", ".svg"]);
 const SITE_FILES: Record<string, string> = { "signin.js": "text/javascript; charset=utf-8", "device.js": "text/javascript; charset=utf-8", "account.css": "text/css; charset=utf-8" };
@@ -475,10 +482,12 @@ async function file(request: Request, env: Env, deps: Deps, app: App | null, pro
 	const dot = name.lastIndexOf(".");
 	const suffix = dot > 0 ? name.slice(dot).toLowerCase() : "";
 	const etag = `"${entry.sha256}"`;
-	const base: Record<string, string> = { "Content-Type": TYPES[suffix] || "application/octet-stream", ETag: etag, ...cacheFor(decided.visibility) };
+	const base: Record<string, string> = { "Content-Type": TYPES[suffix] || "application/octet-stream", ETag: etag, "Accept-Ranges": "bytes", ...cacheFor(decided.visibility) };
 	// WHY sandboxed: a folder's .html or .svg is someone's file, never this site's page
 	if (ACTIVE.has(suffix)) base["Content-Security-Policy"] = "sandbox";
 	if ((request.headers.get("If-None-Match") || "") === etag) return new Response(null, { status: 304, headers: headers(base) });
+	const ranged = await rangedFile(request, reader, host, entry, base, head);
+	if (ranged) return ranged;
 	let data: ArrayBuffer;
 	try {
 		data = await reader.read(host, path);

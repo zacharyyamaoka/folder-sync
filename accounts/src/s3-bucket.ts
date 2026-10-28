@@ -93,6 +93,33 @@ export class S3Bucket implements R2BucketLike {
 		return { key, etag: tag, size: data.byteLength, arrayBuffer: async () => data };
 	}
 
+	/** `length` bytes of `key` from `offset` (one ranged GET), streamed, never read whole: what a video's seek reads
+	 *  (ranges.ts). `size` is the whole object's, as R2's ranged get answers it; null when there is no such object or
+	 *  the range is past its end (it changed since its manifest was read). */
+	async getRange(key: string, offset: number, length: number): Promise<{ key: string; etag: string; size: number; body: ReadableStream<Uint8Array> | null } | null> {
+		this.calls.push(`GET ${key} bytes=${offset}-${offset + length - 1}`);
+		const answer = await this.call(this.url(key), { headers: { Range: `bytes=${offset}-${offset + length - 1}` } });
+		if (answer.status === 404 || answer.status === 416) {
+			await answer.body?.cancel();
+			return null;
+		}
+		if (answer.status === 200) {
+			// a store that ignored the Range: the whole object came back, so take the asked-for slice of it
+			const data = new Uint8Array(await answer.arrayBuffer());
+			return { key, etag: etagOf(answer), size: data.byteLength, body: new Blob([data.slice(offset, offset + length)]).stream() };
+		}
+		if (answer.status !== 206) {
+			await answer.body?.cancel();
+			throw new Error(`the storage answered ${answer.status} for a ranged read`);
+		}
+		const total = /\/(\d+)\s*$/.exec(answer.headers.get("Content-Range") || "");
+		if (!total) {
+			await answer.body?.cancel();
+			throw new Error("the storage answered a ranged read without its size");
+		}
+		return { key, etag: etagOf(answer), size: Number(total[1]), body: answer.body };
+	}
+
 	async list(options: { prefix: string; delimiter: string; cursor?: string }): Promise<R2ListResultLike> {
 		this.calls.push(`LIST ${options.prefix}`);
 		const query = new URLSearchParams({ "list-type": "2", prefix: options.prefix, delimiter: options.delimiter });
