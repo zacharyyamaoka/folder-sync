@@ -2,9 +2,9 @@ package main
 
 // `sync --watch --events`: one folder-sync-event/1 JSON object per line on stdout, for an app (the desktop app's
 // tray, docs/peps/0006) to show what the engine is doing without parsing human text. The human lines go to stderr.
+// Every sync, --once or --watch, also writes the same lines to the folder's local log (internal/synclog, PEP 0007 §4).
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,10 +17,12 @@ import (
 
 	"folder-sync/internal/account"
 	"folder-sync/internal/creds"
+	"folder-sync/internal/syncer"
+	"folder-sync/internal/synclog"
 )
 
 // EventSchema names `sync --events`' lines.
-const EventSchema = "folder-sync-event/1"
+const EventSchema = synclog.Schema
 
 // Error kinds a failed round is sorted into. WHY these four: they are the tray's states (PEP 0006) — the person can
 // act on "signed out" (sign in) and "over quota" (delete files, see Why), waits out "offline", and reads the rest.
@@ -31,47 +33,56 @@ const (
 	KindError     = "error"
 )
 
-type syncEvent struct {
-	Schema   string `json:"schema"`
-	Event    string `json:"event"` // watching | round_start | round | hub | stopped
-	At       string `json:"at"`
-	Folder   string `json:"folder,omitempty"`
-	Project  string `json:"project,omitempty"`
-	Host     string `json:"host,omitempty"`
-	Watcher  *bool  `json:"watcher,omitempty"`
-	Hub      string `json:"hub,omitempty"` // on | off | connected | closed
-	Source   string `json:"source,omitempty"`
-	OK       *bool  `json:"ok,omitempty"`
-	Uploaded int    `json:"uploaded,omitempty"`
-	Deleted  int    `json:"deleted,omitempty"`
-	Fetched  int    `json:"fetched,omitempty"`
-	Peers    int    `json:"peers,omitempty"`
-	Ms       int64  `json:"ms,omitempty"`
-	Kind     string `json:"kind,omitempty"`
-	Why      string `json:"why,omitempty"`
+// syncEvent is one folder-sync-event/1 line (internal/synclog, PEP 0007 §4): the desktop app's events here, the file
+// events from the round.
+type syncEvent = synclog.Event
+
+// eventWriter is the activity log of the folder a sync runs: its local day files (~/.folder-sync/projects/<key>/log/)
+// and, with --events, stdout. Safe from several goroutines (the hub reports from its own). A nil writer drops
+// everything; one built with only out (and now) prints and keeps no local log.
+type eventWriter struct {
+	out  io.Writer
+	now  func() time.Time
+	log  *synclog.Log
+	once sync.Once
 }
 
-// eventWriter is safe from several goroutines (the hub reports from its own). A nil writer drops everything.
-type eventWriter struct {
-	mu  sync.Mutex
-	out io.Writer
-	now func() time.Time
+// newEventWriter writes the folder's local log, and stdout when it is not nil (--events).
+// WHY the scrub reads p.Creds at each line: a short-lived key rolls over between rounds (Project.refreshCreds).
+func newEventWriter(p *syncer.Project, stdout io.Writer) *eventWriter {
+	return &eventWriter{out: stdout, log: &synclog.Log{Dir: synclog.Dir(p.StateDir), Stdout: stdout, Project: p.Config.Project,
+		Host: p.Host.ID, HostName: p.Host.Name, Scrub: func(text string) string { return p.Creds.Scrub(text) }}}
 }
 
 func (w *eventWriter) emit(ev syncEvent) {
 	if w == nil {
 		return
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	ev.Schema = EventSchema
-	now := time.Now
-	if w.now != nil {
-		now = w.now
+	w.once.Do(func() {
+		if w.log == nil {
+			w.log = &synclog.Log{Stdout: w.out, Now: w.now}
+		}
+	})
+	w.log.Emit(ev)
+}
+
+// onceRound logs a `sync --once` round as `--watch` logs each of its rounds: round_start, stamped when it began, then
+// round. A round that never ran (another holds the folder lock, exit 75) logs nothing: that round's writer logs it.
+// WHY classify and not classifyRound: the probe dials each endpoint for up to 3 s, and --once is what scripts and
+// `vt sync now` wait on.
+func (w *eventWriter) onceRound(started time.Time, result syncer.Result, err error) {
+	if errors.Is(err, syncer.ErrBusy) {
+		return
 	}
-	ev.At = now().UTC().Format(time.RFC3339Nano)
-	data, _ := json.Marshal(ev)
-	w.out.Write(append(data, '\n'))
+	w.emit(syncEvent{Event: "round_start", At: started.UTC().Format(time.RFC3339Nano), Source: "once"})
+	ms := time.Since(started).Milliseconds()
+	if err != nil {
+		kind, why := classify(err)
+		w.emit(syncEvent{Event: "round", OK: boolPtr(false), Kind: kind, Why: why, Ms: ms})
+		return
+	}
+	w.emit(syncEvent{Event: "round", OK: boolPtr(true), Uploaded: len(result.Uploaded), Deleted: len(result.Deleted),
+		Fetched: fetched(result), Peers: len(result.Peers), Ms: ms})
 }
 
 var offlinePattern = regexp.MustCompile(`(?i)did not answer|connection refused|no such host|network is unreachable|i/o timeout|dial tcp|context deadline exceeded|no route to host|temporary failure in name resolution|connection reset`)
@@ -143,4 +154,3 @@ func classifyRound(err error, endpoints ...string) (kind, why string) {
 	}
 	return kind, why
 }
-
