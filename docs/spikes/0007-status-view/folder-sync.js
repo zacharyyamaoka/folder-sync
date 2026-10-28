@@ -1,4 +1,4 @@
-// PEP 0006 spike: is ONE framework-free custom element enough for every app's sync view? Not the implementation.
+// PEP 0007 spike: is ONE framework-free custom element enough for every app's sync view? Not the implementation.
 //
 //   <script type="module" src="/fs/ui/v1/folder-sync.js"></script>
 //   <folder-sync-status project="notes"></folder-sync-status>

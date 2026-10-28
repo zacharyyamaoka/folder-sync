@@ -164,7 +164,7 @@ fast and leaves the backdoor unusable.
   - A path whose history key would pass 1,024 bytes [14] is published but not versioned, and its change record says so.
 - **WHY native S3 calls and not rclone's flag:** `--backup-dir` with `--suffix` can only append to a file's name. It
   cannot put the version under the path, and it has no way to do it for deletes (`move` keeps the name). The engine
-  already signs S3 requests itself (`internal/s3`), and PEP 0004 §4 names native calls as its next speed-up. rclone
+  already signs S3 requests itself (`internal/s3`), and PEP 0005 §4 names native calls as its next speed-up. rclone
   keeps what it is good at: moving bytes, with retries, multipart uploads and checksums.
 - **Writers:**
   - each machine writes its own `_history/…/<host>/` and `_changes/…/<host>/`;
@@ -245,7 +245,7 @@ v1 §5). folder-sync does what Simple Hosted Files does.
 |---|---|---|---|
 | CLI: `folder-sync restore <path> [--version <id> \| --before <time>] [--dir]`; `folder-sync deleted --restore …` | at once, as above. If a `--watch` engine holds the folder lock, it leaves a local request and pokes the engine | it writes a restore request into the bucket | the same request, or the web route |
 | The page on the machine (`folder-sync serve`) | a local request, which the running engine applies within one round | a request in the bucket | the web route |
-| A web page | a restore request, applied when that device next syncs; with PEP 0004's hub, a live device applies it at once | (same) | at once: the folder's object writes the old bytes as a new version |
+| A web page | a restore request, applied when that device next syncs; with PEP 0005's hub, a live device applies it at once | (same) | at once: the folder's object writes the old bytes as a new version |
 
 - **A restore request** is `<root>_requests/<project>/<host>/<uuid>.json`:
   `{schema: "folder-sync-restore/1", id, at, by: {kind, name}, items: [{path, version}]}`.
@@ -298,7 +298,7 @@ v1 §5). folder-sync does what Simple Hosted Files does.
   change record per publishing round. At the vault note's 2,000 changes a day that is about 60,000 Class A
   operations a month extra, inside R2's free million [13].
 
-### 3.6 With PEP 0004's push
+### 3.6 With PEP 0005's push
 
 - **Order in a round:**
   1. copy the old versions to history;
@@ -311,7 +311,7 @@ v1 §5). folder-sync does what Simple Hosted Files does.
   hears `changed` reads the folder at once and the activity a moment later.
 - **The burst rule makes rapid saves cheaper than now.** Today `--backup-dir` copies every replaced version; with the
   rule, a burst copies at most one per 30 s per path.
-- **The hub gains three messages.** PEP 0004 §3 says "anything else is ignored", so old clients and hubs are
+- **The hub gains three messages.** PEP 0005 §3 says "anything else is ignored", so old clients and hubs are
   unaffected.
   - `request` (Worker → hub → device) wakes a device for a restore.
   - `status` (machine → hub, owner + machine only, at most 200 characters of `why`) carries a device's state when it
@@ -444,7 +444,7 @@ which is the Tauri app's engine on Linux. Neither had a script error. A delibera
 | `POST …/restore` `{items:[{host, path, version}]}`: `{applied, requested}` | owner, under the CSRF and `X-Folder-Sync-User` rules (PEP 0003 §3.3) | owner (token) |
 | `POST …/history/purge` `{older_than_days?, host?, path?, version?}` | owner | no |
 | `GET /fs/v1/usage` (+ `live`, `history`) | yes (exists) | the last figure, cached |
-| `GET …/events` (WebSocket: `hello`, `changed`, `status`, `request`) | the hub (PEP 0004) | the same messages from `serve` |
+| `GET …/events` (WebSocket: `hello`, `changed`, `status`, `request`) | the hub (PEP 0005) | the same messages from `serve` |
 | `POST /fs/v1/local/pause` · `GET /fs/v1/local/debug` · `GET /fs/v1/local/folders` | no | yes |
 
 - `…` is `/fs/v1/folders/:project`. On the machine, when two folders sync one project, `?folder=` picks one;
@@ -586,7 +586,7 @@ keep working offline.
 - one writer per host for live files;
 - the credential process and account roots (PEP 0002);
 - PEP 0003's routes and quota rules, except the new `live` / `history` split;
-- PEP 0004's `hello` and `changed`;
+- PEP 0005's `hello` and `changed`;
 - `status --json` (`folder-sync-status/1`);
 - `vt`'s own `sync.json`, until `vt` adopts the view.
 
@@ -632,7 +632,7 @@ Taken without asking, since they are implementation:
 
 ### What was checked
 
-- **Spike 1: the layout on the e2e stand-in.** `node docs/spikes/0006-history-layout/spike.mjs <rclone> <scratch>`
+- **Spike 1: the layout on the e2e stand-in.** `node docs/spikes/0007-history-layout/spike.mjs <rclone> <scratch>`
   starts its own `rclone serve s3` v1.75.2 and stops it when done. All 12 checks pass:
   - `PUT`;
   - `CopyObject` live → history;
@@ -646,7 +646,7 @@ Taken without asking, since they are implementation:
   **Finding: the stand-in ignores `x-amz-copy-source-if-match`** (it answers 200 to a wrong ETag), as it ignores
   conditional PUTs (PEP 0001's known gap). That check belongs in `scripts/check-r2` against real R2, which documents
   the header [11].
-- **Spike 2: the view.** `docs/spikes/0006-status-view/` holds `folder-sync.js` (one custom element, about 210
+- **Spike 2: the view.** `docs/spikes/0007-status-view/` holds `folder-sync.js` (one custom element, about 210
   lines), `index.html` (fixtures, and a deliberately hostile host stylesheet) and `render.py`, which drives
   Chromium (Playwright) and WebKitGTK 2.52.6 (`xvfb-run`). Results:
   - six steps each in both engines;
@@ -669,7 +669,7 @@ Taken without asking, since they are implementation:
 - How long one LIST takes from a Worker against real R2 at 20,000 or more versions. The deleted-files view rests on it
   (§12).
 - WKWebView (macOS) and WebView2 (Windows). Only Chromium and WebKitGTK were rendered.
-- What Durable Object alarms cost for the pruner at many folders. PEP 0004's cost arithmetic suggests it is small.
+- What Durable Object alarms cost for the pruner at many folders. PEP 0005's cost arithmetic suggests it is small.
 
 ## 12. Revisit when
 
@@ -708,4 +708,4 @@ Web sources accessed 2026-10-28.
 17. Pro Git, Git Internals: Git Objects ("Git is a content-addressable filesystem") — https://git-scm.com/book/en/v2/Git-Internals-Git-Objects
 18. jsdiff (`diff` on npm, BSD-3-Clause; `diffLines`, `structuredPatch`) — https://github.com/kpdecker/jsdiff
 19. Vault: `C - Fast file sync (prior art)` (the hub; cost arithmetic), `Running AI Agents Unattended Safely (Deep Research, 2026-10-02)` (copies an agent cannot reach), `C - 3-2-1 Backup Rule`, `C - Single Writer Principle`, `C - Derived Index (Rebuildable from the System of Record)`
-20. This repository: `internal/syncer/{round,project}.go`, `internal/names/names.go`, `accounts/src/{webhost,app}.ts`, `accounts/wrangler.toml`, README "What is real and what is pending"; `lane/desktop` `cmd/folder-sync/events.go` and `app/`; `lane/devices` PEP 0003 §3.3 and `accounts/src/devices.ts`; `lane/fast-sync` PEP 0004 and `accounts/src/hub.ts`; `lane/latency-kpi` `bench/latency/bench.mjs`; Simple Hosted Files `SPEC.md` (versions, checkpoints, `MAX_VERSIONS_PER_FILE`)
+20. This repository: `internal/syncer/{round,project}.go`, `internal/names/names.go`, `accounts/src/{webhost,app}.ts`, `accounts/wrangler.toml`, README "What is real and what is pending"; `lane/desktop` `cmd/folder-sync/events.go` and `app/`; `lane/devices` PEP 0003 §3.3 and `accounts/src/devices.ts`; `lane/fast-sync` PEP 0005 and `accounts/src/hub.ts`; `lane/latency-kpi` `bench/latency/bench.mjs`; Simple Hosted Files `SPEC.md` (versions, checkpoints, `MAX_VERSIONS_PER_FILE`)

@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-// PEP 0006 spike: can the proposed history layout live in the bucket as plain objects, using only stock S3 calls,
+// PEP 0007 spike: can the proposed history layout live in the bucket as plain objects, using only stock S3 calls,
 // on the e2e stand-in (`rclone serve s3`)? A feasibility check, not the implementation.
 //
-//   node docs/spikes/0006-history-layout/spike.mjs <path to the pinned rclone> <scratch dir>
+//   node docs/spikes/0007-history-layout/spike.mjs <path to the pinned rclone> <scratch dir>
 //
 // It starts its own `rclone serve s3` on a free loopback port (throwaway keys, data under <scratch dir>), runs the
 // steps below with the repo's vendored aws4fetch, prints one line per check, and stops the server it started (by pid).
 //
-// The layout under test (PEP 0006 §A):
+// The layout under test (PEP 0007 §A):
 //   <root><project>/hosts/<host>/<path>                                  live file (unchanged)
 //   <root>_history/<project>/<host>/<path>/<written_at>_<sha256:16>      one object per kept version, plain bytes
 //   <root>_changes/<project>/<host>/<seq:012>.json                       one change record per manifest seq

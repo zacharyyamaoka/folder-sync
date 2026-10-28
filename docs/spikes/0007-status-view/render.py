@@ -1,7 +1,7 @@
-"""PEP 0006 spike: render the shared sync view in the two engines the apps run in, and measure it.
+"""PEP 0007 spike: render the shared sync view in the two engines the apps run in, and measure it.
 
     <playwright python> render.py chromium <out dir>      Chromium (vibetracks.dev, robotparts.dev, vt serve in Chrome)
-    xvfb-run -a python3 render.py webkitgtk <out dir>     WebKitGTK (the Tauri desktop app on Linux, PEP 0005)
+    xvfb-run -a python3 render.py webkitgtk <out dir>     WebKitGTK (the Tauri desktop app on Linux, PEP 0006)
 
 Each run opens index.html, then: the pill, the open menu, and the panel on each of its four views. It saves one PNG
 per step and prints one JSON line of measurements per step: whether the menu and the dialog are open and on screen,

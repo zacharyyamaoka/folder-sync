@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PEP 0006 spike: the shared sync view</title>
+<title>PEP 0007 spike: the shared sync view</title>
 <style>
   /* the host app's own CSS, deliberately hostile: none of it may reach inside the component (Shadow DOM) */
   body { margin: 0; font: 15px Georgia, serif; background: #fbfaf7; color: #222; }
@@ -13,7 +13,7 @@
   footer { display: flex; justify-content: flex-end; align-items: center; padding: 0 10px; border-top: 1px solid #e4e1da; background: #f3f1ec; }
 </style>
 <script>
-  // What /fs/v1/folders/notes/... would answer (PEP 0006 §C, "The data API"). Fixtures only: this spike has no server.
+  // What /fs/v1/folders/notes/... would answer (PEP 0007 §C, "The data API"). Fixtures only: this spike has no server.
   const HOST = "b55e9683-7854-4121-a56a-9bae7c3ab1da";
   const at = (m) => new Date(Date.parse("2026-10-28T21:00:00Z") - m * 60000).toISOString();
   window.FOLDER_SYNC_FIXTURES = {
