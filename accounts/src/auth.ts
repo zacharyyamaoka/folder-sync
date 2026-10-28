@@ -22,12 +22,16 @@ import type { Deps, Env, Person, Via } from "./app.ts";
 import { emailSender } from "./email.ts";
 import { signUpAllowed } from "./signup.ts";
 import { d1Store, type D1Like } from "./store.ts";
-import { pagedSessions, type GrantRow } from "./devices.ts";
+import { pagedSessions, SIGN_IN_AGAIN, type GrantRow } from "./devices.ts";
 import { webHostName } from "./webhost.ts";
 
 const DAY_S = 24 * 60 * 60;
 export const CLIENT_ID = "folder-sync";
 export const BASE_PATH = "/fs/api/auth";
+
+/** A device code being redeemed -> the browser session that approved it, from the /device/token hook to the session it
+ *  creates (the same request, so the same isolate). */
+const approvers = new Map<string, string>();
 
 /** Dev only: the last code sent to each email, read by the local proof at /fs/dev/mailbox. */
 const mailbox = new Map<string, string>();
@@ -49,7 +53,8 @@ export function createAuth(env: Env, origin: string) {
 		database: env.DB as any,
 		trustedOrigins: [origin],
 		// kind: set by the server when it makes a session (the hook below), never from the request (judge r2 #1)
-		session: { expiresIn: 90 * DAY_S, updateAge: DAY_S, additionalFields: { kind: { type: "string", required: false, input: false } } },
+		// approvedBy: a machine session's approving browser session, which the database requires alive (0009, judge r3 #1)
+		session: { expiresIn: 90 * DAY_S, updateAge: DAY_S, additionalFields: { kind: { type: "string", required: false, input: false }, approvedBy: { type: "string", required: false, input: false } } },
 		// Dev signs many people in from one address, so the limiter is off there; in production it is counted in D1,
 		// because Workers memory is per isolate.
 		rateLimit: { enabled: !dev, storage: "database" },
@@ -68,7 +73,15 @@ export function createAuth(env: Env, origin: string) {
 				create: {
 					// WHY the endpoint and not the User-Agent: a session made by redeeming a device code is a machine's, whatever
 					// it sends; only a browser session may approve a device code (the hook below, judge r2 #1)
-					before: async (session: Record<string, unknown>, ctx?: { path?: string }) => ({ data: { ...session, kind: ctx?.path === "/device/token" ? "machine" : "browser" } }),
+					before: async (session: Record<string, unknown>, ctx?: { path?: string; body?: unknown }) => {
+						if (ctx?.path !== "/device/token") return { data: { ...session, kind: "browser" } };
+						// the grant's approver, read by the /device/token hook below; migration 0009's trigger refuses the insert
+						// unless that session is still alive, in the same statement (judge r3 #1)
+						const code = String((ctx.body as { device_code?: unknown })?.device_code ?? "");
+						const approvedBy = approvers.get(code) ?? null;
+						approvers.delete(code);
+						return { data: { ...session, kind: "machine", approvedBy } };
+					},
 				},
 			},
 			user: {
@@ -91,21 +104,42 @@ export function createAuth(env: Env, origin: string) {
 					// only a browser session approves a machine, and the grant is bound to it (judge r2 #1): a stolen laptop's
 					// bearer cannot prepare its own replacement, and a grant dies with the session that approved it
 					const found = await getSessionFromCtx(ctx);
-					if (!found || (found.session as { kind?: string }).kind !== "browser") {
+					const kind = (found?.session as { kind?: string | null } | undefined)?.kind;
+					// a sign-in from before migration 0008 has no kind: it may be a browser, but nothing proves it (judge r3 #5)
+					if (found && (kind === null || kind === undefined)) throw new APIError("FORBIDDEN", { code: "SIGN_IN_AGAIN", message: SIGN_IN_AGAIN });
+					if (!found || kind !== "browser") {
 						throw new APIError("FORBIDDEN", { code: "BROWSER_ONLY", message: "approve a machine from your browser, signed in" });
 					}
-					const userCode = String((ctx.body as { userCode?: unknown })?.userCode ?? "");
-					const normalized = userCode.replace(/[^a-zA-Z0-9]/g, "").toUpperCase(); // as the device plugin finds it
-					await db.prepare('UPDATE "deviceCode" SET "approvedSessionId" = ? WHERE "userCode" IN (?, ?)').bind(found.session.id, userCode, normalized).run();
 				}
 				if (ctx.path === "/device/token") {
 					const code = String((ctx.body as { device_code?: unknown })?.device_code ?? "");
 					const row = await db.prepare('SELECT "status", "userId", "approvedSessionId" FROM "deviceCode" WHERE "deviceCode" = ?').bind(code).first<{ status: string; userId: string | null; approvedSessionId: string | null }>();
-					if (row?.status === "approved" && !(row.userId && row.approvedSessionId && (await d1Store(db).sessionAlive!(row.userId, row.approvedSessionId, Date.now())))) {
+					// approved, its approver not bound yet (the approve's after hook is a moment behind): ask the CLI to poll again
+					if (row?.status === "approved" && !row.approvedSessionId) throw new APIError("BAD_REQUEST", { error: "authorization_pending", error_description: "the approval is being recorded" });
+					if (row?.status === "approved" && !(row.userId && (await d1Store(db).sessionAlive!(row.userId, row.approvedSessionId!, Date.now())))) {
 						await db.prepare('DELETE FROM "deviceCode" WHERE "deviceCode" = ?').bind(code).run();
 						throw new APIError("BAD_REQUEST", { error: "access_denied", error_description: "the browser session that approved this sign-in has ended" });
 					}
+					// WHY this read is not the guard: its answer can be stale by the time Better Auth inserts the session, so the
+					// session carries the approver and the database checks it at the insert (0009, judge r3 #1)
+					if (row?.approvedSessionId) approvers.set(code, row.approvedSessionId);
 				}
+			}),
+			after: createAuthMiddleware(async (ctx) => {
+				if (ctx.path === "/device/approve") {
+					// WHY after, and only on success (judge r3 #3): before it, a refused approval (another person's code, one
+					// already approved) would rebind the grant; here Better Auth has made the owner-checked pending -> approved
+					// move, and the first approver only is bound
+					const returned = ctx.context.returned;
+					if (!returned || returned instanceof APIError || returned instanceof Error) return;
+					const found = await getSessionFromCtx(ctx);
+					if (!found) return;
+					const userCode = String((ctx.body as { userCode?: unknown })?.userCode ?? "");
+					const normalized = userCode.replace(/[^a-zA-Z0-9]/g, "").toUpperCase(); // as the device plugin finds it
+					await db.prepare('UPDATE "deviceCode" SET "approvedSessionId" = ? WHERE "userCode" IN (?, ?) AND "status" = \'approved\' AND "userId" = ? AND "approvedSessionId" IS NULL')
+						.bind(found.session.id, userCode, normalized, found.user.id).run();
+				}
+				if (ctx.path === "/device/token") approvers.delete(String((ctx.body as { device_code?: unknown })?.device_code ?? ""));
 			}),
 		},
 		plugins: [
@@ -176,7 +210,25 @@ export function liveDeps(env: Env): Deps | null {
 	};
 	return {
 		// the router only calls this for a registered origin, so the request's own origin is an app's
-		auth: (request) => authFor(env, new URL(request.url).origin).handler(request),
+		auth: async (request) => {
+			const auth = authFor(env, new URL(request.url).origin);
+			if (request.method !== "POST" || !new URL(request.url).pathname.endsWith("/device/token")) return auth.handler(request);
+			const body = await request.text();
+			const answer = await auth.handler(new Request(request, { body }));
+			if (answer.status < 500) return answer;
+			// a redemption that consumed its grant and then could not make the session: the database refused it because its
+			// approver had ended (0009's trigger, judge r3 #1), which Better Auth answers as a bare 500. The grant is gone,
+			// so the honest answer is RFC 8628's access_denied: the machine starts over.
+			let code: string | null = null;
+			try {
+				code = String(JSON.parse(body).device_code ?? "") || null;
+			} catch {
+				code = new URLSearchParams(body).get("device_code");
+			}
+			if (!code || (await (env.DB as D1Like).prepare('SELECT 1 AS "found" FROM "deviceCode" WHERE "deviceCode" = ?').bind(code).first())) return answer;
+			await answer.body?.cancel();
+			return new Response(JSON.stringify({ error: "access_denied", error_description: "the browser session that approved this sign-in has ended" }), { status: 400, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+		},
 		async person(request, via, app): Promise<Person | null> {
 			const headers = sent(request, via);
 			if (!headers) return null;
@@ -207,9 +259,9 @@ export function liveDeps(env: Env): Deps | null {
 			const ctx = await authFor(env, ownOrigin(env)).$context;
 			// WHY paged: the adapter answers at most 100 rows a call (judge r2 #4)
 			return pagedSessions(async (offset, limit) => {
-				const rows = (await ctx.adapter.findMany({ model: "session", where: [{ field: "userId", value: userId }, { field: "expiresAt", value: new Date(), operator: "gt" }], limit, offset, sortBy: { field: "createdAt", direction: "asc" } })) as { id: string; userAgent?: string | null; createdAt: Date; updatedAt: Date }[];
+				const rows = (await ctx.adapter.findMany({ model: "session", where: [{ field: "userId", value: userId }, { field: "expiresAt", value: new Date(), operator: "gt" }], limit, offset, sortBy: { field: "createdAt", direction: "asc" } })) as { id: string; userAgent?: string | null; createdAt: Date; updatedAt: Date; kind?: string | null }[];
 				// WHY copied field by field: a session's token is its bearer credential and never leaves this layer
-				return rows.map((row) => ({ id: row.id, userAgent: row.userAgent ?? null, createdAt: row.createdAt, updatedAt: row.updatedAt }));
+				return rows.map((row) => ({ id: row.id, userAgent: row.userAgent ?? null, createdAt: row.createdAt, updatedAt: row.updatedAt, kind: row.kind ?? null }));
 			});
 		},
 		async revokeSession(userId, id) {

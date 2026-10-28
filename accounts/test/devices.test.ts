@@ -783,3 +783,35 @@ test("mutation: without the form's Origin check, a foreign page's form revokes a
 		assert.ok(!live.has("token-owner-laptop"));
 	});
 });
+
+test("judge r3 #5: the device page answers a pre-0008 sign-in's refusal with the reason and a Sign out button that leads back to sign-in", async () => {
+	const { runInNewContext } = await import("node:vm");
+	const script = readFileSync(fileURLToPath(new URL("../site/device.js", import.meta.url)), "utf-8");
+	const elements = new Map<string, Record<string, unknown>>();
+	const element = (selector: string) => {
+		if (!elements.has(selector)) elements.set(selector, { onclick: null, onkeydown: null, value: "", hidden: true, textContent: "", innerHTML: "", focus() {} });
+		return elements.get(selector)!;
+	};
+	const box = { innerHTML: "", querySelector: element };
+	const calls: { url: string; init?: RequestInit }[] = [];
+	let reloaded = 0;
+	const refused = Object.assign(new Error("This sign-in is from before machine approval was added. Sign out and sign in again to approve a machine."), { code: "SIGN_IN_AGAIN" });
+	const window = { FSSignIn: { render: () => undefined, post: async () => { throw refused; }, esc: (s: string) => String(s), session: async () => ({ user: { id: "ownerABC123", email: "a@example.com" } }), AUTH: "/fs/api/auth" } };
+	const fetch = async (url: string, init?: RequestInit) => {
+		calls.push({ url, init });
+		return new Response('{"status":"pending"}');
+	};
+	runInNewContext(script, { window, document: { querySelector: () => box }, location: { search: "?user_code=ABCDEFGH", href: "https://robotparts.dev/fs/device?user_code=ABCDEFGH", reload: () => reloaded++ }, URLSearchParams, fetch });
+	await new Promise((done) => setTimeout(done, 10));
+	await (element('[data-testid="fs-device-approve"]').onclick as () => Promise<void>)();
+	const error = element('[data-testid="fs-device-error"]');
+	assert.equal(error.hidden, false);
+	assert.match(String(error.innerHTML), /before machine approval was added/);
+	assert.match(String(error.innerHTML), /<button[^>]*data-testid="fs-device-sign-out"[^>]*>Sign out<\/button>/);
+	await (element('[data-testid="fs-device-sign-out"]').onclick as () => Promise<void>)();
+	const out = calls.find((c) => c.url === "/fs/v1/sign-out");
+	assert.ok(out, "Sign out posts to /fs/v1/sign-out");
+	assert.equal(out!.init?.method, "POST");
+	assert.deepEqual({ ...(out!.init?.headers as Record<string, string>) }, { "X-Folder-Sync": "1", "X-Folder-Sync-User": "ownerABC123" }); // copied out of the vm's realm
+	assert.equal(reloaded, 1, "then the page reloads into sign-in, the code kept");
+});

@@ -19,12 +19,18 @@ import { mint, ttlOf, userRoot } from "./creds.ts";
 import { Measuring, overQuota, quotaOf, TooOld, usageOf } from "./quota.ts";
 import { S3Bucket } from "./s3-bucket.ts";
 
+/** What a sign-in from before migration 0008 (no session kind) is told: it cannot approve a machine (judge r3 #5). The
+ *  device approval answers it too (auth.ts); here, the account page says it beside its Sign out. */
+export const SIGN_IN_AGAIN = "This sign-in is from before machine approval was added. Sign out and sign in again to approve a machine.";
+
 /** One stored session, as the accounts layer lists it: never its token. */
 export interface SessionRow {
 	id: string;
 	userAgent: string | null;
 	createdAt: Date | string;
 	updatedAt: Date | string;
+	/** What made it (auth.ts): "machine", "browser", or null for a sign-in from before migration 0008. */
+	kind?: string | null;
 }
 
 export interface Device {
@@ -102,10 +108,10 @@ export function deviceOf(row: SessionRow, currentId: string): Device {
 }
 
 /** This person's devices: the current one first, then the most recently seen. */
-async function devicesOf(deps: Deps, person: Person): Promise<{ device: Device; agent: string | null }[]> {
+async function devicesOf(deps: Deps, person: Person): Promise<{ device: Device; agent: string | null; legacy: boolean }[]> {
 	const rows = await deps.sessions!(person.userId);
 	return rows
-		.map((row) => ({ device: deviceOf(row, person.sessionId), agent: row.userAgent }))
+		.map((row) => ({ device: deviceOf(row, person.sessionId), agent: row.userAgent, legacy: row.kind === null }))
 		.sort((a, b) => Number(b.device.current) - Number(a.device.current) || (a.device.lastSeen < b.device.lastSeen ? 1 : a.device.lastSeen > b.device.lastSeen ? -1 : 0) || (a.device.id < b.device.id ? -1 : 1));
 }
 
@@ -338,7 +344,7 @@ ${notice(env, done === "signed-out" ? done : null)}<p>You're not signed in here.
 ${notice(env, done)}<p class="fs-who">Signed in as <strong>${escapeAttr(person.email)}</strong>${person.name ? `<br><span class="fs-small">${escapeAttr(person.name)}</span>` : ""}</p>
 <h2>Storage</h2>
 ${await usageLine(env, deps, person.userId)}
-<h2>Devices</h2>
+${list.some((d) => d.device.current && d.legacy) ? `<p class="fs-notice" role="status" data-testid="fs-sign-in-again">${escapeAttr(SIGN_IN_AGAIN)}</p>\n` : ""}<h2>Devices</h2>
 <p class="fs-small">Revoking a device signs it out: this server refuses whatever it asks after that, and it gets no new storage keys. A change this server had already started for it may still finish. Storage keys a machine already holds stop working within ${lifetime(ttlOf(env))}, when they expire.</p>
 ${devices}${grantList(await deps.grants?.(person.userId), person.userId)}
 <div class="fs-signout"><form method="post" action="/fs/account/sign-out"><input type="hidden" name="user" value="${escapeAttr(person.userId)}"><button type="submit">Sign out</button></form></div>

@@ -15,7 +15,11 @@
   async function post(path, body) {
     const r = await fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Folder-Sync': '1' }, body: JSON.stringify(body || {}) });
     const data = await r.json().catch(() => null);
-    if (!r.ok) throw new Error((data && (data.why || data.message || data.error_description || data.error)) || `HTTP ${r.status}`);
+    if (!r.ok) {
+      const e = new Error((data && (data.why || data.message || data.error_description || data.error)) || `HTTP ${r.status}`);
+      e.code = data && (data.code || data.error); // what a page acts on (device.js: SIGN_IN_AGAIN)
+      throw e;
+    }
     return data;
   }
 

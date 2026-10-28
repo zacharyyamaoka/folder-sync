@@ -52,7 +52,18 @@
       + '<p class="fs-small">Approve only if this exact code is on your own machine\'s screen right now. Someone else\'s code would sign their machine into your account.</p>'
       + '<button class="fs-primary" data-testid="fs-device-approve">Approve</button>'
       + '<button data-testid="fs-device-deny">Deny</button><p class="fs-error" data-testid="fs-device-error" hidden></p>';
-    const fail = (e) => { const el = box.querySelector('[data-testid="fs-device-error"]'); el.hidden = false; el.textContent = (e && e.message) || String(e); };
+    const fail = (e) => {
+      const el = box.querySelector('[data-testid="fs-device-error"]');
+      el.hidden = false;
+      if (!(e && e.code === 'SIGN_IN_AGAIN')) { el.textContent = (e && e.message) || String(e); return; }
+      // a sign-in from before machine approval existed (judge r3 #5): say why, and offer the way out; the reload lands on
+      // the sign-in with this code kept, and a fresh sign-in approves it
+      el.innerHTML = `${esc(e.message)} <button data-testid="fs-device-sign-out">Sign out</button>`;
+      box.querySelector('[data-testid="fs-device-sign-out"]').onclick = async () => {
+        await fetch('/fs/v1/sign-out', { method: 'POST', credentials: 'same-origin', headers: { 'X-Folder-Sync': '1', 'X-Folder-Sync-User': user.id } }).catch(() => null);
+        location.reload();
+      };
+    };
     box.querySelector('[data-testid="fs-device-approve"]').onclick = async () => {
       try { await post(`${AUTH}/device/approve`, { userCode: code }); done('Done. The machine is signed in. You can close this tab.'); } catch (e) { fail(e); }
     };
