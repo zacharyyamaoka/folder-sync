@@ -83,6 +83,28 @@ The end-to-end test (`e2e/`) runs two simulated machines (two HOME dirs, two fol
 
 On a case-insensitive folder (the macOS default) `README.md` and `readme.md` are one file, so the case-twin checks are skipped there and the single file is expected to upload.
 
+## Latency KPI
+
+How long a file takes from a machine's disk to being served online (`sync_up_ms`), and from an online write to a machine's disk (`sync_down_ms`): Zach's key number for this project (2026-10-28). `bench/latency/bench.mjs` measures both as a black box, through the CLI exactly as a person runs it (`init`, then `sync --watch`), so a faster CLI or Worker moves the number without touching the bench:
+
+- **up:** write `bench/<id>.txt` into the synced folder; stop when `GET /fs/v1/folders/<project>/files/<host>/bench/<id>.txt` serves the same bytes (polled every 50 ms). That route is what a page, or anyone reading the folder online, gets.
+- **down:** `PUT /fs/v1/folders/<project>/web/bench/<id>.txt` (the web host: the call a page makes to save); stop when `<folder>/hosts/<web host>/bench/<id>.txt` holds the same bytes (polled every 10 ms).
+
+10 trials each way, each at a random phase of the folder's `interval`; the p50, p95 and max go into Vibe Tracks (`~/vt/zach/producers/folder-sync/`: `kpi_catalog.json`, `kpi_series.jsonl`, `runs_table.jsonl`; the data never goes in git). Two stacks, one chart line each:
+
+```bash
+node bench/latency/bench.mjs run --stack local
+node bench/latency/bench.mjs run --stack prod
+```
+
+`local` stands the whole stack up on loopback with `accounts/scripts/dev.mjs` (ports 4950-4953; it needs `npm install --prefix accounts`, Go and the pinned rclone), signs a test person and a throwaway HOME in, and deletes it all afterwards. It is the headline, run hourly. `prod` uses this machine's own signed-in session (`~/.folder-sync/account.json`) in one throwaway project, `bench-latency` (folder `~/.local/share/folder-sync-bench/bench-latency`), and deletes its trial files at the end. `--no-kpi` measures without writing; `--json FILE` keeps every trial.
+
+The hourly run is a systemd user timer; this writes `folder-sync-latency.{service,timer}` for the checkout it is run from and enables it (run it again from another checkout to re-point it):
+
+```bash
+node bench/latency/bench.mjs install-timer
+```
+
 ## What is real and what is pending
 
 | | State |
