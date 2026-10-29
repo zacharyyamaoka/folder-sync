@@ -1,0 +1,91 @@
+diff --git a/internal/push/hub.go b/internal/push/hub.go
+index 8815baf..1bdc7b9 100644
+--- a/internal/push/hub.go
++++ b/internal/push/hub.go
+@@ -122,6 +122,11 @@ func (h *Hub) flush(conn *websocket.Conn) {
+ 	}
+ }
+ 
++// BackoffMax caps the reconnect backoff. FOLDER_SYNC_BACKOFF_MAX (a Go duration) overrides it for the bench
++// (bench/fast/patches; never committed). WHY it matters: after a network drop the next dial can land up to this long
++// after the network is back, and with the hub down a machine only polls at its interval.
++var BackoffMax = EnvDuration("FOLDER_SYNC_BACKOFF_MAX", 30*time.Second)
++
+ // Run keeps a socket open until ctx ends, reconnecting with backoff (0.5 s doubling to 30 s, with jitter), or until
+ // the hub says this machine is signed out (ErrSignedOut).
+ func (h *Hub) Run(ctx context.Context) {
+@@ -148,8 +153,8 @@ func (h *Hub) Run(ctx context.Context) {
+ 			return
+ 		case <-time.After(wait):
+ 		}
+-		if backoff *= 2; backoff > 30*time.Second {
+-			backoff = 30 * time.Second
++		if backoff *= 2; backoff > BackoffMax {
++			backoff = BackoffMax
+ 		}
+ 	}
+ }
+diff --git a/internal/push/wait.go b/internal/push/wait.go
+index 9fc08dc..60ad1e0 100644
+--- a/internal/push/wait.go
++++ b/internal/push/wait.go
+@@ -1,9 +1,21 @@
+ package push
+ 
+-import "time"
++import (
++	"os"
++	"time"
++)
+ 
+ // Fallback is the safety-net round interval while both push sources are live (PEP 0005 §2.5).
+-const Fallback = 60 * time.Second
++// FOLDER_SYNC_FALLBACK (a Go duration) overrides it for the bench (bench/fast/patches; never committed).
++var Fallback = EnvDuration("FOLDER_SYNC_FALLBACK", 60*time.Second)
++
++// EnvDuration is the positive Go duration in the environment variable name, else def.
++func EnvDuration(name string, def time.Duration) time.Duration {
++	if d, err := time.ParseDuration(os.Getenv(name)); err == nil && d > 0 {
++		return d
++	}
++	return def
++}
+ 
+ // NextWait is how long the watch loop waits for a signal before running a round anyway.
+ // WHY: with a live hub and a healthy watcher every change arrives as a signal, so the timer only guards against a
+diff --git a/internal/push/watch.go b/internal/push/watch.go
+index 425294e..15ef8aa 100644
+--- a/internal/push/watch.go
++++ b/internal/push/watch.go
+@@ -17,7 +17,8 @@ import (
+ // Debounce is how long the folder must be quiet before a change is signalled.
+ // WHY 100 ms: an editor's save (write temp, rename, chmod) and an agent writing several files are each a burst of
+ // events; one round per burst, started within a tenth of a second, is what "instant" needs.
+-const Debounce = 100 * time.Millisecond
++// FOLDER_SYNC_DEBOUNCE (a Go duration) overrides it for the bench (bench/fast/patches; never committed).
++var Debounce = EnvDuration("FOLDER_SYNC_DEBOUNCE", 100*time.Millisecond)
+ 
+ // Watcher signals on Changed when anything this machine publishes changed.
+ type Watcher struct {
+diff --git a/internal/syncer/run.go b/internal/syncer/run.go
+index 843cc52..3b708a2 100644
+--- a/internal/syncer/run.go
++++ b/internal/syncer/run.go
+@@ -12,6 +12,7 @@ import (
+ 
+ 	"folder-sync/internal/layout"
+ 	"folder-sync/internal/names"
++	"folder-sync/internal/push"
+ )
+ 
+ // LastSyncSchema names last-sync.json.
+@@ -60,7 +61,8 @@ func LoadLastSync(stateDir string) (LastSync, error) {
+ // WHY not every round: the PEP's cost model (docs/peps/0001 §4) never lists the
+ // remote on every round; a delimiter LIST every 5 minutes on 5 machines is about
+ // 43,000 Class A operations a month, inside R2's free million.
+-const DiscoverEvery = 5 * time.Minute
++// FOLDER_SYNC_DISCOVER_EVERY (a Go duration) overrides it for the bench (bench/fast/patches; never committed).
++var DiscoverEvery = push.EnvDuration("FOLDER_SYNC_DISCOVER_EVERY", 5*time.Minute)
+ 
+ // due reports whether stamp is older than every (or missing).
+ func due(stamp string, every time.Duration, now time.Time) bool {
