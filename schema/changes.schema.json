@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folder-sync.invalid/schema/folder-sync-changes-1.json",
+  "title": "folder-sync change record, version 1",
+  "description": "<root>_changes/<project>/<host-id>/<seq, 12 digits>.json: what manifest version <seq> of one host changed. Written once by that host's writer, after the manifest and the hub message; never rewritten; deleted by the pruner 30 days after `at`. One exists for every seq a writer of this format published. See docs/CONTRACT.md, 'Change records'.",
+  "type": "object",
+  "required": ["schema", "project", "host_id", "host_name", "seq", "at", "by", "events"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "folder-sync-changes/1" },
+    "project": { "$ref": "event.schema.json#/$defs/project" },
+    "host_id": { "$ref": "event.schema.json#/$defs/host_id" },
+    "host_name": { "type": "string" },
+    "seq": {
+      "description": "Equals the manifest's seq and the key's <seq>.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "at": {
+      "description": "The manifest's generated_at.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "by": {
+      "description": "machine: a round on that machine; web: the folder's web host (a browser write, delete or restore); server: the accounts Worker's over-quota delete job (PEP 0003 §3.7), which builds that manifest itself.",
+      "enum": ["machine", "web", "server"]
+    },
+    "via": {
+      "description": "For by=web: the browser, as /fs/v1/devices names it (\"Chrome on Linux\").",
+      "type": "string"
+    },
+    "events": {
+      "description": "In path order. Only upload, delete and restore events, each a full folder-sync-event/1 line with project, host and host_name equal to this record's.",
+      "type": "array",
+      "items": {
+        "allOf": [
+          { "$ref": "event.schema.json" },
+          {
+            "required": ["project", "host", "host_name"],
+            "properties": { "event": { "enum": ["upload", "delete", "restore"] } }
+          }
+        ]
+      }
+    }
+  }
+}

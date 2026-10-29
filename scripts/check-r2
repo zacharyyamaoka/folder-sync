@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# check-r2: the two hands-on R2 checks docs/peps/0001 requires before real use.
+# check-r2: the hands-on R2 checks docs/peps/0001 and 0007 require before real use.
 #
 #   1. mtime round trip: a file's modification time survives upload and download.
 #   2. conditional writes through rclone: If-None-Match: * creates only once, and
 #      If-Match on the ETag overwrites only the version you read (the v1 lease relies on both).
+#   3. version history's own S3 calls (docs/peps/0007 §3.1), through the engine's client
+#      (internal/s3, TestR2HistoryCalls): CopyObject with x-amz-copy-source-if-match copies on the
+#      current ETag and answers 412 on a stale one, writing nothing; the copy holds the exact bytes and
+#      its LastModified is the copy's time (retention reads it as left_at); a delimiter listing of a
+#      path's versions keeps the ':' in version names and shows deeper paths as prefixes; PutObject
+#      If-None-Match: * and If-Match (change records, restore outcomes); DeleteObject twice. The
+#      stand-in ignores the conditions, which is why this needs R2. It needs Go (FOLDER_SYNC_GO, else
+#      go on PATH, else ~/.local/go/bin/go).
 #
 # It writes only under _checks/<UTC-stamp>/ in the bucket and deletes exactly the
 # objects it wrote. It never creates a bucket and never prints the secret.
@@ -116,6 +124,22 @@ fi
 # Clean up exactly what this run wrote.
 rc deletefile "$prefix/mtime.txt" 2>/dev/null
 rc deletefile "$lease" 2>/dev/null
+
+# 3. version history's S3 calls, through internal/s3 ---------------------------------------
+go_bin="${FOLDER_SYNC_GO:-$(command -v go || true)}"
+[[ -z "$go_bin" && -x "$HOME/.local/go/bin/go" ]] && go_bin="$HOME/.local/go/bin/go"
+if [[ -z "$go_bin" ]]; then
+  fail "version history's calls: no Go to run internal/s3's TestR2HistoryCalls (set FOLDER_SYNC_GO)"
+else
+  # its own lines are PASS/FAIL like the ones above; the test's verdict is the exit status
+  if (cd "$repo" && FOLDER_SYNC_CHECK_R2=1 FOLDER_SYNC_ENDPOINT="$endpoint" GOFLAGS=-count=1 \
+      "$go_bin" test -run '^TestR2HistoryCalls$' -v ./internal/s3/ 2>&1) > "$work/history.txt"; then
+    grep -E '^(PASS|FAIL)  ' "$work/history.txt"
+  else
+    grep -E '^(PASS|FAIL)  |FAIL  ' "$work/history.txt" | sed -E 's/^ +[a-z0-9_]+\.go:[0-9]+: //'
+    fail "version history's calls (internal/s3 TestR2HistoryCalls; details above)"
+  fi
+fi
 
 echo
 if [[ $failures -eq 0 ]]; then

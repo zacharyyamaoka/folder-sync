@@ -1,0 +1,10 @@
+{"schema":"folder-sync-event/1","event":"watching","at":"2026-10-28T20:40:58.004117260Z","folder":"/home/bam/notes","project":"notes","host":"b55e9683-7854-4121-a56a-9bae7c3ab1da","watcher":true,"hub":"off"}
+{"schema":"folder-sync-event/1","event":"hub","at":"2026-10-28T20:40:58.310402118Z","hub":"connected"}
+{"schema":"folder-sync-event/1","event":"round_start","at":"2026-10-28T20:40:58.311000001Z","source":"start"}
+{"schema":"folder-sync-event/1","event":"round","at":"2026-10-28T20:40:58.723511940Z","ok":true,"fetched":2,"peers":2,"ms":412}
+{"schema":"folder-sync-event/1","event":"round_start","at":"2026-10-28T20:41:00.017000000Z","source":"watcher"}
+{"schema":"folder-sync-event/1","event":"round","at":"2026-10-28T20:41:00.431209977Z","ok":true,"uploaded":1,"deleted":1,"peers":2,"ms":414}
+{"schema":"folder-sync-event/1","event":"round","at":"2026-10-28T20:52:03.004810772Z","ok":false,"ms":3004,"kind":"offline","why":"folder-sync-accounts.zach-yamaoka.workers.dev:443 does not answer (dial tcp: i/o timeout)"}
+{"schema":"folder-sync-event/1","event":"round","at":"2026-10-28T20:53:11.200118003Z","ok":false,"ms":96,"kind":"over_quota","why":"1.02 GB of 1 GB used: delete files, or free up space in history"}
+{"schema":"folder-sync-event/1","event":"hub","at":"2026-10-28T20:55:00.000000000Z","hub":"closed"}
+{"schema":"folder-sync-event/1","event":"stopped","at":"2026-10-28T20:58:41.900000000Z"}

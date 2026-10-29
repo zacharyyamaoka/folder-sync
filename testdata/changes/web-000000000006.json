@@ -1,0 +1,51 @@
+{
+  "schema": "folder-sync-changes/1",
+  "project": "notes",
+  "host_id": "e2a0b1c2-d3e4-4f50-9a1b-2c3d4e5f6a7b",
+  "host_name": "web",
+  "seq": 6,
+  "at": "2026-10-28T20:47:28.802Z",
+  "by": "web",
+  "via": "Chrome on Linux",
+  "events": [
+    {
+      "schema": "folder-sync-event/1",
+      "project": "notes",
+      "host": "e2a0b1c2-d3e4-4f50-9a1b-2c3d4e5f6a7b",
+      "host_name": "web",
+      "seq": 6,
+      "level": "info",
+      "event": "upload",
+      "at": "2026-10-28T20:47:28.790Z",
+      "path": "hearts/clamp-24.json",
+      "size": 233,
+      "sha256": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+      "op": "edit",
+      "was": {
+        "sha256": "763d2e71f45a8d0ffab9617029c07cf5d798caca46f0f240f696be5fb522fb0e",
+        "size": 230,
+        "written_at": "2026-10-28T19:02:11.481Z",
+        "kept": "2026-10-28T19:02:11.481Z_763d2e71f45a8d0f"
+      },
+      "up_ms": 118
+    },
+    {
+      "schema": "folder-sync-event/1",
+      "event": "delete",
+      "at": "2026-10-28T20:47:28.795Z",
+      "level": "info",
+      "project": "notes",
+      "host": "e2a0b1c2-d3e4-4f50-9a1b-2c3d4e5f6a7b",
+      "host_name": "web",
+      "seq": 6,
+      "path": "hearts/old-draft.json",
+      "was": {
+        "sha256": "d00dd00dd00dd00dd00dd00dd00dd00dd00dd00dd00dd00dd00dd00dd00dd00d",
+        "size": 97,
+        "written_at": "2026-10-27T16:30:00.000Z",
+        "kept": "2026-10-27T16:30:00.000Z_d00dd00dd00dd00d"
+      },
+      "up_ms": 121
+    }
+  ]
+}

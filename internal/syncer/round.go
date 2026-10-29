@@ -15,11 +15,13 @@ import (
 	"time"
 
 	"folder-sync/internal/config"
+	"folder-sync/internal/history"
 	"folder-sync/internal/host"
 	"folder-sync/internal/ignore"
 	"folder-sync/internal/manifest"
 	"folder-sync/internal/names"
 	"folder-sync/internal/rclone"
+	"folder-sync/internal/synclog"
 )
 
 // manifestPublishTimeout bounds the one publish a stop waits for.
@@ -63,6 +65,12 @@ type Result struct {
 	Skipped         []names.Skipped `json:"skipped"`
 	Peers           []PeerResult    `json:"peers"`
 	Conflicts       []Conflict      `json:"conflicts"`
+	HeldCopies      []string        `json:"held_copies,omitempty"` // their old version's copy to history failed: next round
+	// Events are the round's file events (folder-sync-event/1, docs/peps/0007 §4): upload, delete and restore (also in
+	// the change records), download and remove_copy (also in the pull record), skip, conflict, hold and synced.
+	Events []synclog.Event `json:"events,omitempty"`
+	// Restore is the outcome of the restore the round was asked for (Options.Restore).
+	Restore *history.Outcome `json:"restore,omitempty"`
 }
 
 // Filters writes the rclone filter file for this project's push and returns its path.
@@ -70,7 +78,8 @@ type Result struct {
 func (p *Project) Filters() (string, error) {
 	// The project config is excluded too: a peer's copy of it inside <peers_dir>/ would
 	// make that copy look like a synced folder of its own.
-	body, err := ignore.Compile(p.Config.Ignore, "/"+p.Config.PeersDir+"/", "/"+config.FileName)
+	// and a restore's temporary file, should a crash leave one beside its target
+	body, err := ignore.Compile(p.Config.Ignore, "/"+p.Config.PeersDir+"/", "/"+config.FileName, restoreTempPrefix+"*")
 	if err != nil {
 		return "", err
 	}
@@ -158,8 +167,8 @@ func (e *ReadOnlyError) Unwrap() error { return e.Err }
 // copy never saw); the round takes the bucket's own manifest.
 var ErrManifestChanged = errors.New("this host's manifest moved on")
 
-// Push uploads this machine's changes, moves overwritten and deleted objects to
-// _trash/, and rewrites the manifest (docs/peps/0001 §4-§5).
+// Push uploads this machine's changes, keeps the versions they overwrite or delete in _history/ (when the schedule
+// keeps them: docs/peps/0007 §3), rewrites the manifest and queues its change record (docs/peps/0001 §4-§5).
 func (p *Project) Push(ctx context.Context, stamp string, result *Result) error {
 	filters, err := p.Filters()
 	if err != nil {
@@ -180,6 +189,12 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 	for _, s := range skipped {
 		if !p.reportedSkips[s.Path] { // `status` always lists them; the round says each once
 			p.say("skipped %s: %s", s.Path, s.Reason)
+			ev := p.fileEvent("skip", p.Now())
+			ev.Level, ev.Path, ev.Why = "warn", s.Path, s.Reason
+			result.Events = append(result.Events, ev)
+			if p.reportedSkips != nil {
+				p.reportedSkips[s.Path] = true // a second push in this round (a restore's) says it again otherwise
+			}
 		}
 	}
 
@@ -188,6 +203,7 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		return fmt.Errorf("this machine's last manifest: %w", err)
 	}
 	if len(okPaths) == 0 && len(prev.Files) > 0 {
+		result.Events = append(result.Events, p.holdEvent("unmounted", len(prev.Files)))
 		return &EmptyFolderError{Folder: p.Folder, Had: len(prev.Files)}
 	}
 	prevIndex := prev.Index()
@@ -231,6 +247,7 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 	if len(deleted) > p.Config.MaxDelete {
 		p.say("holding %d deletes: more than max_delete = %d in one round; they stay in the bucket until you raise max_delete or restore the files", len(deleted), p.Config.MaxDelete)
 		result.HeldDeletes = deleted
+		result.Events = append(result.Events, p.holdEvent("max_delete", len(deleted)))
 		for _, path := range deleted {
 			next = append(next, prevIndex[path])
 		}
@@ -241,8 +258,52 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		return p.pushReadOnly(ctx, prev, changed, deleted, result)
 	}
 
+	// 1. keep the versions that leave (docs/CONTRACT.md "Consistency"): a copy that fails holds that path this round
+	var items []*leaving
+	for _, path := range changed {
+		if old, ok := prevIndex[path]; ok {
+			op := history.OpReplace
+			if _, restored := p.restoring[path]; restored {
+				op = history.OpRestore
+			}
+			items = append(items, &leaving{Path: path, Op: op, Old: old})
+		}
+	}
+	for _, path := range deleted {
+		items = append(items, &leaving{Path: path, Op: history.OpDelete, Old: prevIndex[path]})
+	}
+	if err := p.keepLeaving(ctx, items, p.Now()); err != nil {
+		return err
+	}
+	var copyErr error
+	held := map[string]bool{}
+	for _, it := range items {
+		if it.Err != nil {
+			held[it.Path] = true
+			copyErr = errors.Join(copyErr, it.Err)
+		}
+	}
+	if len(held) > 0 {
+		// the held path keeps its last published entry: that version is still the live object
+		changed, deleted = withoutPaths(changed, held), withoutPaths(deleted, held)
+		for i := range next {
+			if held[next[i].Path] {
+				next[i] = prevIndex[next[i].Path]
+			}
+		}
+		for _, it := range items {
+			if held[it.Path] && it.Op == history.OpDelete {
+				next = append(next, it.Old)
+			}
+			if held[it.Path] {
+				result.HeldCopies = append(result.HeldCopies, it.Path)
+			}
+		}
+	}
+
+	// 2. upload and delete
 	remoteRoot := rclone.Path(p.Config.Bucket, p.HostPrefix(p.Host.ID))
-	trash := rclone.Path(p.Config.Bucket, p.TrashPrefix(stamp))
+	uploadedAt, deletedAt := p.Now(), p.Now()
 	if len(changed) > 0 {
 		list, err := p.writeList("upload.txt", changed)
 		if err != nil {
@@ -251,36 +312,34 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		// rclone refuses --filter-from beside --files-from; the list comes from the
 		// filtered scan above, so the ignore rules are already applied.
 		if _, err := p.Rclone.Run(ctx, "copy", p.Folder, remoteRoot,
-			"--files-from-raw", list, "--no-traverse",
-			"--backup-dir", trash, "--max-delete", fmt.Sprint(p.Config.MaxDelete)); err != nil {
-			return err
-		}
-		result.Uploaded = changed
-		p.recordObjectETags(next, changed, md5s)
-	}
-	if len(deleted) > 0 {
-		list, err := p.writeList("delete.txt", deleted)
-		if err != nil {
-			return err
-		}
-		// A delete is a server-side move into _trash/: nothing is lost without a copy.
-		if _, err := p.Rclone.Run(ctx, "move", remoteRoot, trash,
 			"--files-from-raw", list, "--no-traverse", "--max-delete", fmt.Sprint(p.Config.MaxDelete)); err != nil {
 			return err
 		}
-		result.Deleted = deleted
+		uploadedAt = p.Now()
+		result.Uploaded = append(result.Uploaded, changed...)
+		p.recordObjectETags(next, changed, md5s)
+	}
+	if len(deleted) > 0 {
+		if err := p.deleteObjects(deleted); err != nil {
+			return err
+		}
+		deletedAt = p.Now()
+		result.Deleted = append(result.Deleted, deleted...)
 	}
 	needManifest := len(changed) > 0 || len(deleted) > 0 || metadataOnly > 0 || p.manifestMissing()
 	if !needManifest {
-		return nil
+		return heldError(len(held), copyErr)
 	}
+	// WHY generated_at after the uploads, not at the push's start: it is when this version is online, and a change's
+	// up_ms (disk to online) runs to it
+	published := p.Now()
 	m := manifest.Manifest{
 		Schema:      manifest.Schema,
 		Project:     p.Config.Project,
 		HostID:      p.Host.ID,
 		HostName:    p.Host.Name,
 		Seq:         prev.Seq + 1,
-		GeneratedAt: now,
+		GeneratedAt: manifest.FormatTime(published),
 		Files:       next,
 	}
 	m.Sort()
@@ -307,7 +366,37 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 	}
 	os.Remove(p.statePath("manifest.missing"))
 	result.ManifestWritten = true
-	return nil
+	// 3. the change record, PUT with the round's other records once the manifest is out (FlushRecords)
+	events := p.pushEvents(m, items, changed, deleted, byPath, uploadedAt, deletedAt, published)
+	result.Events = append(result.Events, events...)
+	if err := p.queueChanges(m, events); err != nil {
+		p.say("the change record for seq %d: %v", m.Seq, err)
+	}
+	return heldError(len(held), copyErr)
+}
+
+func heldError(held int, err error) error {
+	if held == 0 {
+		return nil
+	}
+	return &CopyError{Held: held, Err: err}
+}
+
+func withoutPaths(paths []string, drop map[string]bool) []string {
+	var out []string
+	for _, path := range paths {
+		if !drop[path] {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
+// holdEvent is a round holding count changes (why: max_delete | over_quota | unmounted).
+func (p *Project) holdEvent(why string, count int) synclog.Event {
+	ev := p.fileEvent("hold", p.Now())
+	ev.Level, ev.Why, ev.Count = "warn", why, count
+	return ev
 }
 
 // DeleteAnswer is the accounts server's answer to a delete: the manifest it built and published for this host, the
@@ -378,6 +467,7 @@ func (p *Project) pushReadOnly(ctx context.Context, prev manifest.Manifest, chan
 		held := len(changed)
 		if held > 0 {
 			result.HeldUploads = changed
+			result.Events = append(result.Events, p.holdEvent("over_quota", held))
 		}
 		if err == nil && held == 0 {
 			return nil
@@ -593,8 +683,8 @@ func (p *Project) writeList(name string, paths []string) (string, error) {
 
 // Reconcile is the safety net (docs/peps/0001 §4: "a full listing reconcile runs at start
 // and hourly"). It lists this machine's prefix once, forgets manifest entries the bucket
-// lacks (so the next push re-uploads them), moves stray objects to _trash/, and
-// discovers peers.
+// lacks (so the next push re-uploads them), moves stray objects into _history/ as unlisted
+// versions (docs/CONTRACT.md "Consistency"), and discovers peers.
 func (p *Project) Reconcile(ctx context.Context, stamp string, result *Result) error {
 	own := p.HostPrefix(p.Host.ID)
 	out, err := p.Rclone.Run(ctx, "lsjson", "-R", "--files-only", "--no-mimetype", rclone.Path(p.Config.Bucket, own))
@@ -644,19 +734,36 @@ func (p *Project) Reconcile(ctx context.Context, stamp string, result *Result) e
 	}
 	sort.Strings(strays)
 	if len(strays) > 0 {
-		p.say("reconcile: moving %d objects the manifest does not list to _trash/", len(strays))
-		list, err := p.writeList("strays.txt", strays)
-		if err != nil {
-			return err
-		}
-		if _, err := p.Rclone.Run(ctx, "move", rclone.Path(p.Config.Bucket, own), rclone.Path(p.Config.Bucket, p.TrashPrefix(stamp)),
-			"--files-from-raw", list, "--no-traverse"); err != nil {
+		p.say("reconcile: moving %d objects the manifest does not list into _history/ (as unlisted versions)", len(strays))
+		errs := make([]error, len(strays))
+		parallel(len(strays), func(i int) { errs[i] = p.moveStray(own, strays[i]) })
+		if err := errors.Join(errs...); err != nil {
 			return err
 		}
 	}
+	os.Remove(p.statePath("reconcile.due"))
 
 	result.Reconciled = true
 	return p.Discover(ctx)
+}
+
+// moveStray keeps an object of this host's prefix that no manifest lists as <its LastModified>_unlisted, then deletes
+// it. One whose history key would pass 1,024 bytes stays where it is: nothing is deleted without a copy.
+func (p *Project) moveStray(own, path string) error {
+	key := own + "/" + path
+	stat, err := p.S3.HeadObject(p.Config.Bucket, key)
+	if err != nil {
+		return err
+	}
+	dest := history.Key(p.Root, p.Config.Project, p.Host.ID, path, history.UnlistedID(stat.LastModified))
+	if len(dest) > history.MaxKeyBytes {
+		p.say("reconcile: %s is not in the manifest, and its history key would be too long; left in place", path)
+		return nil
+	}
+	if err := p.S3.Copy(p.Config.Bucket, key, dest, ""); err != nil {
+		return err
+	}
+	return p.S3.Delete(p.Config.Bucket, key)
 }
 
 // Discover lists the project's hosts/ folder one level deep (one delimiter LIST, not a
@@ -695,6 +802,7 @@ func (p *Project) Pull(ctx context.Context, result *Result) error {
 	for _, peerID := range peers.Known {
 		peerResult, err := p.pullPeer(ctx, peerID, &peers, result)
 		if err != nil {
+			p.behind = true
 			p.say("pull from %s: %v", peerID, err)
 			if firstErr == nil {
 				firstErr = err
@@ -738,6 +846,23 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 		return PeerResult{}, fmt.Errorf("manifest under hosts/%s claims host %s, project %s", peerID, m.HostID, m.Project)
 	}
 	pr := PeerResult{ID: peerID, Name: m.HostName, Files: len(m.Files), Seq: m.Seq}
+	online, _ := time.Parse(time.RFC3339Nano, m.GeneratedAt)
+	// pulled is a download or remove_copy event, its down_ms from the peer's manifest (two clocks: never clamped)
+	pulled := func(name, path string, size *int64) synclog.Event {
+		at := p.Now()
+		ev := p.fileEvent(name, at)
+		ev.Peer, ev.PeerName, ev.PeerSeq, ev.Path, ev.Size = peerID, m.HostName, m.Seq, path, size
+		if !online.IsZero() {
+			ev.DownMs = int64p(at.Sub(online).Milliseconds())
+		}
+		return ev
+	}
+	conflicted := func(c Conflict) {
+		result.Conflicts = append(result.Conflicts, c)
+		ev := p.fileEvent("conflict", p.Now())
+		ev.Level, ev.Peer, ev.PeerName, ev.Path, ev.KeptAt = "warn", peerID, m.HostName, c.Path, c.KeptAt
+		result.Events = append(result.Events, ev)
+	}
 	localRoot := filepath.Join(p.Folder, p.Config.PeersDir, peerID)
 	oldIndex := cached.Index()
 	stamp := Stamp(p.Now())
@@ -768,7 +893,7 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 		if statErr == nil {
 			if old, ok := oldIndex[e.Path]; !ok || !p.unchangedSince(localPath, old) {
 				if conflict, err := p.keepLocalEdit(peerID, e.Path, localPath, stamp); err == nil {
-					result.Conflicts = append(result.Conflicts, conflict)
+					conflicted(conflict)
 				} else {
 					return pr, err
 				}
@@ -789,7 +914,7 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 			if err != nil {
 				return pr, err
 			}
-			result.Conflicts = append(result.Conflicts, conflict)
+			conflicted(conflict)
 			continue
 		}
 		if err := os.Remove(localPath); err != nil {
@@ -797,6 +922,7 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 		}
 		removeEmptyParents(filepath.Dir(localPath), localRoot)
 		pr.Removed++
+		result.Events = append(result.Events, pulled("remove_copy", path, nil))
 	}
 	sort.Strings(fetch)
 	if len(fetch) > 0 {
@@ -804,6 +930,9 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 		if err != nil {
 			return pr, err
 		}
+		// WHY a stop may cut this fetch, unlike the manifest publish (Push): the peer's manifest and ETag are kept
+		// only below, once its files are in, so the next round redoes a cut fetch (the manifest read again, 200 not
+		// 304, then what is missing) and nothing is lost; making the stop wait would hold it as long as the fetch.
 		if _, err := p.Rclone.Run(ctx, "copy", rclone.Path(p.Config.Bucket, p.HostPrefix(peerID)), localRoot,
 			"--files-from-raw", list, "--no-traverse"); err != nil {
 			return pr, err
@@ -820,6 +949,7 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 			continue
 		}
 		p.applyMTime(localPath, e.MTime)
+		result.Events = append(result.Events, pulled("download", path, int64p(e.Size)))
 	}
 	pr.Fetched = len(fetch)
 	if err := manifest.Save(cachedPath, m); err != nil {
@@ -829,6 +959,7 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 		peers.ETags[peerID] = got.ETag
 	} else {
 		delete(peers.ETags, peerID)
+		p.behind = true
 	}
 	return pr, nil
 }

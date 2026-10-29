@@ -1,0 +1,438 @@
+{
+  "cases": "folder-sync-retention-cases/1",
+  "write_cases": [
+    {
+      "name": "lived 60 s: kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-28T11:59:00.000Z"
+      },
+      "last_kept_left_at": null,
+      "keep": true
+    },
+    {
+      "name": "lived exactly 30 s: kept, whatever was kept just before",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-28T11:59:30.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:59:50.000Z",
+      "keep": true
+    },
+    {
+      "name": "lived 29.999 s, nothing kept yet: kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-28T11:59:30.001Z"
+      },
+      "last_kept_left_at": null,
+      "keep": true
+    },
+    {
+      "name": "burst: lived 5 s, a version kept 10 s ago: not kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-28T11:59:55.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:59:50.000Z",
+      "keep": false,
+      "why": "burst"
+    },
+    {
+      "name": "burst: lived 5 s, the last kept exactly 30 s ago: kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-28T11:59:55.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:59:30.000Z",
+      "keep": true
+    },
+    {
+      "name": "burst: lived 5 s, the last kept 29.999 s ago: not kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-28T11:59:55.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:59:30.001Z",
+      "keep": false,
+      "why": "burst"
+    },
+    {
+      "name": "a delete is always kept, even inside a burst",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "delete",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-28T11:59:58.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:59:59.000Z",
+      "keep": true
+    },
+    {
+      "name": "the version a restore replaces is always kept, even inside a burst",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "restore",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-28T11:59:58.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:59:59.000Z",
+      "keep": true
+    },
+    {
+      "name": "*.log is never kept, however long it lived",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "logs/run.log",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-27T10:00:00.000Z"
+      },
+      "last_kept_left_at": null,
+      "keep": false,
+      "why": "no_history"
+    },
+    {
+      "name": "*.log is not kept when deleted either",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "delete",
+      "path": "app.log",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-27T10:00:00.000Z"
+      },
+      "last_kept_left_at": null,
+      "keep": false,
+      "why": "no_history"
+    },
+    {
+      "name": "no_history matches a base name at any depth, as in .gitignore",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "deep/a/b.log",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-27T10:00:00.000Z"
+      },
+      "last_kept_left_at": null,
+      "keep": false,
+      "why": "no_history"
+    },
+    {
+      "name": "no_history matches whole names only: run.log.md is kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/run.log.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-27T10:00:00.000Z"
+      },
+      "last_kept_left_at": null,
+      "keep": true
+    },
+    {
+      "name": "with no_history set to [], a .log is kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "logs/run.log",
+      "no_history": [],
+      "leaving": {
+        "written_at": "2026-10-27T10:00:00.000Z"
+      },
+      "last_kept_left_at": null,
+      "keep": true
+    }
+  ],
+  "prune_cases": [
+    {
+      "name": "under an hour old: every kept version stays",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "versions": [
+        {
+          "id": "2026-10-28T11:58:30.000Z_0e3d4d93d2fa9f66",
+          "left_at": "2026-10-28T11:59:30.000Z"
+        },
+        {
+          "id": "2026-10-28T11:58:00.000Z_0de5bd3a10c5ce5e",
+          "left_at": "2026-10-28T11:59:00.000Z"
+        },
+        {
+          "id": "2026-10-28T10:59:00.001Z_f4b22eff162d966e",
+          "left_at": "2026-10-28T11:00:00.001Z"
+        }
+      ],
+      "keep": [
+        "2026-10-28T10:59:00.001Z_f4b22eff162d966e",
+        "2026-10-28T11:58:00.000Z_0de5bd3a10c5ce5e",
+        "2026-10-28T11:58:30.000Z_0e3d4d93d2fa9f66"
+      ]
+    },
+    {
+      "name": "1 to 24 hours old: the newest in each UTC hour",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "versions": [
+        {
+          "id": "2026-10-28T11:49:00.000Z_a2ea8c7ca8795543",
+          "left_at": "2026-10-28T11:50:00.000Z"
+        },
+        {
+          "id": "2026-10-28T10:49:00.000Z_dfa23a34d5faa5f1",
+          "left_at": "2026-10-28T10:50:00.000Z"
+        },
+        {
+          "id": "2026-10-28T10:19:00.000Z_303119248afdea1a",
+          "left_at": "2026-10-28T10:20:00.000Z"
+        },
+        {
+          "id": "2026-10-28T10:04:00.000Z_9eaa8d0d849e9dd6",
+          "left_at": "2026-10-28T10:05:00.000Z"
+        },
+        {
+          "id": "2026-10-28T09:58:59.999Z_542249f394168f4d",
+          "left_at": "2026-10-28T09:59:59.999Z"
+        }
+      ],
+      "keep": [
+        "2026-10-28T09:58:59.999Z_542249f394168f4d",
+        "2026-10-28T10:49:00.000Z_dfa23a34d5faa5f1",
+        "2026-10-28T11:49:00.000Z_a2ea8c7ca8795543"
+      ]
+    },
+    {
+      "name": "exactly 1 hour old is in the hourly tier",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "versions": [
+        {
+          "id": "2026-10-28T11:29:00.000Z_e492a01eb8596a9c",
+          "left_at": "2026-10-28T11:30:00.000Z"
+        },
+        {
+          "id": "2026-10-28T10:59:00.000Z_85be2256a94d6edc",
+          "left_at": "2026-10-28T11:00:00.000Z"
+        },
+        {
+          "id": "2026-10-28T10:58:59.000Z_84c04df21a701083",
+          "left_at": "2026-10-28T10:59:59.000Z"
+        },
+        {
+          "id": "2026-10-28T10:29:00.000Z_65be0a180549cf4c",
+          "left_at": "2026-10-28T10:30:00.000Z"
+        }
+      ],
+      "keep": [
+        "2026-10-28T10:58:59.000Z_84c04df21a701083",
+        "2026-10-28T10:59:00.000Z_85be2256a94d6edc",
+        "2026-10-28T11:29:00.000Z_e492a01eb8596a9c"
+      ]
+    },
+    {
+      "name": "exactly 24 hours old is in the daily tier",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "versions": [
+        {
+          "id": "2026-10-28T11:58:00.000Z_8b6986d9f4741257",
+          "left_at": "2026-10-28T11:59:00.000Z"
+        },
+        {
+          "id": "2026-10-27T11:59:00.001Z_ae1f339f3c84fd8b",
+          "left_at": "2026-10-27T12:00:00.001Z"
+        },
+        {
+          "id": "2026-10-27T11:59:00.000Z_831a4acb44ea10e2",
+          "left_at": "2026-10-27T12:00:00.000Z"
+        },
+        {
+          "id": "2026-10-27T05:59:00.000Z_b703eb075f4b2fbe",
+          "left_at": "2026-10-27T06:00:00.000Z"
+        }
+      ],
+      "keep": [
+        "2026-10-27T11:59:00.000Z_831a4acb44ea10e2",
+        "2026-10-27T11:59:00.001Z_ae1f339f3c84fd8b",
+        "2026-10-28T11:58:00.000Z_8b6986d9f4741257"
+      ]
+    },
+    {
+      "name": "1 to 30 days old: the newest in each UTC day",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "versions": [
+        {
+          "id": "2026-10-26T22:59:00.000Z_0b32681bb1fdd387",
+          "left_at": "2026-10-26T23:00:00.000Z"
+        },
+        {
+          "id": "2026-10-26T07:59:00.000Z_7d1cca77911b960c",
+          "left_at": "2026-10-26T08:00:00.000Z"
+        },
+        {
+          "id": "2026-10-25T11:59:00.000Z_fe6f85d49d4a47f1",
+          "left_at": "2026-10-25T12:00:00.000Z"
+        },
+        {
+          "id": "2026-10-24T23:59:00.000Z_4645eb12e720069f",
+          "left_at": "2026-10-25T00:00:00.000Z"
+        },
+        {
+          "id": "2026-10-24T23:58:59.999Z_5a0f8adfce34f8c2",
+          "left_at": "2026-10-24T23:59:59.999Z"
+        }
+      ],
+      "keep": [
+        "2026-10-24T23:58:59.999Z_5a0f8adfce34f8c2",
+        "2026-10-25T11:59:00.000Z_fe6f85d49d4a47f1",
+        "2026-10-26T22:59:00.000Z_0b32681bb1fdd387"
+      ]
+    },
+    {
+      "name": "exactly 30 days old is gone, even a deleted file's last version",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "versions": [
+        {
+          "id": "2026-09-28T11:59:00.000Z_ac58d4b9cb7c9e2f",
+          "left_at": "2026-09-28T12:00:00.000Z"
+        }
+      ],
+      "keep": []
+    },
+    {
+      "name": "29 days 23:59:59.999 old stays",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "versions": [
+        {
+          "id": "2026-09-28T11:59:00.001Z_11dc242d76554c51",
+          "left_at": "2026-09-28T12:00:00.001Z"
+        },
+        {
+          "id": "2026-09-28T11:59:00.000Z_1ac45c75255a4691",
+          "left_at": "2026-09-28T12:00:00.000Z"
+        }
+      ],
+      "keep": [
+        "2026-09-28T11:59:00.001Z_11dc242d76554c51"
+      ]
+    },
+    {
+      "name": "a deleted file keeps its last version until keep_days",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "versions": [
+        {
+          "id": "2026-10-10T08:59:00.000Z_ea3a28a067871488",
+          "left_at": "2026-10-10T09:00:00.000Z"
+        },
+        {
+          "id": "2026-10-10T07:59:00.000Z_5b64c3abca7c5453",
+          "left_at": "2026-10-10T08:00:00.000Z"
+        }
+      ],
+      "keep": [
+        "2026-10-10T08:59:00.000Z_ea3a28a067871488"
+      ]
+    },
+    {
+      "name": "a tie on left_at keeps the larger id",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "versions": [
+        {
+          "id": "2026-10-26T07:59:00.000Z_85703f2e14942a4e",
+          "left_at": "2026-10-26T08:00:00.000Z"
+        },
+        {
+          "id": "2026-10-26T07:59:00.000Z_7d1cca77911b960c",
+          "left_at": "2026-10-26T08:00:00.000Z"
+        }
+      ],
+      "keep": [
+        "2026-10-26T07:59:00.000Z_85703f2e14942a4e"
+      ]
+    },
+    {
+      "name": "an unlisted version follows the same schedule",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "versions": [
+        {
+          "id": "2026-10-28T10:40:00.000Z_unlisted",
+          "left_at": "2026-10-28T10:40:00.000Z"
+        },
+        {
+          "id": "2026-10-28T10:09:00.000Z_1461242271cc8ac9",
+          "left_at": "2026-10-28T10:10:00.000Z"
+        }
+      ],
+      "keep": [
+        "2026-10-28T10:40:00.000Z_unlisted"
+      ]
+    },
+    {
+      "name": "keep_days 7: 7 days old is gone, 6 days stays",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 7,
+      "versions": [
+        {
+          "id": "2026-10-22T11:59:00.000Z_7ac0a205723219c7",
+          "left_at": "2026-10-22T12:00:00.000Z"
+        },
+        {
+          "id": "2026-10-21T11:59:00.000Z_e0f3541f9148bcad",
+          "left_at": "2026-10-21T12:00:00.000Z"
+        }
+      ],
+      "keep": [
+        "2026-10-22T11:59:00.000Z_7ac0a205723219c7"
+      ]
+    }
+  ]
+}

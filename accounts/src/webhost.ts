@@ -3,15 +3,15 @@
 // The bucket contract (docs/CONTRACT.md "Who writes") lets only folder-sync write hosts/<host-id>/, one writer per
 // host. A browser has no folder, so this Worker IS a folder-sync host for each (person, project): its id is minted
 // on the first write (the web_host row, a lowercase UUID v4), and it writes exactly as a round does: a replaced or
-// deleted object is first copied to _trash/<project>/<host>/<stamp>/<path>, then the file, then the manifest. The
-// manifest PUT carries If-Match on the ETag it was read with (If-None-Match: * for the first), and a 412 starts over
-// from a fresh read. Every machine pulls the web host like any peer, read-only, into <folder>/hosts/<web-host-id>/.
+// deleted object is first copied to _history/<project>/<host>/<path>/<written_at>_<sha16> (PEP 0007), then the file,
+// then the manifest, then the change record (_changes/…/<seq>.json). The manifest PUT carries If-Match on the ETag it
+// was read with (If-None-Match: * for the first), and a 412 starts over from a fresh read. Every machine pulls the web host like any peer, read-only, into <folder>/hosts/<web-host-id>/.
 //
 // One writer per web host, as per machine host (review r1 #3): every write and delete of one (person, project) runs
 // through one queue, live a Durable Object per folder (webhost-do.ts), so two of them never interleave their file and
 // manifest steps. And until the manifest lists new bytes, the old ones are what the file holds: a write journals what
 // it is about to change, and a manifest PUT that fails (or never happens, if the write is cut off) is undone, at once
-// or by the folder's next write, from the trash copy. WHY a queue and not a content-addressed key the manifest points
+// or by the folder's next write, from the history copy. WHY a queue and not a content-addressed key the manifest points
 // at: every reader (the Go round, readers/worker, readers/python) reads hosts/<host>/<path> and checks its sha256
 // against the manifest; a second key layout would change the bucket contract for all of them.
 //
@@ -20,6 +20,8 @@
 
 import { checkPath, ContractError, SCHEMA, validateManifest, type Manifest, type ManifestEntry, type R2BucketLike } from "../../readers/worker/src/folder-sync-read.ts";
 import { mint, NotConfigured, userRoot, type CredsEnv } from "./creds.ts";
+import { BURST_MS, changesKey, historyKey, historyPrefix, keepOnWrite, keyFits, parseVersion, trashStampTime, unlistedId, versionId } from "./history.ts";
+import { pruneFolder } from "./prune.ts";
 import { Measuring, overQuota, quotaOf, usageOf, type QuotaEnv } from "./quota.ts";
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store } from "./store.ts";
@@ -31,6 +33,9 @@ const ATTEMPTS = 6;
 export interface WritableBucket extends R2BucketLike {
 	put(key: string, body: Uint8Array, options?: { ifMatch?: string; ifNoneMatch?: "*"; contentType?: string }): Promise<{ ok: boolean; status: number; etag: string }>;
 	copy(from: string, to: string): Promise<boolean>;
+	/** CopyObject only while `from` is the version `etag` names (x-amz-copy-source-if-match). */
+	copyIf?(from: string, to: string, etag: string): Promise<"copied" | "gone" | "moved">;
+	head?(key: string): Promise<{ size: number; etag: string; lastModified: number } | null>;
 	delete(key: string): Promise<void>;
 }
 
@@ -51,7 +56,8 @@ export class OverQuota extends Error {}
  *  run in the folder's queue (review r2 #6), so two writes are never admitted against the same figure. */
 export interface Ledger {
 	admit(bytes: number, objects: number): Promise<void>;
-	charge(bytes: number, objects: number): Promise<void>;
+	/** `history`: the part of the charge that is history (PEP 0007 §3.5: it counts, and is shown apart). */
+	charge(bytes: number, objects: number, history?: { bytes: number; objects: number }): Promise<void>;
 }
 
 /** A JSON field name a write may ask the web host to keep the newest of (X-Folder-Sync-Keep-Newest). */
@@ -133,8 +139,65 @@ function hostKey(w: Where, path: string): string {
 	return `${w.root}${w.project}/hosts/${w.hostId}/${path}`;
 }
 
-function trashKey(w: Where, path: string, now: number): string {
-	return `${w.root}_trash/${w.project}/${w.hostId}/${trashStamp(now)}/${path}`;
+/** Where the version `old` of `path` goes when it leaves: its history key (PEP 0007). */
+function keptKey(w: Where, path: string, old: ManifestEntry): string {
+	if (!keyFits(w.root, w.project, w.hostId, path)) throw new BadPath("the path is too long for its versions to be kept (a history key is at most 1,024 bytes)");
+	return historyKey(w.root, w.project, w.hostId, path, versionId(old.written_at, old.sha256));
+}
+
+/** Copies the live object of `path`, which the manifest lists as `old`, to `to` (its history key): conditional on its
+ *  object_etag when the manifest has one (CONTRACT "Deletions and history"). A 412 means the object is not the listed
+ *  version: it is still copied, as <its LastModified>_unlisted, so nothing is lost or mislabelled, and this change
+ *  stops (its undo would put back the wrong bytes). False when there is nothing to copy. */
+async function copyOut(bucket: WritableBucket, w: Where, path: string, old: ManifestEntry, to: string): Promise<boolean> {
+	if (!old.object_etag || !bucket.copyIf || /^0+$/.test(old.object_etag)) return bucket.copy(hostKey(w, path), to);
+	const copied = await bucket.copyIf(hostKey(w, path), to, old.object_etag);
+	if (copied === "copied") return true;
+	if (copied === "gone") return false;
+	const seen = await bucket.head?.(hostKey(w, path));
+	if (seen) await bucket.copy(hostKey(w, path), historyKey(w.root, w.project, w.hostId, path, unlistedId(seen.lastModified)));
+	throw new Error(`${JSON.stringify(path)} is not the version its manifest lists (kept as an unlisted version)`);
+}
+
+export const EVENT = "folder-sync-event/1";
+export const CHANGES = "folder-sync-changes/1";
+
+/** A change record (CONTRACT "Change records"): what one manifest version of a host changed. */
+export interface ChangeRecord {
+	schema: typeof CHANGES;
+	project: string;
+	host_id: string;
+	host_name: string;
+	seq: number;
+	at: string;
+	by: "web" | "server";
+	via?: string;
+	events: Record<string, unknown>[];
+}
+
+function recordBody(record: ChangeRecord): Uint8Array {
+	return new TextEncoder().encode(`${JSON.stringify(record)}\n`);
+}
+
+/** What a change record costs in storage: its bytes (never an object: quota.ts measureRoot). */
+export function recordBytes(record: ChangeRecord): number {
+	return recordBody(record).byteLength;
+}
+
+/** Writes a change record once (If-None-Match: *: a record is never rewritten). */
+export async function putRecord(bucket: WritableBucket, key: string, record: ChangeRecord): Promise<void> {
+	const answer = await bucket.put(key, recordBody(record), { ifNoneMatch: "*", contentType: "application/json" });
+	if (!answer.ok && answer.status !== 412) throw new Error(`the change record ${key} was not written (${answer.status})`);
+}
+
+/** Where a committed change's record goes: the folder's object queues it (written after the answer and the hub,
+ *  CONTRACT "Consistency"), a direct call writes it at once. A failed write is never the change's failure: the
+ *  manifests stay the truth, and a missing record reads as "not recorded". */
+export type Recorder = (key: string, record: ChangeRecord) => Promise<void>;
+
+/** `was` of a change record's event: the version that left and where it went. */
+function wasOf(old: ManifestEntry, kept: string | null, why?: string): Record<string, unknown> {
+	return { sha256: old.sha256, size: old.size, written_at: old.written_at, kept, ...(kept === null ? { why } : {}) };
 }
 
 /** The web host's manifest, the ETag it was read with and its size in bytes; an empty seq-0 manifest (size 0) before
@@ -179,7 +242,7 @@ export interface Pending {
 	/** Which web host: so the folder's alarm can settle it with nothing else to go on (review r2 #2). */
 	where: Where;
 	path: string;
-	/** The trash copy of the bytes the manifest lists for `path`, or null when it lists none (a new path). */
+	/** The history copy of the bytes the manifest lists for `path`, or null when it lists none (a new path). */
 	restore: string | null;
 	/** Their sha256, so a copy is only put back over the bytes it was taken from, and their size (what the copy costs
 	 *  while it stays). */
@@ -196,15 +259,29 @@ export interface Journal {
 	delete(): Promise<void>;
 	/** A backup an undo could not remove (review r4 #7): charged to `root`'s person and removed later, durably. */
 	stray(root: string, key: string, size: number): Promise<void>;
+	/** The burst rule's memory (CONTRACT "What is kept", rule 4): when this web host last kept a version of each path,
+	 *  within the last 30 s. WHY no listing: the web host is the only writer of its history. */
+	recent?(): Promise<Record<string, number>>;
+	kept?(path: string, leftAt: number): Promise<void>;
+	/** Where a committed change's record waits to be written (the folder's object); absent, it is written at once. */
+	record?: Recorder;
+}
+
+/** The burst memory after `path` kept a version at `at`: only the last 30 s matter. */
+export function remember(recent: Record<string, number>, path: string, at: number): Record<string, number> {
+	return { ...Object.fromEntries(Object.entries(recent).filter(([, t]) => t > at - BURST_MS)), [path]: at };
 }
 
 export function memoryJournal(): Journal {
 	let pending: Pending | null = null;
+	let recent: Record<string, number> = {};
 	return {
 		get: async () => pending,
 		put: async (p) => { pending = p; },
 		delete: async () => { pending = null; },
 		stray: async () => undefined,
+		recent: async () => recent,
+		kept: async (path, at) => { recent = remember(recent, path, at); },
 	};
 }
 
@@ -232,7 +309,7 @@ export async function settle(bucket: WritableBucket, w: Where, journal: Journal)
 			}
 			if (!(await holds(bucket, hostKey(w, pending.path), entry.sha256))) throw new Error(`${JSON.stringify(pending.path)} does not match its manifest after the restore`);
 		}
-		// WHY (review r3 #6): the trash copy was taken for this change alone; undone, it is a second copy of what is
+		// WHY (review r3 #6): the history copy was taken for this change alone; undone, it is a second copy of what is
 		// live, which the quota never charged. WHY a stray when its delete fails (review r4 #7): it is charged until the
 		// folder's alarm removes it, so the usage never counts less than what is stored
 		if (pending.restore) {
@@ -283,13 +360,37 @@ async function change(bucket: WritableBucket, w: Where, journal: Journal, pendin
 	return false;
 }
 
-/** Writes `path` into the web host: trash copy of the old version, the file, then the manifest (If-Match).
- *  `keepNewest` names a JSON field (an RFC 3339 instant): then a write older than the stored version is refused
- *  (Stale), so two tabs' writes arriving out of order keep the newest (review r1 #4: newest heart wins). An exact tie
- *  is settled the same in either order (review r2 #5): the body whose `tiePrefers` field is true wins (robotparts' "a
- *  heart wins a tie"), else the larger sha256. */
+/** How a write is asked for: X-Folder-Sync-Keep-Newest / -Tie-Prefers, the quota's ledger, and what its change record
+ *  says (PEP 0007): `restoreFrom` (the version id this write restores), `via` (the browser) and `receivedAt` (when the
+ *  Worker received it: up_ms counts from there). */
+export interface WriteOptions {
+	keepNewest?: string;
+	tiePrefers?: string;
+	ledger?: Ledger;
+	restoreFrom?: string;
+	via?: string;
+	receivedAt?: number;
+}
+
+/** Records a committed change: through the journal's queue when it has one, else at once; never the change's failure. */
+async function recordChange(bucket: WritableBucket, journal: Journal, key: string, record: ChangeRecord): Promise<void> {
+	try {
+		await (journal.record ? journal.record(key, record) : putRecord(bucket, key, record));
+	} catch {
+		// not recorded: the manifests stay the truth (CONTRACT "Change records")
+	}
+}
+
+/** Writes `path` into the web host: the history copy of the old version, the file, the manifest (If-Match), then the
+ *  change record. `keepNewest` names a JSON field (an RFC 3339 instant): then a write older than the stored version is
+ *  refused (Stale), so two tabs' writes arriving out of order keep the newest (review r1 #4: newest heart wins). An
+ *  exact tie is settled the same in either order (review r2 #5): the body whose `tiePrefers` field is true wins
+ *  (robotparts' "a heart wins a tie"), else the larger sha256.
+ *  WHY a copy even when the schedule keeps no version (a burst, a *.log): the copy is also this change's undo (review
+ *  r1 #3), so it is made, and deleted once the manifest has taken the change. A burst still keeps at most one version
+ *  per 30 s per path; it costs the web host a copy it then deletes (CONTRACT "What is kept"). */
 export async function writeWebFile(bucket: WritableBucket, w: Where, path: string, data: Uint8Array, clock: () => number, journal: Journal = memoryJournal(),
-	{ keepNewest, tiePrefers, ledger }: { keepNewest?: string; tiePrefers?: string; ledger?: Ledger } = {}): Promise<{ host: string; path: string; sha256: string; seq: number }> {
+	{ keepNewest, tiePrefers, ledger, restoreFrom, via, receivedAt }: WriteOptions = {}): Promise<{ host: string; path: string; sha256: string; seq: number }> {
 	checkWebPath(path);
 	const sha256 = await sha256Hex(data);
 	const mine = keepNewest ? instantOf(data, keepNewest) : null;
@@ -319,22 +420,53 @@ export async function writeWebFile(bucket: WritableBucket, w: Where, path: strin
 		// R2 answers a single PUT with, so the quota charge counts the manifest it really writes
 		const entry: ManifestEntry = { path, size: data.byteLength, mtime: iso, sha256, written_at: iso, object_etag: "0".repeat(32) };
 		const updated = next(manifest, [...manifest.files.filter((e) => e.path !== path), entry], now);
-		// the net cost: the new bytes (the old ones move to _trash/ and still count), one object (the file, or the trash
-		// copy of the old one), and the manifest's change (one object more on the first write)
-		const cost = { bytes: data.byteLength + manifestBytes(updated).byteLength - size, objects: 1 + (etag ? 0 : 1) };
+		const backup = old ? keptKey(w, path, old) : null;
+		const decision = old ? keepOnWrite({ op: restoreFrom ? "restore" : "replace", path, writtenAt: old.written_at, now, lastKeptLeftAt: (await journal.recent?.())?.[path] ?? null }) : null;
+		const keep = !!decision?.keep;
+		const event: Record<string, unknown> = {
+			schema: EVENT, event: restoreFrom ? "restore" : "upload", at: iso, level: "info", project: w.project, host: w.hostId, host_name: WEB_HOST_NAME, seq: updated.seq,
+			path, size: data.byteLength, sha256,
+			...(restoreFrom ? { from: restoreFrom } : { op: old ? "edit" : "add" }),
+			...(old ? { was: wasOf(old, keep ? versionId(old.written_at, old.sha256) : null, decision && !decision.keep ? decision.why : undefined) } : {}),
+			// up_ms (CONTRACT "Sync times"): for the web host, from the Worker receiving the write to its manifest
+			...(receivedAt !== undefined && !restoreFrom ? { up_ms: Math.max(0, Date.parse(updated.generated_at) - receivedAt) } : {}),
+		};
+		const record: ChangeRecord = { schema: CHANGES, project: w.project, host_id: w.hostId, host_name: WEB_HOST_NAME, seq: updated.seq, at: updated.generated_at, by: "web", ...(via ? { via } : {}), events: [event] };
+		// the cost, admitted at most: the new bytes (the old ones move to _history/ and still count), one object (the
+		// file, or the history copy of the old one), the manifest's change (one object more on the first write) and the
+		// change record's bytes (never an object: quota.ts measureRoot); charged as it ends: an old version that is not
+		// kept leaves, and its bytes with it
+		const manifestDelta = manifestBytes(updated).byteLength - size;
+		const recorded = recordBytes(record);
+		const first = etag ? 0 : 1;
+		const cost = { bytes: data.byteLength + manifestDelta + recorded, objects: 1 + first };
 		await ledger?.admit(cost.bytes, cost.objects);
-		const restore = old ? trashKey(w, path, now) : null;
 		// WHY the backup inside the change (review r4 #7): it is journalled before it is made, so a backup left by a
 		// cut-off change is always one the journal names, and is removed or charged
-		const committed = await change(bucket, w, journal, { where: w, path, restore, restoreSha256: old?.sha256 ?? null, restoreSize: old?.size ?? null, sha256 }, async () => {
-			if (restore && !(await bucket.copy(hostKey(w, path), restore))) throw new Error(`${JSON.stringify(path)} could not be copied to the trash`);
+		const committed = await change(bucket, w, journal, { where: w, path, restore: backup, restoreSha256: old?.sha256 ?? null, restoreSize: old?.size ?? null, sha256 }, async () => {
+			if (backup && !(await copyOut(bucket, w, path, old!, backup))) throw new Error(`${JSON.stringify(path)} could not be copied to its history`);
 			const stored = await bucket.put(hostKey(w, path), data);
 			if (/^[0-9A-Za-z-]{1,128}$/.test(stored.etag)) entry.object_etag = stored.etag;
 			else delete entry.object_etag; // an ETag this cannot name: the file is then read whole and sha256-checked
 			return writeManifest(bucket, w, updated, etag);
 		});
 		if (committed) {
-			await ledger?.charge(cost.bytes, cost.objects);
+			// WHY the record charged on its own: a change that shrinks what is stored is a credit, which marks the figure
+			// stale for measuring again (review r5 #2); the record's bytes must not hide one
+			if (old && backup && keep) {
+				await ledger?.charge(data.byteLength + manifestDelta, cost.objects, { bytes: old.size, objects: 1 });
+				await journal.kept?.(path, now);
+			} else if (old && backup) {
+				// not kept: the undo copy goes; one that cannot be removed now is a stray, charged until the alarm removes it
+				await ledger?.charge(data.byteLength - old.size + manifestDelta, first);
+				try {
+					await bucket.delete(backup);
+				} catch {
+					await journal.stray(w.root, backup, old.size);
+				}
+			} else await ledger?.charge(data.byteLength + manifestDelta, cost.objects);
+			await ledger?.charge(recorded, 0, { bytes: recorded, objects: 0 });
+			await recordChange(bucket, journal, changesKey(w.root, w.project, w.hostId, updated.seq), record);
 			return { host: w.hostId, path, sha256, seq: updated.seq };
 		}
 		// 412: another write moved the manifest since our read; the file is back as it was, start over from a fresh read
@@ -342,8 +474,10 @@ export async function writeWebFile(bucket: WritableBucket, w: Where, path: strin
 	throw new Busy("the web host's manifest kept changing; try again");
 }
 
-/** Removes `path` from the web host (moved to _trash/); null when the web host does not hold it. */
-export async function deleteWebFile(bucket: WritableBucket, w: Where, path: string, clock: () => number, journal: Journal = memoryJournal(), ledger?: Ledger): Promise<{ host: string; path: string; seq: number } | null> {
+/** Removes `path` from the web host (its version copied to _history/ first, always kept unless no_history says not);
+ *  null when the web host does not hold it. */
+export async function deleteWebFile(bucket: WritableBucket, w: Where, path: string, clock: () => number, journal: Journal = memoryJournal(), ledger?: Ledger,
+	{ via, receivedAt }: { via?: string; receivedAt?: number } = {}): Promise<{ host: string; path: string; seq: number } | null> {
 	checkWebPath(path);
 	await recover(bucket, w, journal);
 	for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
@@ -351,21 +485,85 @@ export async function deleteWebFile(bucket: WritableBucket, w: Where, path: stri
 		const { manifest, etag, size } = await readManifest(bucket, w);
 		const old = manifest.files.find((e) => e.path === path);
 		if (!old) return null;
-		const restore = trashKey(w, path, now);
+		const backup = keptKey(w, path, old);
+		const decision = keepOnWrite({ op: "delete", path, writtenAt: old.written_at, now, lastKeptLeftAt: null });
 		const updated = next(manifest, manifest.files.filter((e) => e.path !== path), now);
-		// the file moves to _trash/ (still counted): only the manifest shrinks
-		const cost = { bytes: manifestBytes(updated).byteLength - size, objects: 0 };
-		const committed = await change(bucket, w, journal, { where: w, path, restore, restoreSha256: old.sha256, restoreSize: old.size, sha256: null }, async () => {
-			if (!(await bucket.copy(hostKey(w, path), restore))) throw new Error(`${JSON.stringify(path)} could not be copied to the trash`);
+		const event = {
+			schema: EVENT, event: "delete", at: new Date(now).toISOString(), level: "info", project: w.project, host: w.hostId, host_name: WEB_HOST_NAME, seq: updated.seq,
+			path, was: wasOf(old, decision.keep ? versionId(old.written_at, old.sha256) : null, decision.keep ? undefined : decision.why),
+			...(receivedAt !== undefined ? { up_ms: Math.max(0, Date.parse(updated.generated_at) - receivedAt) } : {}),
+		};
+		const record: ChangeRecord = { schema: CHANGES, project: w.project, host_id: w.hostId, host_name: WEB_HOST_NAME, seq: updated.seq, at: updated.generated_at, by: "web", ...(via ? { via } : {}), events: [event] };
+		const recorded = recordBytes(record);
+		// the file moves to _history/ (still counted): only the manifest shrinks, and the change record adds its bytes
+		const cost = { bytes: manifestBytes(updated).byteLength - size + recorded, objects: 0 };
+		const committed = await change(bucket, w, journal, { where: w, path, restore: backup, restoreSha256: old.sha256, restoreSize: old.size, sha256: null }, async () => {
+			if (!(await copyOut(bucket, w, path, old, backup))) throw new Error(`${JSON.stringify(path)} could not be copied to its history`);
 			await bucket.delete(hostKey(w, path));
 			return writeManifest(bucket, w, updated, etag);
 		});
 		if (committed) {
-			await ledger?.charge(cost.bytes, cost.objects);
+			const shrink = cost.bytes - recorded;
+			if (decision.keep) {
+				await ledger?.charge(shrink, cost.objects, { bytes: old.size, objects: 1 });
+				await journal.kept?.(path, now);
+			} else {
+				// no_history: the undo copy goes too, and the file's bytes with it
+				await ledger?.charge(shrink - old.size, -1);
+				try {
+					await bucket.delete(backup);
+				} catch {
+					await journal.stray(w.root, backup, old.size);
+				}
+			}
+			await ledger?.charge(recorded, 0, { bytes: recorded, objects: 0 });
+			await recordChange(bucket, journal, changesKey(w.root, w.project, w.hostId, updated.seq), record);
 			return { host: w.hostId, path, seq: updated.seq };
 		}
 	}
 	throw new Busy("the web host's manifest kept changing; try again");
+}
+
+/** Restores `items` (each a path and a version id of this web host's history) as new versions, one at a time
+ *  (PEP 0007 §3.3): the version's bytes are fetched and checked against the sha16 in its name, then written as a
+ *  write is, keeping the version they replace. What could not be restored is named with why, never thrown. */
+export async function restoreWebFiles(bucket: WritableBucket, w: Where, items: { path: string; version: string }[], clock: () => number, journal: Journal, options: WriteOptions = {}):
+	Promise<{ applied: { host: string; path: string; version: string; seq: number }[]; failed: { host: string; path: string; version: string; error: "pruned" | "mismatch" | "not_found" | "over_quota" | "failed" }[] }> {
+	const applied = [];
+	const failed = [];
+	for (const { path, version } of items) {
+		const parsed = parseVersion(version);
+		const fail = (error: "pruned" | "mismatch" | "not_found" | "over_quota" | "failed") => failed.push({ host: w.hostId, path, version, error });
+		try {
+			checkWebPath(path);
+		} catch {
+			fail("not_found");
+			continue;
+		}
+		if (!parsed) {
+			fail("not_found");
+			continue;
+		}
+		try {
+			const object = await bucket.get(historyKey(w.root, w.project, w.hostId, path, version));
+			if (!object || !("arrayBuffer" in object)) {
+				fail("pruned");
+				continue;
+			}
+			const data = new Uint8Array(await object.arrayBuffer());
+			// WHY checked: a version is restored only if its bytes are the ones its name says (an unlisted one names none)
+			if (parsed.sha16 && (await sha256Hex(data)).slice(0, 16) !== parsed.sha16) {
+				fail("mismatch");
+				continue;
+			}
+			const done = await writeWebFile(bucket, w, path, data, clock, journal, { ...options, restoreFrom: version, keepNewest: undefined, tiePrefers: undefined });
+			applied.push({ host: w.hostId, path, version, seq: done.seq });
+		} catch (error) {
+			if (error instanceof OverQuota) fail("over_quota");
+			else fail("failed");
+		}
+	}
+	return { applied, failed };
 }
 
 // ------------------------------------------------------------------------------------------------ one writer per host
@@ -389,7 +587,7 @@ export class Serial {
 export interface WebOp {
 	/** SETTLE only puts a cut-off change right (a read asks for it first: review r2 #2). HOST_DELETE is a machine
 	 *  host's delete through the Worker while its keys are read-only (over quota: review r2 #7, r3 #1-2). */
-	method: "PUT" | "DELETE" | "SETTLE" | "HOST_DELETE" | "PURGE_TRASH";
+	method: "PUT" | "DELETE" | "SETTLE" | "HOST_DELETE" | "PURGE_TRASH" | "RESTORE" | "PURGE_HISTORY" | "TOUCH";
 	owner: string;
 	project: string;
 	hostId: string;
@@ -407,8 +605,15 @@ export interface WebOp {
 	job?: string;
 	fromSeq?: number;
 	paths?: string[];
-	/** DELETE: permanently, with no trash copy (a person under or over quota freeing space, review r3 #3). */
+	/** DELETE: permanently, with no history copy (a person under or over quota freeing space, review r3 #3). */
 	permanent?: boolean;
+	/** RESTORE (PEP 0007 §3.3): the web host's versions to write back as new versions. */
+	items?: { path: string; version: string }[];
+	/** PURGE_HISTORY: history deleted for good, one version or everything older than N days (POST …/history/purge). */
+	purge?: { olderThanDays?: number; host?: string; path?: string; version?: string };
+	/** The browser, as /fs/v1/devices names it (a change record's `via`), and when the Worker received the request (up_ms). */
+	via?: string;
+	receivedAt?: number;
 }
 
 /** The answer to send: a status, a JSON body (an error is { error, why }) and extra headers. */
@@ -445,14 +650,18 @@ export async function runWebOp(env: CredsEnv & QuotaEnv, s3: FetchLike, op: WebO
 				const over = overQuota(usage, quota, bytes, objects);
 				if (over) throw new OverQuota(over);
 			},
-			charge: (bytes, objects) => store.addUsage(op.owner, bytes, objects),
+			charge: (bytes, objects, history) => store.addUsage(op.owner, bytes, objects, history),
 		};
 		if (op.method === "SETTLE") {
 			await recover(bucket, w, journal);
 			return { status: 200, body: { settled: true } };
 		}
-		if (op.method === "PUT") return { status: 200, body: await writeWebFile(bucket, w, op.path, op.data ?? new Uint8Array(), clock, journal, { keepNewest: op.keepNewest, tiePrefers: op.tiePrefers, ledger }) };
-		const gone = await deleteWebFile(bucket, w, op.path, clock, journal, ledger);
+		if (op.method === "PUT") return { status: 200, body: await writeWebFile(bucket, w, op.path, op.data ?? new Uint8Array(), clock, journal, { keepNewest: op.keepNewest, tiePrefers: op.tiePrefers, ledger, via: op.via, receivedAt: op.receivedAt }) };
+		if (op.method === "RESTORE") {
+			await recover(bucket, w, journal);
+			return { status: 200, body: await restoreWebFiles(bucket, w, op.items ?? [], clock, journal, { ledger, via: op.via }) };
+		}
+		const gone = await deleteWebFile(bucket, w, op.path, clock, journal, ledger, { via: op.via, receivedAt: op.receivedAt });
 		return gone ? { status: 200, body: gone } : { status: 404, body: { error: "not_found", why: "the web host does not hold that file" } };
 	} catch (error) {
 		if (error instanceof BadPath) return { status: 400, body: { error: "bad_path", why: error.message } };
@@ -497,6 +706,9 @@ export interface DeleteJob {
 	 *  Absent on a job saved before this field existed: treated as tried. */
 	committing?: boolean;
 	at: number;
+	/** Whose change its record names (PEP 0007): "server", the over-quota delete job; "web", a permanent web delete. */
+	by?: "server" | "web";
+	via?: string;
 }
 
 /** How long a finished job is kept, so a replay after a lost answer still gets it. */
@@ -511,7 +723,7 @@ function jobManifest(job: DeleteJob, stored: Manifest): Manifest {
 /** Advances a job as far as it goes: commits its manifest (If-Match on the stored one at fromSeq), then deletes each
  *  remaining file and lowers the usage by it, saving after each step. Returns the stored manifest once committed, or
  *  null when the host's manifest moved past it some other way (the job is then dropped). */
-async function advance(bucket: WritableBucket, job: DeleteJob, save: (job: DeleteJob) => Promise<void>, drop: () => Promise<void>, store: Store): Promise<Manifest | null> {
+async function advance(bucket: WritableBucket, job: DeleteJob, save: (job: DeleteJob) => Promise<void>, drop: () => Promise<void>, store: Store, record?: Recorder): Promise<Manifest | null> {
 	const w = job.where;
 	const object = await bucket.get(hostKey(w, "manifest.json"));
 	if (!object || !("arrayBuffer" in object)) {
@@ -539,6 +751,20 @@ async function advance(bucket: WritableBucket, job: DeleteJob, save: (job: Delet
 			// again), never charges it twice
 			await store.addUsage(job.owner, body.byteLength - bytes.byteLength, 0);
 			current = next;
+			// the job's change record (PEP 0007): each path deleted permanently, nothing kept
+			const left = new Map(stored.files.map((e) => [e.path, e]));
+			const events = [...job.paths].sort().filter((p) => left.has(p)).map((path) => ({
+				schema: EVENT, event: "delete", at: job.generatedAt, level: "info", project: w.project, host: w.hostId, host_name: next.host_name, seq: job.toSeq,
+				path, permanent: true, was: wasOf(left.get(path)!, null, "permanent"),
+			}));
+			const change: ChangeRecord = { schema: CHANGES, project: w.project, host_id: w.hostId, host_name: next.host_name, seq: job.toSeq, at: job.generatedAt, by: job.by ?? "server", ...(job.via ? { via: job.via } : {}), events };
+			const key = changesKey(w.root, w.project, w.hostId, job.toSeq);
+			await store.addUsage(job.owner, recordBytes(change), 0, { bytes: recordBytes(change), objects: 0 });
+			try {
+				await (record ? record(key, change) : putRecord(bucket, key, change));
+			} catch {
+				// not recorded: the manifests stay the truth
+			}
 		} else if (stored.seq >= job.toSeq && job.committing !== false) {
 			// the manifest write was tried and the seq is at or past the job's: it committed before a restart cut the job
 			// off, maybe with later changes on top. WHY kept (review r6 #1): dropped, its files would stay stored and
@@ -571,6 +797,19 @@ async function advance(bucket: WritableBucket, job: DeleteJob, save: (job: Delet
 
 /** How long a journalled change may stay unsettled before the folder's alarm settles it (and the retry after that). */
 const SETTLE_AFTER_MS = 30_000;
+/** The folder's prune (PEP 0007 §3.2): first a minute after anything touches the folder, then daily; sooner again
+ *  when one ran out of budget. */
+const PRUNE_FIRST_MS = 60_000;
+const PRUNE_EVERY_MS = 24 * 3600_000;
+const PRUNE_MORE_MS = 60_000;
+
+/** A change record waiting in the folder's object to be written (CONTRACT "Consistency": after the manifest and the
+ *  hub; a failed PUT is tried again by the next operation or the alarm). */
+interface QueuedRecord {
+	root: string;
+	key: string;
+	record: ChangeRecord;
+}
 
 /** One folder's web host: its queue, its journal in `storage`, and the alarm that settles a cut-off change with no
  *  other request to do it (review r2 #2). The Durable Object (webhost-do.ts) is this over its own storage. */
@@ -590,12 +829,49 @@ export class WebHostCore {
 		this.store = store;
 	}
 
-	/** Sets the alarm while anything is left to do (a journalled change, a delete job with files left), else clears it. */
+	/** Sets the alarm while anything is left to do (a journalled change, a delete job with files left, a stray, a change
+	 *  record to write), and for the folder's next prune; clears it when there is neither. WHY one alarm for both: an
+	 *  object has one, so it is set to whichever comes first (PEP 0007 §3.2). */
 	private async rearm(): Promise<void> {
 		const busy = !!(await this.storage.get("pending")) || [...(await this.storage.list<DeleteJob>({ prefix: "job:" })).values()].some((j) => !j.committed || j.remaining.length)
-			|| (await this.storage.list({ prefix: "stray:" })).size > 0;
-		if (busy) await this.storage.setAlarm(this.clock() + SETTLE_AFTER_MS);
+			|| (await this.storage.list({ prefix: "stray:" })).size > 0 || (await this.storage.list({ prefix: "record:" })).size > 0;
+		const pruneAt = await this.storage.get<number>("prune_at");
+		const at = Math.min(busy ? this.clock() + SETTLE_AFTER_MS : Infinity, pruneAt ?? Infinity);
+		if (Number.isFinite(at)) await this.storage.setAlarm(at);
 		else await this.storage.deleteAlarm();
+	}
+
+	/** Remembers which folder this object is (the pruner needs it with no request to go on) and, the first time, sets
+	 *  its prune: any request that touches the folder does (PEP 0007 §3.2). */
+	private async touch(op: WebOp): Promise<void> {
+		if (!(await this.storage.get("folder"))) await this.storage.put("folder", { owner: op.owner, project: op.project });
+		if ((await this.storage.get<number>("prune_at")) === undefined) {
+			await this.storage.put("prune_at", this.clock() + PRUNE_FIRST_MS);
+			await this.rearm();
+		}
+	}
+
+	/** Writes the change records waiting in this object, each once (If-None-Match: *); one that fails waits for the
+	 *  next operation or the alarm. */
+	private async flushRecords(env: CredsEnv): Promise<void> {
+		for (const [name, queued] of await this.storage.list<QueuedRecord>({ prefix: "record:" })) {
+			try {
+				const bucket = new S3Bucket(await mint(env, queued.root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
+				await putRecord(bucket, queued.key, queued.record);
+			} catch {
+				continue;
+			}
+			await this.storage.delete(name);
+		}
+		await this.rearm();
+	}
+
+	/** Queues a committed change's record in this object's storage (with the alarm as its backstop): it is written once
+	 *  the operation has answered, so the page's write, and the hub told after it, never wait on it. */
+	private recorder(root: string): Recorder {
+		return async (key, record) => {
+			await Promise.all([this.storage.put(`record:${key}`, { root, key, record } satisfies QueuedRecord), this.storage.setAlarm(this.clock() + SETTLE_AFTER_MS)]);
+		};
 	}
 
 	private journal(): Journal {
@@ -611,27 +887,126 @@ export class WebHostCore {
 				await storage.delete("pending");
 				await this.rearm();
 			},
-			// charged first, then recorded: a restart between them over-counts until the next measurement, never under
+			// charged first, then recorded: a restart between them over-counts until the next measurement, never under.
+			// WHY once per key: a version's history key is its own (PEP 0007), so undone attempts to replace one version
+			// leave one backup, not one each
 			stray: async (root, key, size) => {
+				if (await storage.get(`stray:${key}`)) return;
 				await this.store.addUsage(ownerOf(root), size, 1);
 				await Promise.all([storage.put(`stray:${key}`, { root, key, size }), storage.setAlarm(this.clock() + SETTLE_AFTER_MS)]);
 			},
+			recent: async () => {
+				const recent = (await storage.get<Record<string, number>>("recent")) ?? {};
+				return Object.fromEntries(Object.entries(recent).filter(([, t]) => t > this.clock() - BURST_MS));
+			},
+			kept: async (path, at) => {
+				await storage.put("recent", remember((await storage.get<Record<string, number>>("recent")) ?? {}, path, at));
+			},
 		};
+	}
+
+	/** The journal, with this object's record queue for the folder whose root is `root`. */
+	private journalFor(root: string): Journal {
+		return { ...this.journal(), record: this.recorder(root) };
 	}
 
 	/** One write, delete or settle of this folder's web host, or a machine host's delete, after every earlier one has
 	 *  finished (`env`: the vars to run it with, the object's own unless a test's request brings others). */
 	run(op: WebOp, env: CredsEnv & QuotaEnv = this.env): Promise<WebAnswer> {
-		if (op.method === "HOST_DELETE") return this.serial.run("", () => this.hostDelete(env, op));
-		if (op.method === "DELETE" && op.permanent) return this.serial.run("", () => this.permanentWebDelete(env, op));
-		if (op.method === "PURGE_TRASH") return this.serial.run("", () => this.purgeTrash(env, op));
-		return this.serial.run("", () => runWebOp(env, this.s3, op, this.journal(), this.clock, this.store));
+		const answer = this.serial.run("", async () => {
+			await this.touch(op);
+			if (op.method === "TOUCH") return { status: 200, body: { touched: true } };
+			if (op.method === "HOST_DELETE") return this.hostDelete(env, op);
+			if (op.method === "DELETE" && op.permanent) return this.permanentWebDelete(env, op);
+			if (op.method === "PURGE_TRASH") return this.purgeTrash(env, op);
+			if (op.method === "PURGE_HISTORY") return this.purgeHistory(env, op);
+			return runWebOp(env, this.s3, op, this.journalFor(userRoot(op.owner)), this.clock, this.store);
+		});
+		// the change records it queued, written once it has answered (CONTRACT "Consistency": after the manifest and the
+		// hub); the next operation in the queue waits for them
+		if (op.method !== "TOUCH" && op.method !== "SETTLE") void this.serial.run("", () => this.flushRecords(env)).catch(() => undefined);
+		return answer;
+	}
+
+	/** Resolves once every operation queued so far, and the change records they queued, are done. */
+	drain(): Promise<void> {
+		return this.serial.run("", async () => undefined);
+	}
+
+	/** Prunes this folder now (PEP 0007 §3.2): what its alarm runs once a day; the next prune is set from here. */
+	async prune(env: CredsEnv = this.env): Promise<{ deleted: number; bytes: number; more: boolean } | null> {
+		const folder = await this.storage.get<{ owner: string; project: string }>("folder");
+		if (!folder) return null;
+		const root = userRoot(folder.owner);
+		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
+		const pruned = await pruneFolder(bucket, root, folder.project, this.clock());
+		// a credit marks the measurement stale (store.addUsage): the next request measures again
+		if (pruned.deleted) await this.store.addUsage(folder.owner, -pruned.bytes, -pruned.objects, { bytes: -pruned.bytes, objects: -pruned.objects });
+		await this.storage.put("prune_at", this.clock() + (pruned.more ? PRUNE_MORE_MS : PRUNE_EVERY_MS));
+		await this.rearm();
+		return { deleted: pruned.deleted, bytes: pruned.bytes, more: pruned.more };
+	}
+
+	/** POST …/history/purge (PEP 0007 §3.3, docs/API.md): history deleted for good, up to 1,000 objects a call, the
+	 *  usage lowered by each. One version ("I synced a secret"), or everything older than N days, optionally of one
+	 *  host and path ("Free up space"; without a path, the change records and legacy _trash/ of that age too: all of
+	 *  it is history, PEP 0007 §3.5, and a record costs bytes a person over quota must be able to free). WHY settled first (review r4
+	 *  #2): a cut-off change's backup is a history object; while it is journalled the purge waits (503 recovering). */
+	private async purgeHistory(env: CredsEnv & QuotaEnv, op: WebOp): Promise<WebAnswer> {
+		if (op.hostId) {
+			const settled = await runWebOp(env, this.s3, { ...op, method: "SETTLE" }, this.journal(), this.clock, this.store);
+			if (settled.status !== 200) return settled;
+		}
+		const root = userRoot(op.owner);
+		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
+		const purge = op.purge ?? {};
+		const doomed: { key: string; size: number; counts: boolean }[] = [];
+		let more = false;
+		if (purge.version && purge.host && purge.path) {
+			const key = historyKey(root, op.project, purge.host, purge.path, purge.version);
+			const seen = await bucket.head(key);
+			if (seen) doomed.push({ key, size: seen.size, counts: true });
+		} else {
+			const before = this.clock() - (purge.olderThanDays ?? 0) * 24 * 3600_000;
+			const under = purge.host ? `${purge.host}/` : "";
+			const prefixes = [historyPrefix(root, op.project, purge.host, purge.path)];
+			if (!purge.path) prefixes.push(`${root}_changes/${op.project}/${under}`, `${root}_trash/${op.project}/${under}`);
+			for (const prefix of prefixes) {
+				const legacy = prefix.startsWith(`${root}_trash/`);
+				const records = prefix.startsWith(`${root}_changes/`);
+				let cursor: string | undefined;
+				let pages = 0;
+				do {
+					const page = await bucket.objects(prefix, { cursor });
+					for (const object of page.objects) {
+						const at = legacy ? trashStampTime(object.key.slice(`${root}_trash/${op.project}/`.length).split("/")[1] ?? "") : object.lastModified;
+						if (at === null || at > before) continue;
+						if (doomed.length === 1000) {
+							more = true;
+							break;
+						}
+						// a change record counts its bytes toward the quota, never an object (quota.ts measureRoot)
+						doomed.push({ key: object.key, size: object.size, counts: !records });
+					}
+					cursor = page.truncated ? page.cursor : undefined;
+					// WHY a page budget: one call answers within a request's subrequests; `more` asks for the next
+					if (cursor && ++pages >= 50) more = true;
+				} while (cursor && !more);
+				if (more) break;
+			}
+		}
+		const failed = new Set(await bucket.deleteMany(doomed.map((d) => d.key)));
+		const gone = doomed.filter((d) => !failed.has(d.key));
+		const bytes = gone.reduce((n, d) => n + d.size, 0);
+		const objects = gone.filter((d) => d.counts).length;
+		if (gone.length) await this.store.addUsage(op.owner, -bytes, -objects, { bytes: -bytes, objects: -objects });
+		return { status: 200, body: { purged: gone.length, bytes, more: more || failed.size > 0 } };
 	}
 
 	private async job(env: CredsEnv, job: DeleteJob): Promise<Manifest | null> {
 		const bucket = new S3Bucket(await mint(env, job.where.root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
 		const key = `job:${job.id}`;
-		const result = await advance(bucket, job, (j) => this.storage.put(key, j), () => this.storage.delete(key).then(() => undefined), this.store);
+		const result = await advance(bucket, job, (j) => this.storage.put(key, j), () => this.storage.delete(key).then(() => undefined), this.store, this.recorder(job.where.root));
 		await this.rearm();
 		return result;
 	}
@@ -658,7 +1033,8 @@ export class WebHostCore {
 				const missing = paths.filter((p) => !listed.has(p));
 				if (missing.length) return refuse(400, "bad_paths", `the manifest does not list ${JSON.stringify(missing.slice(0, 3))}`);
 				job = { id: op.job!, owner: op.owner, where, fromSeq: stored.seq, toSeq: stored.seq + 1, generatedAt: new Date(this.clock()).toISOString(), paths,
-					sizes: Object.fromEntries(paths.map((p) => [p, listed.get(p)!.size])), remaining: [...paths], committed: false, committing: false, at: this.clock() };
+					sizes: Object.fromEntries(paths.map((p) => [p, listed.get(p)!.size])), remaining: [...paths], committed: false, committing: false, at: this.clock(),
+					by: op.permanent ? "web" : "server", ...(op.permanent && op.via ? { via: op.via } : {}) };
 				// the job and its alarm together, before the first bucket write (review r4 #3)
 				await Promise.all([this.storage.put(`job:${job.id}`, job), this.storage.setAlarm(this.clock() + SETTLE_AFTER_MS)]);
 			}
@@ -722,7 +1098,7 @@ export class WebHostCore {
 	}
 
 	/** The alarm: settles a change a crash or a failed undo left journalled, finishes delete jobs, drops old finished
-	 *  ones; tries again later while anything is left. */
+	 *  ones, writes waiting change records, and prunes the folder once a day; tries again later while anything is left. */
 	alarm(): Promise<void> {
 		return this.serial.run("", async () => {
 			const journal = this.journal();
@@ -755,6 +1131,16 @@ export class WebHostCore {
 					await this.job(this.env, job);
 				} catch {
 					// the next alarm tries again
+				}
+			}
+			await this.flushRecords(this.env);
+			// the folder's daily prune (PEP 0007 §3.2), when it is due
+			const pruneAt = await this.storage.get<number>("prune_at");
+			if (pruneAt !== undefined && pruneAt <= this.clock()) {
+				try {
+					await this.prune(this.env);
+				} catch {
+					await this.storage.put("prune_at", this.clock() + PRUNE_MORE_MS);
 				}
 			}
 			await this.rearm();

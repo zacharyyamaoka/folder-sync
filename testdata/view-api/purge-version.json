@@ -1,0 +1,27 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "purge one version (\"I synced a secret\")",
+  "servers": [
+    "worker"
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/fs/v1/folders/notes/history/purge",
+    "auth": "owner",
+    "body": {
+      "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+      "path": "notes/plan.md",
+      "version": "2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f"
+    }
+  },
+  "request_schema": "purge_request",
+  "response": {
+    "status": 200,
+    "body": {
+      "purged": 1,
+      "bytes": 1980,
+      "more": false
+    }
+  },
+  "body_schema": "purge_response"
+}

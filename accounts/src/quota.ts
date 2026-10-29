@@ -13,7 +13,7 @@ import type { Store } from "./store.ts";
 export interface QuotaEnv {
 	/** Bytes per person (default 1 GiB). */
 	QUOTA_BYTES?: string;
-	/** Objects per person, _trash/ included (default 100 000). */
+	/** Objects per person, history included, _changes/ records not (default 100 000). */
 	QUOTA_OBJECTS?: string;
 	/** How old a measurement may be before it is taken again, in seconds (default 300). */
 	QUOTA_RECHECK_S?: string;
@@ -36,6 +36,52 @@ export interface Usage {
 	partial?: boolean;
 	/** A deletion happened since (or during) the measurement (review r5 #2): an upper bound, measured again next. */
 	stale?: boolean;
+	/** The share of it that is history (PEP 0007 §3.5): _history/, _changes/, _requests/ and legacy _trash/. */
+	history?: { bytes: number; objects: number };
+}
+
+/** What a measurement counts: the totals, the history share of them, and whether it ran to the end. */
+export interface Counted {
+	bytes: number;
+	objects: number;
+	complete?: boolean;
+	history?: { bytes: number; objects: number };
+}
+
+/** The top-level prefixes under a root that are history (PEP 0007 §3.5: they count toward the quota, shown apart). */
+const HISTORY_TOPS = new Set(["_history", "_changes", "_requests", "_trash"]);
+
+/** What `measureRoot` lists with: one ListObjectsV2 page at a time (s3-bucket.ts S3Bucket.objects). */
+export interface Lister {
+	objects(prefix: string, options?: { cursor?: string; max?: number }): Promise<{ objects: { key: string; size: number }[]; truncated: boolean; cursor?: string }>;
+}
+
+/** Lists everything under `root` (1000 a page) into live and history, stopped once either total passes `stop` (a
+ *  lower bound then, review r4 #5). `seen` gets each project the listing passes (the folder objects a measurement
+ *  wakes, PEP 0007 §3.2).
+ *  WHY a change record counts its bytes but never an object: one is written per publishing round, so an agent saving
+ *  every 2 s makes about 43,000 a day and would reach QUOTA_OBJECTS (100,000) in two days (PEP 0007 §14.2); they are
+ *  small, and the pruner expires them after 30 days, so bytes bound them honestly. */
+export async function measureRoot(bucket: Lister, root: string, stop: { bytes: number; objects: number }, seen?: Set<string>): Promise<Counted & { history: { bytes: number; objects: number } }> {
+	let bytes = 0;
+	let objects = 0;
+	const history = { bytes: 0, objects: 0 };
+	let cursor: string | undefined;
+	do {
+		const page = await bucket.objects(root, { cursor, max: 1000 });
+		for (const { key, size } of page.objects) {
+			const top = key.slice(root.length).split("/", 1)[0];
+			const counts = top !== "_changes";
+			bytes += size;
+			if (counts) objects += 1;
+			if (HISTORY_TOPS.has(top)) {
+				history.bytes += size;
+				if (counts) history.objects += 1;
+			} else if (seen && !top.startsWith("_")) seen.add(top);
+		}
+		cursor = page.truncated ? page.cursor : undefined;
+	} while (cursor && bytes <= stop.bytes && objects <= stop.objects);
+	return { bytes, objects, history, complete: !cursor };
 }
 
 function positive(value: string | undefined, fallback: number): number {
@@ -61,7 +107,7 @@ export const CLAIM_MS = 60_000;
  *  in D1 first: thirty machines refreshing at once must cost one listing of the root (up to a hundred pages), not
  *  thirty; and a listing that fails is not repeated by every request behind it. Without the claim, the last
  *  measurement serves while there is one, else Measuring. */
-export async function usageOf(store: Store, owner: string, quota: Quota, now: number, measure: () => Promise<{ bytes: number; objects: number }>): Promise<Usage> {
+export async function usageOf(store: Store, owner: string, quota: Quota, now: number, measure: () => Promise<Counted>): Promise<Usage> {
 	const cached = await store.usage(owner);
 	const known = cached && cached.measured_at ? cached : null;
 	// WHY a partial one is never fresh (review r4 #5): only a complete measurement may say the person is back under
@@ -86,16 +132,16 @@ export async function usageOf(store: Store, owner: string, quota: Quota, now: nu
 	};
 	const token = crypto.randomUUID();
 	if (!(await store.claimMeasurement(owner, now, now + CLAIM_MS, token))) return fallback("is being measured (or could not be, just now)");
-	let counted: { bytes: number; objects: number; complete?: boolean };
+	let counted: Counted;
 	try {
 		counted = await measure();
 	} catch (error) {
 		return fallback(`could not be measured (${error instanceof Error ? error.message : String(error)})`);
 	}
-	const measured: Usage = { bytes: counted.bytes, objects: counted.objects, measured_at: new Date(now).toISOString(), partial: counted.complete === false };
+	const measured: Usage = { bytes: counted.bytes, objects: counted.objects, measured_at: new Date(now).toISOString(), partial: counted.complete === false, history: counted.history ?? { bytes: 0, objects: 0 } };
 	// WHY fenced by the claim's token (review r3 #7): a listing that outlived its claim must not overwrite the newer
 	// measurement of whoever claimed after it; that one stands
-	if (!(await store.setUsage(owner, measured.bytes, measured.objects, measured.measured_at, token, measured.partial))) {
+	if (!(await store.setUsage(owner, measured.bytes, measured.objects, measured.measured_at, token, measured.partial, measured.history))) {
 		// another claim took over: its stored figure counts, and only if it is young enough; this one never does
 		const newer = await store.usage(owner);
 		return judged(newer && newer.measured_at ? newer : null, "is being measured again");

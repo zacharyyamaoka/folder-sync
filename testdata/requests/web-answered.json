@@ -1,0 +1,20 @@
+{
+  "schema": "folder-sync-restore/1",
+  "id": "3f0e1d2c-4b5a-4968-8776-a5b4c3d2e1f0",
+  "project": "notes",
+  "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+  "at": "2026-10-28T20:45:58.000Z",
+  "by": { "kind": "web", "name": "Chrome on Linux" },
+  "items": [
+    { "path": "notes/plan.md", "version": "2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f" },
+    { "path": "notes/very-old.md", "version": "2026-09-20T10:00:00.000Z_0011223344556677" }
+  ],
+  "outcome": {
+    "at": "2026-10-28T20:46:12.010Z",
+    "seq": 44,
+    "results": [
+      { "path": "notes/plan.md", "version": "2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f", "ok": true },
+      { "path": "notes/very-old.md", "version": "2026-09-20T10:00:00.000Z_0011223344556677", "ok": false, "error": "pruned" }
+    ]
+  }
+}

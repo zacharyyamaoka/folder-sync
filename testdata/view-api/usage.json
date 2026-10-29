@@ -1,0 +1,37 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "usage, split into live and history",
+  "servers": [
+    "worker"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/usage",
+    "auth": "owner"
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "owner": "AbC123zz9yX8",
+      "used": {
+        "bytes": 15802467,
+        "objects": 412
+      },
+      "live": {
+        "bytes": 13456789,
+        "objects": 301
+      },
+      "history": {
+        "bytes": 2345678,
+        "objects": 111
+      },
+      "quota": {
+        "bytes": 1073741824,
+        "objects": 100000
+      },
+      "over": null,
+      "partial": false
+    }
+  },
+  "body_schema": "usage"
+}

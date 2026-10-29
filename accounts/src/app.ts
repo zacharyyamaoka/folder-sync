@@ -22,6 +22,9 @@
 //   POST /fs/v1/credentials                       a machine's bearer session -> R2 keys for users/<id>/ (5 min);
 //                                                 over quota: read-only, with ReadOnly and Reason
 //   POST /fs/v1/folders/:project/hosts/:host/delete  a machine's deletes while its keys are read-only (bearer)
+//   GET  /fs/v1/folders/:project/{status,activity,deleted}, GET …/history/:host/<p>[?version=],
+//   POST …/restore, POST …/history/purge          the sync view's data API (PEP 0007, docs/API.md; view.ts)
+//   GET  /fs/ui/v1/<file>                         <folder-sync-status>'s files (view.ts ui)
 //
 // The table in PEP 0003 §3.3 is the contract (another app builds against it); errors are
 // { "error": "<code>", "why": "<sentence>" }.
@@ -45,6 +48,7 @@ import { accountRoute, devicesApi, signInReturn, type GrantRow, type SessionRow 
 import { downloadRoute, type DownloadsBucket } from "./download.ts";
 import { servedFile } from "./ranges.ts";
 import type { CloseOrder } from "./hub.ts";
+import { activityRoute, browserOf, deleted, history, purge, restore, status, ui } from "./view.ts";
 
 export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
 	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
@@ -109,7 +113,7 @@ export interface Deps {
 	revokeGrant?(userId: string, id: string): Promise<boolean>;
 }
 
-const READ_TTL_S = 300;
+export const READ_TTL_S = 300;
 /** §3.3: the bundle's limits. */
 const BUNDLE_FILE_MAX = 256 * 1024;
 const BUNDLE_TOTAL_MAX = 2 * 1024 * 1024;
@@ -118,7 +122,7 @@ const WEB_FILE_MAX = 32 * 1024 * 1024;
 const EMAIL = /^[^\s@<>()",;:]{1,64}@[^\s@<>()",;:]{1,255}$/;
 const HOST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 /** What a folder's file is served as; anything else is application/octet-stream. */
-const TYPES: Record<string, string> = {
+export const TYPES: Record<string, string> = {
 	".json": "application/json; charset=utf-8",
 	".jsonl": "application/x-ndjson; charset=utf-8",
 	".md": "text/markdown; charset=utf-8",
@@ -146,7 +150,7 @@ const TYPES: Record<string, string> = {
 	".webm": "video/webm",
 	".mov": "video/quicktime",
 };
-const ACTIVE = new Set([".html", ".htm", ".svg"]);
+export const ACTIVE = new Set([".html", ".htm", ".svg"]);
 const SITE_FILES: Record<string, string> = { "signin.js": "text/javascript; charset=utf-8", "device.js": "text/javascript; charset=utf-8", "account.css": "text/css; charset=utf-8" };
 
 // ------------------------------------------------------------------------------------------------ answers
@@ -239,7 +243,7 @@ export async function session(request: Request, deps: Deps, app: App | null): Pr
 
 /** CSRF (§3.3): a cookie-authenticated write needs X-Folder-Sync: 1 and its own origin. A cross-site form can set
  *  neither, and a cross-site fetch can't set the header without a preflight this Worker refuses. */
-function csrfOk(request: Request, app: App | null): boolean {
+export function csrfOk(request: Request, app: App | null): boolean {
 	const origin = request.headers.get("Origin");
 	return request.headers.get("X-Folder-Sync") === "1" && !!app && !!origin && origin === new URL(request.url).origin && app.origins.includes(origin); // fs-mutation: the CSRF rule
 }
@@ -265,7 +269,7 @@ export async function writer(request: Request, deps: Deps, app: App | null): Pro
 
 // ------------------------------------------------------------------------------------------------ storage
 
-function bucketFor(env: Env, deps: Deps, prefix: string, scope: "object-read-only" | "object-read-write", ttl: number): Promise<S3Bucket> {
+export function bucketFor(env: Env, deps: Deps, prefix: string, scope: "object-read-only" | "object-read-write", ttl: number): Promise<S3Bucket> {
 	return mint(env, prefix, scope, ttl, deps.now()).then((creds) => new S3Bucket(creds, deps.s3));
 }
 
@@ -294,14 +298,27 @@ async function quotaRefusal(env: Env, deps: Deps, owner: string, addBytes = 0, a
 	// WHY signed before usageOf: only the listing's own failures are a measurement's (Measuring); a credential that
 	// cannot be signed is a fault, not a 503 to try again
 	const bucket = await bucketFor(env, deps, root, "object-read-only", READ_TTL_S);
-	const usage = await usageOf(deps.store, owner, quota, deps.now(), () => bucket.measure(root, { bytes: quota.bytes, objects: quota.objects }));
+	const seen = new Set<string>();
+	const usage = await usageOf(deps.store, owner, quota, deps.now(), () => bucket.measure(root, { bytes: quota.bytes, objects: quota.objects }, seen));
+	await wake(env, deps, owner, seen);
 	return overQuota(usage, quota, addBytes, addObjects);
+}
+
+/** The folders a measurement passed wake their objects, whose alarm prunes each daily (PEP 0007 §3.2): a machine-only
+ *  folder no page reads is still pruned once its keys are refreshed. Best effort, and bounded. */
+async function wake(env: Env, deps: Deps, owner: string, projects: Set<string>): Promise<void> {
+	if (!projects.size) return;
+	const work = Promise.all([...projects].filter((p) => PROJECT.test(p)).slice(0, 50).map((project) =>
+		webHostOf(env, deps)({ method: "TOUCH", owner, project, hostId: "", path: "" }).catch(() => undefined))).then(() => undefined);
+	// WHY never awaited: a folder's queue may be busy with the very write this measurement admits
+	if (deps.waitUntil) deps.waitUntil(work);
+	else void work;
 }
 
 /** Before a read: the folder's web host settles any change a crash or a failed undo left journalled, so a reader
  *  (a page, a machine's pull through /fs/) never waits for another write to see the file again (review r2 #2). A
  *  folder that cannot be settled yet is a 503 recovering, never a snapshot with the file missing (review r3 #4). */
-async function settledFirst(env: Env, deps: Deps, owner: string, project: string): Promise<Response | null> {
+export async function settledFirst(env: Env, deps: Deps, owner: string, project: string): Promise<Response | null> {
 	const hostId = await deps.store.webHost(owner, project);
 	if (!hostId) return null;
 	const answer = await webHostOf(env, deps)({ method: "SETTLE", owner, project, hostId, path: "" });
@@ -330,27 +347,48 @@ async function me(request: Request, deps: Deps, app: App | null): Promise<Respon
 	});
 }
 
-/** GET /fs/v1/usage: the person's storage against their quota (§3.7), so a page can offer the ways back under
- *  (permanent delete, empty trash) when it is over. `over` is the reason, as read-only keys' Reason says it. */
-async function usage(request: Request, env: Env, deps: Deps, app: App | null): Promise<Response> {
-	const who = await session(request, deps, app);
-	if (!who) return fail(401, "signed_out", "not signed in");
+/** A person's storage against their quota (§3.7), split into live and history (PEP 0007 §3.5: history counts
+ *  _history/, _changes/, _requests/ and legacy _trash/, and used = live + history). */
+export async function usageFigure(env: Env, deps: Deps, owner: string): Promise<{ used: Amount; live: Amount; history: Amount; quota: Amount; over: string | null; partial: boolean }> {
 	const quota = quotaOf(env);
-	const root = userRoot(who.person.userId);
+	const root = userRoot(owner);
 	const bucket = await bucketFor(env, deps, root, "object-read-only", READ_TTL_S);
-	let used: { bytes: number; objects: number; partial?: boolean };
+	let used: { bytes: number; objects: number; partial?: boolean; history?: Amount };
 	let over: string | null;
+	const seen = new Set<string>();
 	try {
-		used = await usageOf(deps.store, who.person.userId, quota, deps.now(), () => bucket.measure(root, { bytes: quota.bytes, objects: quota.objects }));
+		used = await usageOf(deps.store, owner, quota, deps.now(), () => bucket.measure(root, { bytes: quota.bytes, objects: quota.objects }, seen));
 		over = overQuota(used, quota);
 	} catch (error) {
 		if (!(error instanceof Measuring)) throw error;
-		const known = await deps.store.usage(who.person.userId);
+		const known = await deps.store.usage(owner);
 		used = known ?? { bytes: 0, objects: 0 };
 		over = error instanceof TooOld ? error.message : null;
 	}
+	await wake(env, deps, owner, seen);
+	// WHY clamped: history is charged with the totals, so it never passes them; a figure read mid-update still never shows
+	// a negative live share
+	const history = { bytes: Math.min(used.history?.bytes ?? 0, used.bytes), objects: Math.min(used.history?.objects ?? 0, used.objects) };
+	return {
+		used: { bytes: used.bytes, objects: used.objects },
+		live: { bytes: used.bytes - history.bytes, objects: used.objects - history.objects },
+		history,
+		quota: { bytes: quota.bytes, objects: quota.objects },
+		over,
+		partial: !!used.partial,
+	};
+}
+
+type Amount = { bytes: number; objects: number };
+
+/** GET /fs/v1/usage: the person's storage against their quota (§3.7), so a page can offer the ways back under
+ *  (permanent delete, free up space) when it is over. `over` is the reason, as read-only keys' Reason says it. */
+async function usage(request: Request, env: Env, deps: Deps, app: App | null): Promise<Response> {
+	const who = await session(request, deps, app);
+	if (!who) return fail(401, "signed_out", "not signed in");
+	const figure = await usageFigure(env, deps, who.person.userId);
 	// owner: whose figures these are (review r5 #1), so a page drops an answer for someone who signed in meanwhile
-	return json(200, { owner: who.person.userId, used: { bytes: used.bytes, objects: used.objects }, quota: { bytes: quota.bytes, objects: quota.objects }, over, partial: !!used.partial });
+	return json(200, { owner: who.person.userId, ...figure });
 }
 
 async function signOut(request: Request, env: Env, deps: Deps, app: App | null): Promise<Response> {
@@ -527,7 +565,7 @@ async function file(request: Request, env: Env, deps: Deps, app: App | null, pro
  *  operation runs with its own request's Env (a test's quota). */
 const localHosts = new WeakMap<Deps, (op: WebOp, env: Env) => Promise<WebAnswer>>();
 
-function webHostOf(env: Env, deps: Deps): (op: WebOp) => Promise<WebAnswer> {
+export function webHostOf(env: Env, deps: Deps): (op: WebOp) => Promise<WebAnswer> {
 	if (deps.webHost) return (op) => deps.webHost!(op);
 	let local = localHosts.get(deps);
 	if (!local) {
@@ -538,6 +576,8 @@ function webHostOf(env: Env, deps: Deps): (op: WebOp) => Promise<WebAnswer> {
 }
 
 async function web(request: Request, env: Env, deps: Deps, app: App | null, project: string, rest: string[], method: string): Promise<Response> {
+	// up_ms (PEP 0007, CONTRACT "Sync times"): for the web host, from the Worker receiving the write to its manifest
+	const receivedAt = deps.now();
 	const who = await writer(request, deps, app);
 	if (who instanceof Response) return who;
 	const path = filePath(rest);
@@ -556,12 +596,12 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 		// WHY again after the body (judge r2 #5): a slow upload can outlast a revoke; it writes nothing then
 		if (!(await stillSignedIn(deps, who.person))) return fail(401, "signed_out", "this device was signed out while it sent this file");
 		const hostId = await deps.store.ensureWebHost(owner, project, deps.uuid(), new Date(deps.now()).toISOString());
-		op = { method: "PUT", owner, project, hostId, path, data, keepNewest, tiePrefers, sessionId: who.person.sessionId };
+		op = { method: "PUT", owner, project, hostId, path, data, keepNewest, tiePrefers, sessionId: who.person.sessionId, via: browserOf(request, who.via), receivedAt };
 	} else {
 		const hostId = await deps.store.webHost(owner, project);
 		if (!hostId) return fail(404, "not_found", "this folder has no web host yet");
 		// ?permanent=1: no trash copy, the usage lowered at once (review r3 #3: how a person gets under their quota)
-		op = { method: "DELETE", owner, project, hostId, path, permanent: new URL(request.url).searchParams.get("permanent") === "1", sessionId: who.person.sessionId };
+		op = { method: "DELETE", owner, project, hostId, path, permanent: new URL(request.url).searchParams.get("permanent") === "1", sessionId: who.person.sessionId, via: browserOf(request, who.via), receivedAt };
 	}
 	// WHY through the folder's queue: one writer per web host, so no two writes interleave their file and manifest
 	// steps (review r1 #3)
@@ -914,6 +954,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 		return json(200, { email, code: deps.mailbox(email) });
 	}
 	if (first === "site" && rest.length === 1) return read ? site(env, rest[0], head) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (first === "ui") return read ? ui(env, rest, head) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if ((first === "signin" || first === "device") && rest.length === 0) {
 		if (!read) return fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 		if (!app) return fail(404, "unknown_origin", "this origin is not a registered app: no sign-in here");
@@ -954,5 +995,12 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 	if (sub === "hosts" && more.length === 2 && more[1] === "delete") {
 		return method === "POST" ? machineDelete(request, env, deps, app, project, more[0]) : fail(405, "method", "POST only", { Allow: "POST" });
 	}
+	// the sync view's data API (PEP 0007, docs/API.md)
+	if (sub === "status" && more.length === 0) return read ? status(request, env, deps, app, project) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (sub === "activity" && more.length === 0) return read ? activityRoute(request, env, deps, app, project) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (sub === "deleted" && more.length === 0) return read ? deleted(request, env, deps, app, project) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (sub === "restore" && more.length === 0) return method === "POST" ? restore(request, env, deps, app, project) : fail(405, "method", "POST only", { Allow: "POST" });
+	if (sub === "history" && more.length === 1 && more[0] === "purge") return method === "POST" ? purge(request, env, deps, app, project) : fail(405, "method", "POST only", { Allow: "POST" });
+	if (sub === "history" && more.length >= 2) return read ? history(request, env, deps, app, project, more[0], more.slice(1), head) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	return fail(404, "not_found", "no such route");
 }

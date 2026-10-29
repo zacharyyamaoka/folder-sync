@@ -1,0 +1,464 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folder-sync.invalid/schema/folder-sync-event-1.json",
+  "title": "folder-sync activity event, version 1",
+  "description": "One line of `sync --events` (stdout), of a folder's local log (~/.folder-sync/projects/<key>/log/<YYYY-MM-DD>.jsonl), and one item of a change record's events. The desktop app's events (watching, round_start, round, hub, stopped; cmd/folder-sync/events.go) are unchanged; PEP 0007 adds the file events, with each sync's time (up_ms, down_ms). New optional fields keep /1; readers ignore event names and fields they do not know. See docs/CONTRACT.md, 'The activity log'.",
+  "type": "object",
+  "required": [
+    "schema",
+    "event",
+    "at"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {
+      "const": "folder-sync-event/1"
+    },
+    "event": {
+      "type": "string",
+      "minLength": 1
+    },
+    "at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "level": {
+      "enum": [
+        "info",
+        "warn",
+        "error"
+      ]
+    },
+    "folder": {
+      "type": "string"
+    },
+    "project": {
+      "$ref": "#/$defs/project"
+    },
+    "host": {
+      "$ref": "#/$defs/host_id"
+    },
+    "host_name": {
+      "type": "string"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "watcher": {
+      "type": "boolean"
+    },
+    "hub": {
+      "enum": [
+        "on",
+        "off",
+        "connected",
+        "closed"
+      ]
+    },
+    "source": {
+      "type": "string"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "uploaded": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "deleted": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "fetched": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "peers": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "kind": {
+      "enum": [
+        "signed_out",
+        "over_quota",
+        "offline",
+        "error"
+      ]
+    },
+    "why": {
+      "type": "string"
+    },
+    "path": {
+      "$ref": "#/$defs/path"
+    },
+    "size": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "op": {
+      "enum": [
+        "add",
+        "edit"
+      ]
+    },
+    "was": {
+      "$ref": "#/$defs/was"
+    },
+    "permanent": {
+      "type": "boolean"
+    },
+    "from": {
+      "$ref": "history.schema.json#/$defs/version_id"
+    },
+    "request": {
+      "$ref": "#/$defs/uuid"
+    },
+    "error": {
+      "enum": [
+        "pruned",
+        "mismatch",
+        "failed"
+      ]
+    },
+    "peer": {
+      "$ref": "#/$defs/host_id"
+    },
+    "peer_name": {
+      "type": "string"
+    },
+    "kept_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "up_ms": {
+      "description": "upload / delete: milliseconds from the change on disk to the manifest that published it (the change record's at), both on this machine's clock: disk to online. Absent when the writer did not see when the change happened (no watcher event, and an mtime from before its previous round); for the web host, from the Worker receiving the write.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "down_ms": {
+      "description": "download / remove_copy: milliseconds from the peer's manifest generated_at (the change being online) to the file written (or removed) on this disk: online to disk. The peer's clock against this one's (the Worker's for the web host), so it includes their difference and may even be negative; shown as measured, never clamped.",
+      "type": "integer"
+    },
+    "peer_seq": {
+      "description": "download / remove_copy: the peer manifest version this applied.",
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "upload"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "path",
+          "size",
+          "sha256",
+          "op"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "upload"
+          },
+          "op": {
+            "const": "edit"
+          }
+        },
+        "required": [
+          "op"
+        ]
+      },
+      "then": {
+        "required": [
+          "was"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "delete"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "path",
+          "was"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "restore"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "path",
+          "from"
+        ],
+        "if": {
+          "required": [
+            "error"
+          ]
+        },
+        "then": {
+          "properties": {
+            "level": {
+              "const": "error"
+            }
+          },
+          "required": [
+            "level"
+          ]
+        },
+        "else": {
+          "required": [
+            "size",
+            "sha256"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "enum": [
+              "download",
+              "remove_copy"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "peer",
+          "path"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "skip"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "path",
+          "why",
+          "level"
+        ],
+        "properties": {
+          "level": {
+            "const": "warn"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "conflict"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "peer",
+          "path",
+          "kept_at",
+          "level"
+        ],
+        "properties": {
+          "level": {
+            "const": "warn"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "hold"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "why",
+          "count",
+          "level"
+        ],
+        "properties": {
+          "why": {
+            "enum": [
+              "max_delete",
+              "over_quota",
+              "unmounted"
+            ]
+          },
+          "level": {
+            "const": "warn"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "truncated"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "level"
+        ],
+        "properties": {
+          "level": {
+            "const": "warn"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "project": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$"
+    },
+    "host_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "path": {
+      "description": "A published path, as in the manifest: slash-separated, relative to hosts/<host-id>/.",
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "anyOf": [
+          {
+            "pattern": "^/"
+          },
+          {
+            "pattern": "\\\\"
+          },
+          {
+            "pattern": "(^|/)\\.{1,2}(/|$)"
+          },
+          {
+            "pattern": "//"
+          },
+          {
+            "pattern": "/$"
+          },
+          {
+            "pattern": ":"
+          }
+        ]
+      }
+    },
+    "was": {
+      "description": "The version that left the folder, and where it went. kept is its version id under _history/, or null when it was not kept; why then says which rule.",
+      "type": "object",
+      "required": [
+        "sha256",
+        "size",
+        "written_at",
+        "kept"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "written_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kept": {
+          "anyOf": [
+            {
+              "$ref": "history.schema.json#/$defs/version_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "why": {
+          "enum": [
+            "burst",
+            "no_history",
+            "key_too_long",
+            "permanent"
+          ]
+        }
+      },
+      "if": {
+        "properties": {
+          "kept": {
+            "type": "null"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "why"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "why"
+          ]
+        }
+      }
+    }
+  }
+}

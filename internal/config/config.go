@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"folder-sync/internal/ignore"
 )
 
 // FileName is the project config's name, at the root of the synced folder.
@@ -43,6 +45,7 @@ type Config struct {
 	Interval  string            `toml:"interval"`
 	MaxDelete int               `toml:"max_delete"`
 	Ignore    []string          `toml:"ignore"`
+	NoHistory []string          `toml:"no_history"`
 	Modes     map[string]string `toml:"modes"`
 	Viewer    Viewer            `toml:"viewer"`
 }
@@ -54,6 +57,11 @@ const (
 	DefaultInterval  = "10s"
 	DefaultMaxDelete = 50
 )
+
+// DefaultNoHistory is no_history when .folder-sync.toml does not set it: paths whose replaced or deleted versions are
+// never kept in _history/ (docs/peps/0007 §3.2). WHY *.log (Zach, 2026-10-28, PEP 0007 §10.6): an appended log copied
+// whole on every round is the fastest way to fill a quota, and each old version is only the start of the current one.
+var DefaultNoHistory = []string{"*.log"}
 
 var projectName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 var bucketName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
@@ -106,6 +114,7 @@ func New(project, bucket string) Config {
 		Interval:  DefaultInterval,
 		MaxDelete: DefaultMaxDelete,
 		Ignore:    []string{},
+		NoHistory: append([]string{}, DefaultNoHistory...),
 		Modes:     map[string]string{},
 	}
 }
@@ -133,6 +142,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxDelete <= 0 {
 		c.MaxDelete = DefaultMaxDelete
+	}
+	if _, err := ignore.Parse(c.NoHistory); err != nil {
+		return fmt.Errorf("no_history: %w", err)
 	}
 	subfolders := make([]string, 0, len(c.Modes))
 	for subfolder := range c.Modes {
@@ -187,6 +199,12 @@ func Load(folder string) (Config, error) {
 	if c.Modes == nil {
 		c.Modes = map[string]string{}
 	}
+	// WHY IsDefined and not nil: `no_history = []` keeps every version, *.log included; only an absent key means the default
+	if !meta.IsDefined("no_history") {
+		c.NoHistory = append([]string{}, DefaultNoHistory...)
+	} else if c.NoHistory == nil {
+		c.NoHistory = []string{}
+	}
 	if err := c.Validate(); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
@@ -226,6 +244,15 @@ func Render(c Config) string {
 	b.WriteString("# gitignore syntax, added to the defaults: .git/ node_modules/ .env *.pem id_* *.key\n")
 	b.WriteString("ignore = [")
 	for i, rule := range c.Ignore {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%q", rule)
+	}
+	b.WriteString("]\n")
+	b.WriteString("# gitignore syntax: files whose replaced or deleted versions are never kept in the bucket's history.\n")
+	b.WriteString("no_history = [")
+	for i, rule := range c.NoHistory {
 		if i > 0 {
 			b.WriteString(", ")
 		}

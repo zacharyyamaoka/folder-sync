@@ -1,0 +1,33 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "a deleted file's versions: live is null",
+  "servers": [
+    "worker",
+    "serve"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/folders/notes/history/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/old-ideas.md",
+    "auth": "owner"
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+      "host_name": "bam-GPU",
+      "path": "notes/old-ideas.md",
+      "live": null,
+      "versions": [
+        {
+          "id": "2026-10-21T09:12:44.500Z_5555666677778888",
+          "written_at": "2026-10-21T09:12:44.500Z",
+          "sha16": "5555666677778888",
+          "left_at": "2026-10-28T20:41:00.420Z",
+          "size": 5121
+        }
+      ],
+      "more": false
+    }
+  },
+  "body_schema": "history"
+}

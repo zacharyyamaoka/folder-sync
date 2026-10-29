@@ -1,0 +1,20 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "a reader asks for history: the same 404 as an unknown folder",
+  "servers": [
+    "worker"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/folders/notes/history/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md?owner=AbC123zz9yX8",
+    "auth": "reader"
+  },
+  "response": {
+    "status": 404,
+    "body": {
+      "error": "not_found",
+      "why": "No such folder."
+    }
+  },
+  "body_schema": "error"
+}

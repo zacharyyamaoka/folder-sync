@@ -1,0 +1,462 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folder-sync.invalid/schema/folder-sync-view-api-1.json",
+  "title": "folder-sync view API, version 1",
+  "description": "The JSON bodies of /fs/v1/folders/:project/{status,activity,history,deleted,restore,history/purge}, answered by the accounts Worker online and by `folder-sync serve` on a machine, and the shared fixture format both servers and <folder-sync-status> test against (testdata/view-api/). The top level is one fixture. See docs/API.md.",
+  "$ref": "#/$defs/fixture",
+  "$defs": {
+    "fixture": {
+      "description": "One request and its answer. body_schema (and request_schema, when the request has a body) name a $def of this file. servers says which servers must answer exactly this; a server's test sends `request` against its own state built from the fixture's `given` (free-form, read by each server's test harness) and compares the answer's status and body.",
+      "type": "object",
+      "required": ["fixture", "name", "servers", "request", "response", "body_schema"],
+      "additionalProperties": false,
+      "properties": {
+        "fixture": { "const": "folder-sync-view-fixture/1" },
+        "name": { "type": "string", "minLength": 1 },
+        "servers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["worker", "serve"] }
+        },
+        "given": { "type": "object" },
+        "request": {
+          "type": "object",
+          "required": ["method", "path"],
+          "additionalProperties": false,
+          "properties": {
+            "method": { "enum": ["GET", "POST"] },
+            "path": { "type": "string", "pattern": "^/fs/" },
+            "auth": {
+              "description": "owner: the folder's owner (Worker: cookie or bearer; serve: the token); reader / public: Worker only; none: no credential; bad_host: serve, a Host other than its own loopback address.",
+              "enum": ["owner", "reader", "public", "none", "bad_host"]
+            },
+            "body": {}
+          }
+        },
+        "request_schema": { "enum": ["restore_request", "purge_request"] },
+        "response": {
+          "type": "object",
+          "required": ["status", "body"],
+          "additionalProperties": false,
+          "properties": {
+            "status": { "type": "integer", "minimum": 200, "maximum": 599 },
+            "body": {}
+          }
+        },
+        "body_schema": {
+          "enum": ["error", "status", "activity", "history", "deleted", "restore_response", "purge_response", "usage", "folders"]
+        }
+      }
+    },
+    "error": {
+      "description": "Every non-2xx answer, as PEP 0003 §3.3: { error: <code>, why: <sentence> }.",
+      "type": "object",
+      "required": ["error", "why"],
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "enum": [
+            "bad_request", "bad_project", "bad_path", "bad_host", "bad_version", "signed_out", "no_token", "wrong_host",
+            "csrf", "wrong_user", "not_found", "pruned", "ambiguous_folder", "online_only", "over_quota", "too_large",
+            "json_only", "method", "recovering"
+          ]
+        },
+        "why": { "type": "string", "minLength": 1 }
+      }
+    },
+    "state": {
+      "description": "One headline state. synced: nothing pending; syncing: a round is running or a change is waiting for one; offline: storage or the account server does not answer (never red); attention: something the person can act on (amber; warnings say what); error: sync stopped by a fault that is not the person's and not the network (red); unknown: never observed (a host that has published nothing, or no round yet on this machine).",
+      "enum": ["synced", "syncing", "offline", "attention", "error", "unknown"]
+    },
+    "device": {
+      "type": "object",
+      "required": ["id", "name", "kind", "seq", "last_change"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "event.schema.json#/$defs/host_id" },
+        "name": { "type": "string" },
+        "kind": { "enum": ["machine", "web"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "last_change": {
+          "description": "Its manifest's generated_at; null when it has none.",
+          "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+        },
+        "this_device": {
+          "description": "serve only: true on the machine answering.",
+          "type": "boolean"
+        }
+      }
+    },
+    "warning": {
+      "type": "object",
+      "required": ["kind", "level", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": ["signed_out", "over_quota", "held_deletes", "skipped", "conflict", "unmounted", "failing", "waiting_restore"]
+        },
+        "level": { "enum": ["warn", "error"] },
+        "text": {
+          "description": "One sentence that says what to do, never a key or a token.",
+          "type": "string",
+          "minLength": 1
+        },
+        "host": { "$ref": "event.schema.json#/$defs/host_id" },
+        "path": { "$ref": "event.schema.json#/$defs/path" },
+        "count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "amount": {
+      "type": "object",
+      "required": ["bytes", "objects"],
+      "additionalProperties": false,
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 0 },
+        "objects": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "storage": {
+      "description": "The person's whole root, as GET /fs/v1/usage measures it. used = live + history. history counts _history/, _changes/, _requests/ and legacy _trash/.",
+      "type": "object",
+      "required": ["used", "live", "history", "quota", "over", "partial"],
+      "additionalProperties": false,
+      "properties": {
+        "used": { "$ref": "#/$defs/amount" },
+        "live": { "$ref": "#/$defs/amount" },
+        "history": { "$ref": "#/$defs/amount" },
+        "quota": { "$ref": "#/$defs/amount" },
+        "over": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "partial": { "type": "boolean" },
+        "measured_at": {
+          "description": "serve only: when the figure it shows was measured online.",
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "waiting": {
+      "description": "A restore request its host has not answered yet.",
+      "type": "object",
+      "required": ["request", "host", "host_name", "at", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "request": { "$ref": "event.schema.json#/$defs/uuid" },
+        "host": { "$ref": "event.schema.json#/$defs/host_id" },
+        "host_name": { "type": "string" },
+        "at": { "type": "string", "format": "date-time" },
+        "items": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "status": {
+      "description": "GET …/status. role says how much the caller sees: readers and the public get project, owner, role, state, headline and devices only.",
+      "type": "object",
+      "required": ["project", "owner", "role", "state", "headline", "devices"],
+      "additionalProperties": false,
+      "properties": {
+        "project": { "$ref": "event.schema.json#/$defs/project" },
+        "owner": {
+          "type": "object",
+          "required": ["id"],
+          "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "email": { "type": "string" }
+          }
+        },
+        "role": { "enum": ["owner", "reader", "public"] },
+        "state": { "$ref": "#/$defs/state" },
+        "headline": { "type": "string", "minLength": 1 },
+        "devices": { "type": "array", "items": { "$ref": "#/$defs/device" } },
+        "this_device": {
+          "description": "serve only: this machine's engine for this folder.",
+          "type": "object",
+          "required": ["id", "name", "folder", "state", "engine", "last_round"],
+          "additionalProperties": false,
+          "properties": {
+            "id": { "$ref": "event.schema.json#/$defs/host_id" },
+            "name": { "type": "string" },
+            "folder": { "type": "string", "minLength": 1 },
+            "state": { "$ref": "#/$defs/state" },
+            "engine": {
+              "description": "watching: a sync --watch holds the folder lock; idle: nothing holds it (vt's sync --once between passes, or no engine).",
+              "enum": ["watching", "idle"]
+            },
+            "last_round": {
+              "anyOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "required": ["at", "ok"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "at": { "type": "string", "format": "date-time" },
+                    "ok": { "type": "boolean" },
+                    "kind": { "enum": ["signed_out", "over_quota", "offline", "error"] },
+                    "why": { "type": "string" }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "warnings": { "type": "array", "items": { "$ref": "#/$defs/warning" } },
+        "waiting": { "type": "array", "items": { "$ref": "#/$defs/waiting" } },
+        "storage": { "anyOf": [{ "$ref": "#/$defs/storage" }, { "type": "null" }] }
+      },
+      "if": { "properties": { "role": { "const": "owner" } } },
+      "then": { "required": ["warnings", "waiting", "storage"] },
+      "else": {
+        "not": {
+          "anyOf": [
+            { "required": ["warnings"] },
+            { "required": ["waiting"] },
+            { "required": ["storage"] },
+            { "required": ["this_device"] }
+          ]
+        }
+      }
+    },
+    "activity": {
+      "description": "GET …/activity?before=<cursor>&limit=<1..500, default 200>&level=<warn|error>&host=<id>. Newest first. Every event carries host and host_name. Online: each host's published upload/delete/restore events (from its change records, with seq). serve: this machine's whole local log, plus the others' published events. next is the cursor for the page before this one, or null at the end.",
+      "type": "object",
+      "required": ["events", "next"],
+      "additionalProperties": false,
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "allOf": [{ "$ref": "event.schema.json" }, { "required": ["host", "host_name"] }]
+          }
+        },
+        "next": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] }
+      }
+    },
+    "kept_version": {
+      "type": "object",
+      "required": ["id", "left_at", "size"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "history.schema.json#/$defs/version_id" },
+        "written_at": { "type": "string", "format": "date-time" },
+        "sha16": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "unlisted": { "type": "boolean" },
+        "left_at": { "type": "string", "format": "date-time" },
+        "size": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "history": {
+      "description": "GET …/history/:host/<path>: the live entry (null when the path is deleted) and every kept version, newest first. With ?version=<id> the answer is the version's bytes instead (not JSON), typed by suffix as the files route is, with X-Folder-Sync-Version: <id>.",
+      "type": "object",
+      "required": ["host", "host_name", "path", "live", "versions", "more"],
+      "additionalProperties": false,
+      "properties": {
+        "host": { "$ref": "event.schema.json#/$defs/host_id" },
+        "host_name": { "type": "string" },
+        "path": { "$ref": "event.schema.json#/$defs/path" },
+        "live": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["size", "sha256", "written_at"],
+              "additionalProperties": false,
+              "properties": {
+                "size": { "type": "integer", "minimum": 0 },
+                "sha256": { "$ref": "event.schema.json#/$defs/sha256" },
+                "written_at": { "type": "string", "format": "date-time" }
+              }
+            }
+          ]
+        },
+        "versions": { "type": "array", "items": { "$ref": "#/$defs/kept_version" } },
+        "more": {
+          "description": "true when the path has more than 1,000 kept versions and only the newest 1,000 are listed.",
+          "type": "boolean"
+        }
+      }
+    },
+    "deleted": {
+      "description": "GET …/deleted[?host=<id>]: every path with a kept version and no live manifest entry, newest deletion first. version is the newest kept version (the one to restore); deleted_at is its left_at.",
+      "type": "object",
+      "required": ["files", "more"],
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["host", "host_name", "path", "deleted_at", "size", "version"],
+            "additionalProperties": false,
+            "properties": {
+              "host": { "$ref": "event.schema.json#/$defs/host_id" },
+              "host_name": { "type": "string" },
+              "path": { "$ref": "event.schema.json#/$defs/path" },
+              "deleted_at": { "type": "string", "format": "date-time" },
+              "size": { "type": "integer", "minimum": 0 },
+              "version": { "$ref": "history.schema.json#/$defs/version_id" }
+            }
+          }
+        },
+        "more": {
+          "description": "true when a host's history holds more than one listing can cover (10,000 versions per call) and this answer stops early.",
+          "type": "boolean"
+        }
+      }
+    },
+    "restore_request": {
+      "description": "POST …/restore: up to 1,000 items, any hosts.",
+      "type": "object",
+      "required": ["items"],
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "required": ["host", "path", "version"],
+            "additionalProperties": false,
+            "properties": {
+              "host": { "$ref": "event.schema.json#/$defs/host_id" },
+              "path": { "$ref": "event.schema.json#/$defs/path" },
+              "version": { "$ref": "history.schema.json#/$defs/version_id" }
+            }
+          }
+        }
+      }
+    },
+    "restore_response": {
+      "description": "applied: written now as a new version (online: the web host's items; serve: none, since the engine writes). requested: one restore request per other host, applied when that host next syncs. failed: items refused before anything was written.",
+      "type": "object",
+      "required": ["applied", "requested", "failed"],
+      "additionalProperties": false,
+      "properties": {
+        "applied": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["host", "path", "version", "seq"],
+            "additionalProperties": false,
+            "properties": {
+              "host": { "$ref": "event.schema.json#/$defs/host_id" },
+              "path": { "$ref": "event.schema.json#/$defs/path" },
+              "version": { "$ref": "history.schema.json#/$defs/version_id" },
+              "seq": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "requested": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["host", "host_name", "request", "items", "where"],
+            "additionalProperties": false,
+            "properties": {
+              "host": { "$ref": "event.schema.json#/$defs/host_id" },
+              "host_name": { "type": "string" },
+              "request": { "$ref": "event.schema.json#/$defs/uuid" },
+              "items": { "type": "integer", "minimum": 1 },
+              "where": {
+                "description": "bucket: <root>_requests/…; local: this machine's own state directory (serve, for its own files).",
+                "enum": ["bucket", "local"]
+              }
+            }
+          }
+        },
+        "failed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["host", "path", "version", "error"],
+            "additionalProperties": false,
+            "properties": {
+              "host": { "$ref": "event.schema.json#/$defs/host_id" },
+              "path": { "$ref": "event.schema.json#/$defs/path" },
+              "version": { "$ref": "history.schema.json#/$defs/version_id" },
+              "error": { "enum": ["pruned", "mismatch", "not_found", "over_quota", "failed"] }
+            }
+          }
+        }
+      }
+    },
+    "purge_request": {
+      "description": "POST …/history/purge (online only). Either older_than_days (with an optional host and path) or one version (with its host and path).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "older_than_days": { "type": "integer", "minimum": 0, "maximum": 30 },
+        "host": { "$ref": "event.schema.json#/$defs/host_id" },
+        "path": { "$ref": "event.schema.json#/$defs/path" },
+        "version": { "$ref": "history.schema.json#/$defs/version_id" }
+      },
+      "oneOf": [
+        { "required": ["older_than_days"], "not": { "required": ["version"] } },
+        { "required": ["version", "host", "path"], "not": { "required": ["older_than_days"] } }
+      ]
+    },
+    "purge_response": {
+      "description": "As web-trash/purge (PEP 0003 §3.3): up to 1,000 objects a call, the usage lowered by each; more: call again.",
+      "type": "object",
+      "required": ["purged", "bytes", "more"],
+      "additionalProperties": false,
+      "properties": {
+        "purged": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "more": { "type": "boolean" }
+      }
+    },
+    "usage": {
+      "description": "GET /fs/v1/usage (PEP 0003 §3.3), with live and history added.",
+      "type": "object",
+      "required": ["owner", "used", "live", "history", "quota", "over", "partial"],
+      "additionalProperties": false,
+      "properties": {
+        "owner": { "type": "string", "minLength": 1 },
+        "used": { "$ref": "#/$defs/amount" },
+        "live": { "$ref": "#/$defs/amount" },
+        "history": { "$ref": "#/$defs/amount" },
+        "quota": { "$ref": "#/$defs/amount" },
+        "over": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "partial": { "type": "boolean" }
+      }
+    },
+    "folders": {
+      "description": "GET /fs/v1/folders. Online it is PEP 0003's answer. serve answers the same shape for the folders this machine syncs (readable is always [] there), with folder set: the element on serve's own page lists these.",
+      "type": "object",
+      "required": ["folders", "readable"],
+      "additionalProperties": false,
+      "properties": {
+        "folders": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["project"],
+            "additionalProperties": true,
+            "properties": {
+              "project": { "$ref": "event.schema.json#/$defs/project" },
+              "visibility": { "enum": ["public", "private"] },
+              "hosts": { "type": "integer", "minimum": 0 },
+              "folder": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "readable": { "type": "array" }
+      }
+    },
+    "serve_json": {
+      "description": "~/.folder-sync/serve.json, mode 0600, written by `folder-sync serve` once it listens and removed when it stops. An app on the machine reads it to forward /fs/* with the token.",
+      "type": "object",
+      "required": ["schema", "url", "port", "token", "pid"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "folder-sync-serve/1" },
+        "url": { "type": "string", "pattern": "^http://127\\.0\\.0\\.1:[0-9]{1,5}/$" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "token": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+        "pid": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

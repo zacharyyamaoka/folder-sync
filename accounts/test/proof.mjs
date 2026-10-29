@@ -14,7 +14,8 @@
 // - a file written on disk is listed by /fs/v1/folders/robotparts and returned by its bundle;
 // - another person cannot read the first one's folder (404), signed out is 401, public is readable signed out;
 // - a cookie write without X-Folder-Sync: 1 is refused, a cookie never gets storage keys;
-// - the web host's delete goes to _trash/ and leaves every machine; every request the stand-in let through used a
+// - the web host's delete goes to _history/ (PEP 0007), with its change record, and leaves every machine; the sync
+//   view's status, activity, history and deleted files answer for it; every request the stand-in let through used a
 //   short-lived key inside its own root;
 // - over quota (the stack restarted with QUOTA_BYTES=1): read-only keys that say why; a round holds its upload, deletes
 //   through the Worker (permanently: no trash copy, the usage goes down) and still pulls; back under, the upload goes;
@@ -298,11 +299,27 @@ async function run(stack, cli) {
 	const revoked = await a.write(`/fs/v1/folders/${PROJECT}/readers/${encodeURIComponent(PEOPLE.B)}`, { method: "DELETE" });
 	check("A revokes B: 404 again", revoked.status === 200 && (await b.fetch(`/fs/v1/folders/${PROJECT}?${ownerQ}`)).status === 404);
 
-	// 9. the web host's delete: _trash/, and it leaves the machine
+	// 9. the web host's delete: _history/ (PEP 0007), and it leaves the machine
 	const del = await a.write(`/fs/v1/folders/${PROJECT}/web/saved/x.json`, { method: "DELETE" });
 	const delBody = del.ok ? await del.json() : null;
-	const trash = walk(join(STATE, "s3", stack.bucket, root, "_trash", PROJECT, webHost || "none")).filter((p) => p.endsWith(join("saved", "x.json")));
-	check("DELETE …/web/saved/x.json moves it to _trash/<project>/<web host>/<stamp>/ (seq 2)", del.status === 200 && delBody?.seq === 2 && trash.length === 1 && readFileSync(trash[0], "utf8") === xText, { status: del.status, trash: trash.map((p) => p.slice(p.indexOf("_trash"))) });
+	const kept = walk(join(STATE, "s3", stack.bucket, root, "_history", PROJECT, webHost || "none", "saved", "x.json"));
+	check("DELETE …/web/saved/x.json keeps it at _history/<project>/<web host>/saved/x.json/<written_at>_<sha16> (seq 2)", del.status === 200 && delBody?.seq === 2 && kept.length === 1 && readFileSync(kept[0], "utf8") === xText
+		&& /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z_[0-9a-f]{16}$/.test(kept[0]), { status: del.status, kept: kept.map((p) => p.slice(p.indexOf("_history"))) });
+	// the sync view's data API over the real stack (docs/API.md): the folder's object writes the change records once it
+	// has answered, so the activity is read a moment later
+	await sleep(500);
+	const deletedView = await (await a.fetch(`/fs/v1/folders/${PROJECT}/deleted`)).json();
+	check("GET …/deleted lists saved/x.json with the version to restore", deletedView?.files?.some((f) => f.host === webHost && f.path === "saved/x.json" && f.version === kept[0]?.split("/").pop()), deletedView);
+	const activityView = await (await a.fetch(`/fs/v1/folders/${PROJECT}/activity`)).json();
+	check("GET …/activity has the web host's upload and delete from its change records, each with up_ms", ["upload", "delete"].every((e) => activityView?.events?.some((x) => x.host === webHost && x.event === e && x.path === "saved/x.json" && Number.isInteger(x.up_ms))), activityView?.events?.map((e) => `${e.event} ${e.path}`));
+	const statusView = await (await a.fetch(`/fs/v1/folders/${PROJECT}/status`)).json();
+	check("GET …/status: the owner's view, its devices the machine and the web host", statusView?.role === "owner" && statusView?.devices?.some((d) => d.kind === "web" && d.id === webHost) && statusView?.devices?.some((d) => d.kind === "machine" && d.id === hostA), { state: statusView?.state, devices: statusView?.devices?.map((d) => d.kind) });
+	const bStatus = await b.fetch(`/fs/v1/folders/${PROJECT}/history/${webHost}/saved/x.json?${ownerQ}`);
+	check("B asks for A's history: 404, as for an unknown folder", bStatus.status === 404);
+	const element = await fetch(`${site}/fs/ui/v1/folder-sync.js`);
+	const elementText = await element.text();
+	check("GET /fs/ui/v1/folder-sync.js serves ui/v1/folder-sync.js's bytes (through the accounts/site/ui/v1 link) from the Worker's assets, as a module", element.status === 200 && element.headers.get("Content-Type") === "text/javascript; charset=utf-8"
+		&& elementText === readFileSync(join(REPO, "ui", "v1", "folder-sync.js"), "utf8"), { status: element.status, type: element.headers.get("Content-Type"), sha256: createHash("sha256").update(elementText).digest("hex") });
 	const after = fsync(cli, homeA, site, ["sync", "--once", "--dir", folderA]);
 	check("after a sync, the deleted web file is gone from the machine", after.code === 0 && !existsSync(landed));
 
@@ -334,16 +351,21 @@ async function run(stack, cli) {
 	const overRound = fsync(cli, homeA, site, ["sync", "--once", "--dir", folderA]);
 	const overText = overRound.out + overRound.err;
 	check("a round over quota fails naming the quota and its held upload", overRound.code !== 0 && /over its storage quota/.test(overText) && /held/.test(overText), overText.trim().split("\n").slice(-2).join(" · "));
-	check("y.json is deleted through the Worker, permanently: gone from the bucket, no trash copy", !existsSync(machineKey("saved/y.json")) && trashOf().length === trashBefore);
+	const historyOfY = () => walk(join(STATE, "s3", stack.bucket, root, "_history", PROJECT, hostA, "saved", "y.json"));
+	check("y.json is deleted through the Worker, permanently: gone from the bucket, no trash or history copy", !existsSync(machineKey("saved/y.json")) && trashOf().length === trashBefore && historyOfY().length === 0);
 	check("held.json was not uploaded with read-only keys", !existsSync(machineKey("saved/held.json")));
 	// WHY stale, then measured (review r5 #2): a deletion no longer subtracts from a figure a concurrent measurement may
 	// already have taken it out of; it marks the cached figure an upper bound, and the next request measures again
 	const cachedAfter = usage();
 	const measured = await (await a.fetch("/fs/v1/usage")).json();
 	const usedAfter = measured?.used;
-	check("the deletion marks the cached usage stale, and the next measurement is down by at least y.json",
-		cachedAfter?.stale === 1 && !!usedBefore && !!usedAfter && usedAfter.bytes <= usedBefore.bytes - Buffer.byteLength(yText) && usedAfter.objects === usedBefore.objects - 1,
-		{ before: usedBefore, cached: cachedAfter, measured: usedAfter });
+	// PEP 0007: the delete job writes its change record (_changes/, bytes only toward the quota, never an object), so the
+	// bytes come down by y.json less that record's own bytes
+	const jobRecords = walk(join(STATE, "s3", stack.bucket, root, "_changes", PROJECT, hostA)).map((f) => statSync(f).size);
+	check("the deletion marks the cached usage stale, and the next measurement is down by y.json (its change record aside) and one object",
+		cachedAfter?.stale === 1 && !!usedBefore && !!usedAfter && jobRecords.length === 1 && usedAfter.bytes <= usedBefore.bytes - Buffer.byteLength(yText) + jobRecords[0] && usedAfter.objects === usedBefore.objects - 1
+		&& measured.history?.bytes >= jobRecords[0] && measured.live?.bytes + measured.history?.bytes === usedAfter.bytes,
+		{ before: usedBefore, cached: cachedAfter, measured: usedAfter, records: jobRecords, live: measured?.live, history: measured?.history });
 	check("over quota the round still pulls: the web file it had not seen is on disk", existsSync(join(folderA, "hosts", webHost || "none", "saved", "w.json")) && readFileSync(join(folderA, "hosts", webHost || "none", "saved", "w.json"), "utf8") === wText);
 	dev("down");
 	dev("up");

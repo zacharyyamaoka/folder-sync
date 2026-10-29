@@ -1,0 +1,11 @@
+{
+  "schema": "folder-sync-restore/1",
+  "id": "c4d5e6f7-0819-4a2b-8c3d-4e5f60718293",
+  "project": "notes",
+  "host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+  "at": "2026-10-28T21:02:00.000Z",
+  "by": { "kind": "machine", "name": "bam-GPU", "host": "b55e9683-7854-4121-a56a-9bae7c3ab1da" },
+  "items": [
+    { "path": "notes/laptop-todo.md", "version": "2026-10-27T18:20:00.250Z_e1d2c3b4a5968778" }
+  ]
+}

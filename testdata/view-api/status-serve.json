@@ -1,0 +1,84 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "status on the machine: this device first",
+  "servers": [
+    "serve"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/folders/notes/status",
+    "auth": "owner"
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "project": "notes",
+      "owner": {
+        "id": "AbC123zz9yX8",
+        "email": "zach@example.com"
+      },
+      "role": "owner",
+      "state": "synced",
+      "headline": "Synced",
+      "devices": [
+        {
+          "id": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+          "name": "bam-GPU",
+          "kind": "machine",
+          "seq": 46,
+          "last_change": "2026-10-28T21:10:00.000Z",
+          "this_device": true
+        },
+        {
+          "id": "e2a0b1c2-d3e4-4f50-9a1b-2c3d4e5f6a7b",
+          "name": "web",
+          "kind": "web",
+          "seq": 7,
+          "last_change": "2026-10-28T20:50:00.020Z"
+        },
+        {
+          "id": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+          "name": "bam-laptop",
+          "kind": "machine",
+          "seq": 12,
+          "last_change": "2026-10-22T14:05:00.000Z"
+        }
+      ],
+      "this_device": {
+        "id": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+        "name": "bam-GPU",
+        "folder": "/home/bam/notes",
+        "state": "synced",
+        "engine": "watching",
+        "last_round": {
+          "at": "2026-10-28T21:10:00.000Z",
+          "ok": true
+        }
+      },
+      "warnings": [],
+      "waiting": [],
+      "storage": {
+        "used": {
+          "bytes": 15802467,
+          "objects": 412
+        },
+        "live": {
+          "bytes": 13456789,
+          "objects": 301
+        },
+        "history": {
+          "bytes": 2345678,
+          "objects": 111
+        },
+        "quota": {
+          "bytes": 1073741824,
+          "objects": 100000
+        },
+        "over": null,
+        "partial": false,
+        "measured_at": "2026-10-28T21:05:00.000Z"
+      }
+    }
+  },
+  "body_schema": "status"
+}

@@ -11,6 +11,7 @@ package e2e
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -281,6 +282,35 @@ func writeFile(t *testing.T, path, content string, mtime time.Time) {
 	}
 }
 
+// lockedBuffer collects a running command's output while the test reads it (a bytes.Buffer is not safe for both).
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// waitUntil polls done every 200 ms; past within, it kills cmd and fails with what cmd printed.
+func waitUntil(t *testing.T, cmd *exec.Cmd, out *lockedBuffer, within time.Duration, failure string, done func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(within); !done(); time.Sleep(200 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			cmd.Process.Kill()
+			t.Fatalf("%s:\n%s", failure, out.String())
+		}
+	}
+}
+
 func hostID(t *testing.T, m *machine) string {
 	data, err := os.ReadFile(filepath.Join(m.home, ".folder-sync", "host.json"))
 	if err != nil {
@@ -515,7 +545,7 @@ func TestTwoMachines(t *testing.T) {
 		}
 	})
 
-	t.Run("an overwrite and a delete land in _trash", func(t *testing.T) {
+	t.Run("an overwrite and a delete land in _history", func(t *testing.T) {
 		writeFile(t, filepath.Join(a.folder, "notes", "a.md"), "changed by A\n", time.Time{})
 		os.Remove(filepath.Join(a.folder, "data.json"))
 		out := w.must(a, "sync", "--once")
@@ -523,19 +553,23 @@ func TestTwoMachines(t *testing.T) {
 		if strings.Contains(out, "skipped") {
 			t.Errorf("a round repeats skipped names the last round already reported:\n%s", out)
 		}
-		trash := w.objects("_trash/" + project + "/" + idA)
+		// PEP 0007: the old versions are kept path first, _history/<project>/<host>/<path>/<version>, not in _trash/
+		kept := w.objects("_history/" + project + "/" + idA)
 		var old, deleted string
-		for _, key := range trash {
+		for _, key := range kept {
 			content, _ := w.object(key)
 			switch {
-			case strings.HasSuffix(key, "/notes/a.md"):
+			case strings.Contains(key, "/notes/a.md/"):
 				old = content
-			case strings.HasSuffix(key, "/data.json"):
+			case strings.Contains(key, "/data.json/"):
 				deleted = content
 			}
 		}
 		if old != "hello from A\n" || deleted != `{"x":1}`+"\n" {
-			t.Fatalf("trash holds %q: a.md=%q data.json=%q", trash, old, deleted)
+			t.Fatalf("history holds %q: a.md=%q data.json=%q", kept, old, deleted)
+		}
+		if trash := w.objects("_trash/" + project + "/" + idA); len(trash) != 0 {
+			t.Errorf("a round still writes the legacy _trash/: %q", trash)
 		}
 		if _, ok := w.object(prefixA + "data.json"); ok {
 			t.Error("the deleted object is still live")
@@ -558,26 +592,29 @@ func TestTwoMachines(t *testing.T) {
 		editConfig(t, a, `interval = "10s"`, `interval = "1s"`)
 		cmd := exec.Command(w.bin, "sync", "--watch")
 		cmd.Env, cmd.Dir = a.env, a.folder
-		var buf bytes.Buffer
+		var buf lockedBuffer
 		cmd.Stdout, cmd.Stderr = &buf, &buf
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(1500 * time.Millisecond)
-		writeFile(t, filepath.Join(a.folder, "watched.md"), "seen by --watch\n", time.Time{})
-		deadline := time.Now().Add(15 * time.Second)
-		for {
-			// WHY: the manifest is written after the upload. Stopping between the two leaves A one
-			// manifest PUT behind, which the next test then counts as a change.
-			if manifest, _ := w.object(prefixA + "manifest.json"); strings.Contains(manifest, "watched.md") {
-				break
-			}
-			if time.Now().After(deadline) {
-				cmd.Process.Kill()
-				t.Fatalf("--watch did not upload within 15 s:\n%s", buf.String())
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
+		// WHY wait for the first round, not a fixed 1.5 s: that round is also A's first pull from B (its reconcile
+		// finds B). On a slow machine it listed the folder after the write, uploaded watched.md itself, and the stop
+		// below killed its fetch of b-notes.md; a cut pull is redone by the next round, so the no-change round
+		// fetched it. Written after the first round, the change is picked up by the watch loop itself (the folder
+		// watcher or the timer), on any machine.
+		waitUntil(t, cmd, &buf, 30*time.Second, "--watch's first round did not finish within 30 s", func() bool {
+			return strings.Contains(buf.String(), "(after a full reconcile)")
+		})
+		const watched = "seen by --watch\n"
+		writeFile(t, filepath.Join(a.folder, "watched.md"), watched, time.Time{})
+		sum := sha256.Sum256([]byte(watched))
+		// WHY: the manifest is written after the upload. Stopping between the two leaves A one manifest PUT behind,
+		// which the next test then counts as a change. The sha256, not the name: a round that lists the folder
+		// after the file is created but before its bytes are written publishes an empty watched.md.
+		waitUntil(t, cmd, &buf, 15*time.Second, "--watch did not upload within 15 s", func() bool {
+			manifest, _ := w.object(prefixA + "manifest.json")
+			return strings.Contains(manifest, hex.EncodeToString(sum[:]))
+		})
 		cmd.Process.Signal(syscall.SIGTERM)
 		err := cmd.Wait()
 		if err != nil || !strings.Contains(buf.String(), "Stopped.") {
@@ -662,7 +699,7 @@ func TestTwoMachines(t *testing.T) {
 		}
 		editConfig(t, a, "max_delete = 2", "max_delete = 50")
 		out = w.must(a, "sync", "--once")
-		if !strings.Contains(out, "3 deleted to _trash/") {
+		if !strings.Contains(out, "3 deleted") {
 			t.Fatalf("after raising max_delete: %s", out)
 		}
 		w.ops.take()

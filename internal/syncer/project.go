@@ -120,6 +120,12 @@ type Project struct {
 
 	// reportedSkips are the names last round already reported, so --watch says each once.
 	reportedSkips map[string]bool
+	// prevRoundStart is when the previous round started: a file whose mtime is later changed since (up_ms).
+	prevRoundStart time.Time
+	// restoring is the paths a restore wrote back this round (their push publishes restore events).
+	restoring map[string]restoreMark
+	// behind is set by a pull that did not apply a peer's latest manifest (this round is not "synced").
+	behind bool
 }
 
 // Open loads everything a round needs for the folder.
