@@ -51,8 +51,8 @@ public), each with what their role may see.
 ## Routes
 
 `…` is `/fs/v1/folders/:project`. `:project`, `:host` and `<path>` follow the contract's rules (else `400`
-`bad_project`, `bad_host`, `bad_path`). On the machine, when two folders sync one project, `?folder=<path>` picks one,
-else `409 ambiguous_folder`.
+`bad_project`, `bad_host`, `bad_path`). On the machine, when two folders sync one project, `?folder=<path>` picks one
+(the element's `folder` attribute), else `409 ambiguous_folder`.
 
 | Route | Body (`$defs/…`) | Worker | serve |
 |---|---|---|---|
@@ -149,6 +149,8 @@ many at once.
 - **Attributes:**
   - `project` (required): the folder.
   - `owner` (optional): the owner's id, for a folder someone shared with you (sent as `?owner=`).
+  - `folder` (optional): on a machine, the folder's path, for a project two folders on it sync (sent as `?folder=`,
+    so the machine never answers `409 ambiguous_folder`; `serve`'s `/fs/` page sets it on each element).
   - `base` (optional, default `/fs`): where the app mounts folder-sync.
   - `view` (optional): `activity`, `history` or `deleted` opens that panel at once and shows no pill (`serve`'s `/fs/`
     page and an app's "Sync details" window use it).

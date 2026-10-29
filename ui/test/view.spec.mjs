@@ -62,7 +62,7 @@ test.describe("docs/API.md \"The element\", verbatim", () => {
 			const parts = [...el.shadowRoot.querySelectorAll("[part]")].map((n) => n.getAttribute("part")).sort();
 			return { attrs: C.observedAttributes, methods: ["open", "close", "refresh"].map((m) => typeof el[m]), parts };
 		});
-		expect(api.attrs).toEqual(["project", "owner", "base", "view"]);
+		expect(api.attrs).toEqual(["project", "owner", "folder", "base", "view"]);
 		expect(api.methods).toEqual(["function", "function", "function"]);
 		expect(api.parts).toEqual(["menu", "panel", "pill"]);
 	});
@@ -193,6 +193,21 @@ test.describe("the pill and the menu", () => {
 		await expect(menu(page).getByRole("menuitem", { name: "Devices and sharing" })).toHaveCount(0);
 		await expect(menu(page).locator("[data-warning]")).toHaveCount(0);
 		expect(sockets).toEqual([]);
+	});
+
+	test("serve, two folders on one project: folder= rides on every request, so none answers ambiguous_folder", async ({ page }) => {
+		const folder = "?folder=%2Fhome%2Fbam%2Fnotes";
+		await load(page, { scenario: "serve", first: ["status-serve-folder", "error-serve-ambiguous"], query: `?folder=${encodeURIComponent("/home/bam/notes")}` });
+		await expect(pill(page)).toHaveAttribute("data-state", "synced");
+		await expect(pill(page)).toHaveText("Synced");
+		await openPlanHistory(page);
+		await page.locator("folder-sync-status .versions button").nth(2).click();
+		await page.locator("folder-sync-status [data-act=restore-version]").click();
+		await expect(page.locator("folder-sync-status [data-restore=requested]").first()).toBeVisible();
+		const api = stub.requests.filter((r) => r.path.startsWith("/fs/v1/"));
+		expect(api.map((r) => r.path)).toContain(`/fs/v1/folders/notes/status${folder}`);
+		expect(api.filter((r) => r.method === "POST").map((r) => r.path)).toEqual([`/fs/v1/folders/notes/restore${folder}`]);
+		expect(api.filter((r) => new URL(r.path, stub.url).searchParams.get("folder") !== "/home/bam/notes")).toEqual([]);
 	});
 
 	test("offline is never red: a dashed grey ring and the reason, quietly", async ({ page }) => {

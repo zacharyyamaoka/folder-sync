@@ -76,7 +76,7 @@ rule. The sync view is one element in its status bar.</p><p><button class="pill 
 <script>
   const q = new URLSearchParams(location.search), el = document.createElement("folder-sync-status");
   el.setAttribute("project", q.get("project") || "notes");
-  for (const a of ["owner", "base", "view"]) if (q.has(a)) el.setAttribute(a, q.get(a));
+  for (const a of ["owner", "folder", "base", "view"]) if (q.has(a)) el.setAttribute(a, q.get(a));
   if (q.has("theme")) document.querySelector(".app").setAttribute("style", q.get("theme"));
   if (q.get("bar") === "top") { document.getElementById("bar").className = "top"; document.querySelector(".app").classList.add("top"); }
   (q.has("view") ? document.querySelector("main") : document.getElementById("bar")).append(el);

@@ -99,9 +99,9 @@ R2 is strongly consistent: a GET after a PUT sees the PUT. Each folder-sync roun
 2. upload new and changed files, and delete deleted files' objects;
 3. write the manifest;
 4. tell the folder's hub (PEP 0005);
-5. write the change record for that `seq`.
+5. write the change record for that `seq`. It may land before step 4: the engine sends it while the round pulls. WHY: readers wait on the manifest, never on the record, so the record need not wait on the hub.
 
-A copy that fails holds that path's upload or delete this round, so nothing the schedule keeps is overwritten without a copy. Readers wait on the manifest, never on the change record, which may land a moment later (or, after a failed PUT, on the writer's next round).
+A copy that fails holds that path's upload or delete this round, so nothing the schedule keeps is overwritten without a copy. A copy whose source is gone (the object the manifest lists is missing) holds the path the same way, and the writer reconciles with its next round. Readers wait on the manifest, never on the change record, which may land a moment later (or, after a failed PUT, on the writer's next round).
 
 So every file a manifest lists was in the bucket when the manifest was written. A reader holding manifest `seq N` can still race round `N+1`:
 
@@ -170,7 +170,7 @@ Worked examples (all at `now` = `2026-10-28T12:00:00.000Z`; the fixture has ever
 `<root>_requests/<project>/<host-id>/<id>.json`, validated by [`schema/restore.schema.json`](../schema/restore.schema.json): `{schema: "folder-sync-restore/1", id, project, host, at, by, items: [{path, version}]}`, up to 1,000 items.
 
 - It is created once (`If-None-Match: *`) by the accounts Worker (a page's Restore) or by another of the person's machines. Only the host it names applies it.
-- A machine looks for its requests at the start of every `sync --once`, and in `--watch` with its 5-minute peer discovery (one listing). The web host's requests are applied by the folder's object at once, so the Worker writes none for it.
+- A machine looks for its requests when it discovers peers (one listing): on a reconcile, with `--discover`, or every 5 minutes, in `sync --once` and `--watch` alike. WHY not on every `sync --once`: a round with no changes does no listing (PEP 0001 §4). The web host's requests are applied by the folder's object at once, so the Worker writes none for it.
 - Applying one: fetch each version, check its bytes against `sha16`, write it over the path as a new version (keeping the one it replaces), publish, then write `outcome` into the same key (`If-Match` on the request's ETag): `{at, seq?, results: [{path, version, ok, error?: pruned | mismatch | failed, why?}]}`, one per item in order. Each applied item is also a `restore` event with `request: <id>` in that publish's change record. The host never deletes a request; the pruner does, 30 days after `at`.
 - A request without `outcome` is waiting; a page shows it as "Waiting for <host_name>", with Download as the way out.
 
@@ -180,7 +180,7 @@ One line format, `folder-sync-event/1` ([`schema/event.schema.json`](../schema/e
 
 - Every line has `schema`, `event` and `at` (RFC 3339 UTC). A line written to the local log also has `project`, `host`, `host_name` and `level` (`info`, `warn` or `error`); stdout lines may omit them, as the desktop app's do today. New optional fields keep `/1`; readers ignore event names and fields they do not know.
 - The desktop app's events stay exactly as they are: `watching`, `round_start`, `round`, `hub`, `stopped` (`cmd/folder-sync/events.go`).
-- File events: `upload` (`path, size, sha256, op: add | edit`, and `was` for an edit), `delete` (`path, was`, `permanent` for a delete job's), `restore` (`path, from: <version>, request?`; `size, sha256` when it succeeded, `error` and `level: error` when not), `download` and `remove_copy` (`peer, peer_name, path`), `skip` (`path, why`), `conflict` (`peer, peer_name, path, kept_at`), `hold` (`why: max_delete | over_quota | unmounted, count`), `synced` (a clean round, nothing local pending, every known peer's latest manifest applied) and `truncated`.
+- File events: `upload` (`path, size, sha256, op: add | edit`, and `was` for an edit), `delete` (`path, was`, `permanent` for a delete job's), `restore` (`path, from: <version>, request?`; `size, sha256` when it succeeded, and `was` for the version it replaced; `error` and `level: error` when not), `download` and `remove_copy` (`peer, peer_name, path`), `skip` (`path, why`), `conflict` (`peer, peer_name, path, kept_at`), `hold` (`why: max_delete | over_quota | unmounted, count`), `synced` (a clean round, nothing local pending, every known peer's latest manifest applied) and `truncated`.
 - `upload`, `delete` and `restore` reach the bucket in change records, and `download` and `remove_copy` in pull records (below); a failed restore published nothing and is in the local log and the request's `outcome` only. The others stay on the machine.
 - No line ever holds a key or a token: every `why` goes through the engine's scrub (`Creds.Scrub`).
 
