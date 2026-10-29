@@ -46,6 +46,10 @@ fn menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
 
     match &snap.status {
         Status::SignedOut => items.push(Box::new(action("sign_in", "Sign in…")?)),
+        Status::SignInFailed { .. } => {
+            items.push(Box::new(action("sign_in", "Sign in again")?));
+            items.push(Box::new(action("cancel_sign_in", "Cancel")?));
+        }
         Status::SigningIn { .. } => {
             items.push(Box::new(action("reopen_link", "Open the approval page again")?));
             items.push(Box::new(action("cancel_sign_in", "Cancel sign-in")?));

@@ -95,7 +95,7 @@ pub fn on_menu(app: &AppHandle, id: &str) {
     match id {
         "sign_in" => {
             if let Err(why) = core::sign_in(&app) {
-                core::set_status(&app, Status::Error { why });
+                core::set_status(&app, Status::SignInFailed { why });
             }
         }
         "reopen_link" => {
