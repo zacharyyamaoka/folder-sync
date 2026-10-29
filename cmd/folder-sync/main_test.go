@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -102,7 +103,7 @@ func TestSyncOnceExitsSeventyFiveWhenTheLockIsHeld(t *testing.T) {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(stateDir, "lock"), []byte("pid 1 at now\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(stateDir, "lock"), []byte(fmt.Sprintf("pid %d at now\n", os.Getpid())), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	code, _, errOut := runCmd("sync", "--once", "--dir", folder)

@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,7 +72,7 @@ func TestARoundThatNeverRanLogsNothing(t *testing.T) {
 	useProcess(t, "cat <<'EOF'\n"+processOutput("http://127.0.0.1:1", "users/AbC123/", "folder-sync")+"\nEOF\n")
 	stateDir := filepath.Join(l.Projects, syncer.StateKey("demo", abs, "users/AbC123/"))
 	os.MkdirAll(stateDir, 0o700)
-	os.WriteFile(filepath.Join(stateDir, "lock"), []byte("pid 1 at now\n"), 0o600)
+	os.WriteFile(filepath.Join(stateDir, "lock"), []byte(fmt.Sprintf("pid %d at now\n", os.Getpid())), 0o600)
 	if code, _, _ := runCmd("sync", "--once", "--dir", folder); code != 75 {
 		t.Fatalf("code %d, want 75", code)
 	}

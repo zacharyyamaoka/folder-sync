@@ -384,6 +384,13 @@ func (p *Project) AcquireLock() (*Lock, error) {
 			continue
 		}
 		holder, _ := os.ReadFile(path)
+		// WHY the pid: the holder cannot release a lock it was killed holding, and on Windows every stop is a kill (no SIGTERM),
+		// so without this a stopped engine blocks the folder for staleLock. A lock is this machine's, so its pid is checkable.
+		var pid int
+		if _, err := fmt.Sscanf(string(holder), "pid %d", &pid); err == nil && pid > 0 && !pidRunning(pid) {
+			os.Remove(path)
+			continue
+		}
 		return nil, fmt.Errorf("%w (%s: %s)", ErrBusy, path, strings.TrimSpace(string(holder)))
 	}
 	return nil, fmt.Errorf("cannot take the lock %s", path)

@@ -390,7 +390,7 @@ func TestHistory(t *testing.T) {
 		w.must(a, "sync", "--once")
 		// WHY a lock file and not a racing --watch: the restore must meet a held lock every time
 		lock := filepath.Join(stateDir(t, a), "lock")
-		os.WriteFile(lock, []byte("pid 1 at test\n"), 0o600)
+		os.WriteFile(lock, []byte(fmt.Sprintf("pid %d at test\n", os.Getpid())), 0o600)
 		out := w.must(a, "restore", "notes/plan.md", "--version", v1)
 		os.Remove(lock)
 		if !strings.Contains(out, "applies it") {
