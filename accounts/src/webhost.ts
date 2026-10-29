@@ -642,7 +642,7 @@ export async function runWebOp(env: CredsEnv & QuotaEnv, s3: FetchLike, op: WebO
 		const root = userRoot(op.owner);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, clock()), s3);
 		const w = { root, project: op.project, hostId: op.hostId };
-		const quota = quotaOf(env);
+		const quota = quotaOf(env, op.owner);
 		const ledger: Ledger = {
 			async admit(bytes, objects) {
 				if (bytes <= 0 && objects <= 0) return;

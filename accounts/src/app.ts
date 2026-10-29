@@ -290,7 +290,7 @@ export async function decide(deps: Pick<Deps, "store">, person: Person | null, p
 /** Why the person may not add `addBytes` / `addObjects` now (§3.7, review r1 #7), or null. Measured by listing their
  *  root with a read-only credential when the cached measurement is stale. */
 async function quotaRefusal(env: Env, deps: Deps, owner: string, addBytes = 0, addObjects = 0): Promise<string | null> {
-	const quota = quotaOf(env);
+	const quota = quotaOf(env, owner);
 	const root = userRoot(owner);
 	// WHY signed before usageOf: only the listing's own failures are a measurement's (Measuring); a credential that
 	// cannot be signed is a fault, not a 503 to try again
@@ -347,7 +347,7 @@ async function me(request: Request, deps: Deps, app: App | null): Promise<Respon
 /** A person's storage against their quota (§3.7), split into live and history (PEP 0007 §3.5: history counts
  *  _history/, _changes/, _requests/ and legacy _trash/, and used = live + history). */
 export async function usageFigure(env: Env, deps: Deps, owner: string): Promise<{ used: Amount; live: Amount; history: Amount; quota: Amount; over: string | null; partial: boolean }> {
-	const quota = quotaOf(env);
+	const quota = quotaOf(env, owner);
 	const root = userRoot(owner);
 	const bucket = await bucketFor(env, deps, root, "object-read-only", READ_TTL_S);
 	let used: { bytes: number; objects: number; partial?: boolean; history?: Amount };

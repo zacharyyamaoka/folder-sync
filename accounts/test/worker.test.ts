@@ -2019,3 +2019,20 @@ test("hub: a sign-out tells each hub its session may be in to close it; a reader
 	const { deps: other } = fakeDeps(people());
 	assert.equal((await call(handle, env({ HUB: down.binding }), other, "/fs/v1/sign-out", { method: "POST", headers: page(OWNER) })).status, 200);
 });
+
+test("QUOTA_BY_OWNER: one person's own ceiling; everyone else keeps QUOTA_BYTES (Zach, 2026-10-29: 'please increase my limit')", async () => {
+	const s3 = people();
+	const store = new MemoryStore();
+	const { deps } = fakeDeps(s3, store);
+	const mine = stored(s3, OWNER).bytes;
+	const theirs = stored(s3, SISTER).bytes;
+	const below = Math.min(mine, theirs) - 1;
+	const e = env({ QUOTA_BYTES: String(below), QUOTA_BY_OWNER: JSON.stringify({ [OWNER.userId]: { bytes: 10 * 1024 ** 3 } }) });
+	const keys = async (token: string) => (await call(handle, e, deps, "/fs/v1/credentials", { origin: OWN, method: "POST", headers: { Authorization: `Bearer ${token}` } })).json();
+	assert.equal((await keys("token-owner-laptop")).ReadOnly, undefined, "the owner's own 10 GiB ceiling admits writes");
+	assert.equal((await keys("token-sister-laptop")).ReadOnly, true, "the sister stays at QUOTA_BYTES");
+	const figure = await (await call(handle, e, deps, "/fs/v1/usage", { headers: cookie(OWNER) })).json();
+	assert.equal(figure.quota.bytes, 10 * 1024 ** 3);
+	assert.equal(figure.quota.objects, 100_000, "an override without objects keeps QUOTA_OBJECTS");
+	assert.deepEqual(quotaOf({ QUOTA_BY_OWNER: "not json" }, OWNER.userId).bytes, 1024 ** 3, "a malformed override falls back to the default");
+});
