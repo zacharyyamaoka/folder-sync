@@ -23,6 +23,9 @@ use tauri::{AppHandle, Emitter, Manager};
 pub enum Status {
     SignedOut,
     SigningIn { code: String, link: String },
+    /// A sign-in that did not finish. WHY its own state and not Error: the window and tray then offer Sign in again
+    /// and Cancel; the generic error screen had only Start at login and Quit (a real Windows test, 2026-10-29).
+    SignInFailed { why: String },
     NeedsFolder,
     Starting,
     Syncing,
@@ -43,7 +46,7 @@ impl Status {
             Status::Offline { .. } => "offline",
             Status::OverQuota { .. } => "over_quota",
             Status::Paused => "paused",
-            Status::Error { .. } => "error",
+            Status::Error { .. } | Status::SignInFailed { .. } => "error",
         }
     }
 
@@ -67,13 +70,14 @@ impl Status {
             Status::OverQuota { .. } => "Over quota: not uploading".into(),
             Status::Paused => "Paused".into(),
             Status::Error { .. } => "Sync error".into(),
+            Status::SignInFailed { .. } => "Sign-in failed".into(),
         }
     }
 
     /// The reason, when there is one worth reading (over quota above all).
     pub fn detail(&self) -> Option<String> {
         match self {
-            Status::OverQuota { why } | Status::Offline { why } | Status::Error { why } => Some(why.clone()),
+            Status::OverQuota { why } | Status::Offline { why } | Status::Error { why } | Status::SignInFailed { why } => Some(why.clone()),
             _ => None,
         }
     }
@@ -293,13 +297,13 @@ pub fn sign_in(app: &AppHandle) -> Result<(), String> {
                 Some("signed_in") => {
                     let account = &ev["account"];
                     if account.is_null() {
-                        set_status(&app, Status::Error { why: "the engine signed in but handed no session back".into() });
+                        set_status(&app, Status::SignInFailed { why: "the engine signed in but handed no session back".into() });
                         continue;
                     }
                     // the token goes from the engine's pipe straight into the keychain
                     let server = app.state::<Shared>().lock().settings.server.clone();
                     if let Err(why) = vault::store(&server, &account.to_string()) {
-                        set_status(&app, Status::Error { why });
+                        set_status(&app, Status::SignInFailed { why });
                         continue;
                     }
                     signed = true;
@@ -329,7 +333,7 @@ pub fn sign_in(app: &AppHandle) -> Result<(), String> {
                 }
                 Some("error") => {
                     let why = ev["error"].as_str().unwrap_or("sign-in failed").to_string();
-                    set_status(&app, Status::Error { why });
+                    set_status(&app, Status::SignInFailed { why });
                 }
                 _ => {}
             }
@@ -617,7 +621,7 @@ pub fn set_paused(app: &AppHandle, paused: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::local_hms;
+    use super::{local_hms, Status};
 
     #[test]
     fn local_hms_reads_rfc3339_without_a_date_command() {
@@ -625,5 +629,24 @@ mod tests {
         assert_eq!(shown.len(), 8);
         assert!(shown.ends_with(":34:56") || shown.ends_with(":04:56"), "{shown}"); // whole- or half-hour zones
         assert!(local_hms("not a time").is_none());
+    }
+
+    // A failed sign-in (a rate limit, the server down, a refused grant) used to land in the generic "Sync error"
+    // screen, whose only buttons were Start at login and Quit (a real Windows test, 2026-10-29).
+    #[test]
+    fn a_failed_sign_in_is_its_own_state_with_a_way_back() {
+        let failed = Status::SignInFailed { why: "Too many requests".into() };
+        assert_eq!(failed.headline(), "Sign-in failed");
+        assert_eq!(failed.detail().as_deref(), Some("Too many requests"));
+        assert_eq!(failed.icon(), "error");
+        assert_eq!(serde_json::to_value(&failed).unwrap()["state"], "sign_in_failed");
+
+        // the window offers Sign in again and Cancel (back to signed out) for exactly that state
+        let page = include_str!("../../ui/index.html");
+        let script = include_str!("../../ui/app.js");
+        let section = page.split("id=\"step-failed\"").nth(1).expect("a step-failed section").split("</section>").next().unwrap();
+        assert!(section.contains("data-action=\"sign_in\""), "{section}");
+        assert!(section.contains("data-action=\"cancel_sign_in\""), "{section}");
+        assert!(script.contains("show(\"step-failed\", state === \"sign_in_failed\")"));
     }
 }

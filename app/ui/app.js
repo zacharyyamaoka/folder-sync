@@ -19,6 +19,7 @@ function render(s) {
   $("folder").textContent = s.folder || "";
   show("step-signin", state === "signed_out");
   show("step-waiting", state === "signing_in");
+  show("step-failed", state === "sign_in_failed");
   show("step-folder", state === "needs_folder");
   show("step-running", Boolean(s.email && s.folder) && state !== "needs_folder");
   show("sign-out", Boolean(s.email));

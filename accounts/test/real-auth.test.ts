@@ -267,3 +267,41 @@ test("judge r3 #5: a sign-in from before machine approval existed is told to sig
 	assert.equal((await s.approve(code.user_code, { Cookie: fresh.cookie })).approved, 200);
 	assert.doesNotMatch(await (await s.call("/fs/account", { headers: { Cookie: fresh.cookie } })).text(), /before machine approval was added/);
 });
+
+// Rate limits, production-style (ENVIRONMENT=production turns Better Auth's limiter on, counted in D1). A Windows
+// sign-in test failed on both of these (2026-10-29).
+const LIMITED = { "cf-connecting-ip": "203.0.113.7" };
+const CODE_CHECK = "/fs/api/auth/device?user_code=ABCDEFGH";
+
+test("rate limit: a person approving a few codes, reloading and coming back from Google is never refused a code check", async () => {
+	const s = await realStack({ ENVIRONMENT: "production" });
+	// the page checks a code once per load, twice per approval (once more after the Google redirect): six checks in a
+	// row was the old limit's 429 (5 per 15 minutes)
+	for (let check = 1; check <= 6; check++) {
+		const answer = await s.call(CODE_CHECK, { headers: LIMITED });
+		assert.notEqual(answer.status, 429, `check ${check} was rate limited`);
+	}
+});
+
+test("rate limit: code guessing still gets 429 after a burst, and one address's burst does not limit another", async () => {
+	const s = await realStack({ ENVIRONMENT: "production" });
+	const statuses: number[] = [];
+	for (let guess = 0; guess < 100; guess++) statuses.push((await s.call(CODE_CHECK, { headers: LIMITED })).status);
+	const refused = statuses.indexOf(429);
+	assert.ok(refused > 0 && refused <= 40, `first 429 at check ${refused + 1}: ${statuses.join(",")}`);
+	assert.ok(statuses.slice(refused).every((status) => status === 429), "once limited, it stays limited");
+	assert.notEqual((await s.call(CODE_CHECK, { headers: { "cf-connecting-ip": "203.0.113.8" } })).status, 429);
+});
+
+test("rate limit: a machine polling for its approval every 5 seconds is never refused, however long the person takes", async (t) => {
+	// WHY mocked time: Better Auth's window is rolling (each allowed request restarts it), so a poll every 5 s counts
+	// toward the same window for as long as it keeps polling: the 101st poll of the old default (100 per 10 s) was a 429
+	t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+	const s = await realStack({ ENVIRONMENT: "production" });
+	const poll = () => s.post("/fs/api/auth/device/token", { grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: "no-such-grant", client_id: "folder-sync" }, LIMITED);
+	for (let n = 1; n <= 200; n++) {
+		const answer = await poll();
+		assert.notEqual(answer.status, 429, `poll ${n} (${(n * 5) / 60} min in) was rate limited`);
+		t.mock.timers.tick(5000);
+	}
+});

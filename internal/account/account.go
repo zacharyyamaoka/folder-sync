@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -263,17 +264,23 @@ func (e *ServerError) Error() string {
 
 // call sends one JSON request and returns the status and the raw body.
 func (c *Client) call(ctx context.Context, method, path string, body any, token string) (int, []byte, error) {
+	status, _, data, err := c.callHeader(ctx, method, path, body, token)
+	return status, data, err
+}
+
+// callHeader is call that also returns the answer's headers (a poll reads Retry-After).
+func (c *Client) callHeader(ctx context.Context, method, path string, body any, token string) (int, http.Header, []byte, error) {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
 		if err != nil {
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 		reader = bytes.NewReader(data)
 	}
 	request, err := http.NewRequestWithContext(ctx, method, c.Server+path, reader)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	request.Header.Set("User-Agent", c.UserAgent)
 	request.Header.Set("Accept", "application/json")
@@ -289,14 +296,14 @@ func (c *Client) call(ctx context.Context, method, path string, body any, token 
 		if errors.As(err, &urlErr) {
 			err = urlErr.Err // the URL is already in the message below
 		}
-		return 0, nil, fmt.Errorf("%s did not answer (%v)", c.Server, err)
+		return 0, nil, nil, fmt.Errorf("%s did not answer (%v)", c.Server, err)
 	}
 	defer answer.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(answer.Body, maxBody))
 	if err != nil {
-		return 0, nil, fmt.Errorf("%s: reading the answer: %v", c.Server, err)
+		return 0, nil, nil, fmt.Errorf("%s: reading the answer: %v", c.Server, err)
 	}
-	return answer.StatusCode, data, nil
+	return answer.StatusCode, answer.Header, data, nil
 }
 
 func serverError(status int, data []byte) *ServerError {
@@ -368,11 +375,13 @@ func (c *Client) AwaitApproval(ctx context.Context, d Device, sleep func(context
 	interval := time.Duration(d.Interval) * time.Second
 	deadline := time.Now().Add(time.Duration(d.ExpiresIn) * time.Second)
 	unreachable := 0
+	pause := interval // the next wait: the interval, or longer once for a Retry-After
 	for time.Now().Before(deadline) {
-		if err := sleep(ctx, interval); err != nil {
+		if err := sleep(ctx, pause); err != nil {
 			return "", err
 		}
-		status, data, err := c.call(ctx, http.MethodPost, "/fs/api/auth/device/token",
+		pause = interval
+		status, header, data, err := c.callHeader(ctx, http.MethodPost, "/fs/api/auth/device/token",
 			map[string]string{"grant_type": deviceGrant, "device_code": d.DeviceCode, "client_id": ClientID}, "")
 		if err != nil {
 			if unreachable++; unreachable >= 5 {
@@ -381,6 +390,18 @@ func (c *Client) AwaitApproval(ctx context.Context, d Device, sleep func(context
 			continue
 		}
 		unreachable = 0
+		// WHY wait instead of failing: a 429 (the server's rate limiter) or 503 says nothing about the grant, which is
+		// still alive until the code expires; found on a real Windows sign-in, where the fourth flow died on a 429
+		// (2026-10-29). The deadline above still ends the loop.
+		if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable {
+			if after := retryAfter(header); after > 0 {
+				pause = min(max(after, interval), maxPollWait)
+			} else {
+				interval = min(interval+5*time.Second, maxPollWait)
+				pause = interval
+			}
+			continue
+		}
 		var answer struct {
 			AccessToken string `json:"access_token"`
 			Error       string `json:"error"`
@@ -403,6 +424,20 @@ func (c *Client) AwaitApproval(ctx context.Context, d Device, sleep func(context
 		return "", fmt.Errorf("%s refused the sign-in: %v", c.Server, serverError(status, data))
 	}
 	return "", errors.New("the code expired before it was approved: run `folder-sync login` again")
+}
+
+// maxPollWait is the longest the engine waits between two polls, however the server asks.
+const maxPollWait = time.Minute
+
+// retryAfter is the whole seconds a 429 or 503 asks to wait, from Retry-After (RFC 9110) or X-Retry-After (what Better
+// Auth's rate limiter sends); 0 when neither is a number of seconds.
+func retryAfter(header http.Header) time.Duration {
+	for _, name := range []string{"Retry-After", "X-Retry-After"} {
+		if seconds, err := strconv.Atoi(strings.TrimSpace(header.Get(name))); err == nil && seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	return 0
 }
 
 // Sleep waits d or until ctx ends.

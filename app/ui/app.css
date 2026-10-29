@@ -19,12 +19,12 @@ h1 { font-size: 17px; margin: 0; font-weight: 600; }
 [data-state="synced"] .dot { background: var(--ok); }
 [data-state="syncing"] .dot, [data-state="starting"] .dot { background: var(--busy); animation: pulse 1s infinite alternate; }
 [data-state="over_quota"] .dot { background: var(--warn); }
-[data-state="error"] .dot { background: var(--bad); }
+[data-state="error"] .dot, [data-state="sign_in_failed"] .dot { background: var(--bad); }
 [data-state="signed_out"] .dot, [data-state="signing_in"] .dot, [data-state="needs_folder"] .dot { background: transparent; border: 2px solid var(--idle); }
 @keyframes pulse { to { opacity: .35; } }
 .detail { margin: 8px 0 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 [data-state="over_quota"] .detail { color: var(--warn); }
-[data-state="error"] .detail { color: var(--bad); }
+[data-state="error"] .detail, [data-state="sign_in_failed"] .detail { color: var(--bad); }
 .step { display: flex; flex-direction: column; gap: 10px; }
 .step p { margin: 0; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; }

@@ -35,6 +35,14 @@
     </div>
   </section>
 
+  <section id="step-failed" class="step" hidden>
+    <p>The sign-in did not finish. Nothing was changed on this computer.</p>
+    <div class="row">
+      <button class="primary" data-action="sign_in" data-testid="sign-in-again">Sign in again</button>
+      <button class="quiet" data-action="cancel_sign_in" data-testid="cancel-sign-in">Cancel</button>
+    </div>
+  </section>
+
   <section id="step-folder" class="step" hidden>
     <p>Where should your folder live? The app makes it for you.</p>
     <button class="primary" data-action="create_folder" data-testid="create-folder">Create <span id="default-folder"></span></button>
