@@ -57,7 +57,16 @@ export function createAuth(env: Env, origin: string) {
 		session: { expiresIn: 90 * DAY_S, updateAge: DAY_S, additionalFields: { kind: { type: "string", required: false, input: false }, approvedBy: { type: "string", required: false, input: false } } },
 		// Dev signs many people in from one address, so the limiter is off there; in production it is counted in D1,
 		// because Workers memory is per isolate.
-		rateLimit: { enabled: !dev, storage: "database" },
+		// WHY the two device rules (a real Windows sign-in died on both, 2026-10-29): Better Auth's window is rolling, so
+		// each allowed request restarts it and a count only resets after a quiet window.
+		// - /device (the page's code check, once per load): the plugin's own 5 per 15 minutes refused the 6th check of a
+		//   person approving three codes. 30 per 10 minutes still stops guessing: a user code is 8 characters of a 32-character
+		//   alphabet (~1.1e12), a code lives 15 minutes, so one address gets about 45 guesses at it, roughly 4e-11.
+		// - /device/token (the machine's poll, every 5 s): the default 100 per 10 s counts every poll, so the 101st, 8.4
+		//   minutes into waiting for an approval, was a 429 that ended the sign-in. Any finite count trips a patient poller,
+		//   and the grant already guards itself: a 40-character secret code and Better Auth's slow_down for polls
+		//   under the interval, so the limiter would only add a D1 write per poll.
+		rateLimit: { enabled: !dev, storage: "database", customRules: { "/device": { window: 600, max: 30 }, "/device/token": false } },
 		advanced: {
 			// WHY a prefix of our own: an app on the same domain may run Better Auth too (Vibe Tracks does), and its
 			// better-auth.session_token must never be mistaken for ours or overwritten by ours
