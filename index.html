@@ -278,7 +278,8 @@
       <p class="position">Obsidian Sync for any application.</p>
       <p class="lede">File-first, agent-friendly. Pick any folder of plain files and folder-sync keeps it the same on your laptop, your desktop and the web. Any editor, script or local AI agent can just open the files.</p>
       <div class="cta">
-        <a class="btn primary" href="#install">Download v0.1.0</a>
+        <a class="btn primary" href="#install">Download v0.2.0</a>
+        <a class="btn" href="https://folder-sync-demo.zach-yamaoka.workers.dev/">Live demo (invite-only)</a>
         <a class="btn" href="#how">How it works →</a>
       </div>
       <figure class="film" style="margin-left:0;margin-right:0;margin-bottom:0">
@@ -371,15 +372,16 @@
             <li><div>Runs in the background<span><code>sync --install-service</code> writes the systemd, launchd or Task Scheduler entry</span></div></li>
             <li><div>Ignore rules<span>gitignore syntax</span></div></li>
             <li><div>A desktop tray app<span>Linux, built from source for now (<code>app/</code>)</span></div></li>
+            <li><div>Version history<span>old copies of replaced and deleted files, kept up to 30 days and thinned as they age; see what changed, download one, restore it</span></div></li>
+            <li><div>Activity log<span>which machine changed what, and when, with each sync's time from disk to online and back</span></div></li>
+            <li><div>Deleted files<span>every deleted file with a kept copy; restore one or many at once</span></div></li>
+            <li><div>The sync view<span>one <code>&lt;folder-sync-status&gt;</code> element any app drops in: the folder's state, its activity, versions and deleted files</span></div></li>
+            <li><div><code>folder-sync serve</code><span>the same view on your own machine, on 127.0.0.1 behind a token; status and activity work offline</span></div></li>
           </ul>
         </div>
         <div class="later">
           <span class="soon">Coming</span>
           <ul>
-            <li><div>Version history<span>step back through any file's past copies</span></div></li>
-            <li><div>Activity log<span>which machine changed what, and when</span></div></li>
-            <li><div>Deleted files<span>browse and restore what's in <code>_trash/</code></span></div></li>
-            <li><div>The sync view<span>one shared "synced · 2 computers · just now" panel any app drops in (PEP 0007, in progress)</span></div></li>
             <li><div>Windows<span>the binary cross-compiles; it has not been run on Windows yet</span></div></li>
           </ul>
         </div>
@@ -425,7 +427,7 @@
       <div class="install-grid">
         <div class="card">
           <h3>1 · Download the CLI</h3>
-          <p>One static binary, <a href="https://github.com/zacharyyamaoka/folder-sync/releases/tag/v0.1.0">v0.1.0</a> (a pre-release). It fetches its pinned rclone on first <code>init</code> and checks its SHA-256.</p>
+          <p>One static binary, <a href="https://github.com/zacharyyamaoka/folder-sync/releases/tag/v0.2.0">v0.2.0</a> (a pre-release). It fetches its pinned rclone on first <code>init</code> and checks its SHA-256.</p>
           <div class="tabs" role="tablist" aria-label="Platform">
             <button type="button" role="tab" data-target="linux-amd64" aria-selected="true">Linux x86-64</button>
             <button type="button" role="tab" data-target="linux-arm64" aria-selected="false">Linux arm64</button>
@@ -433,10 +435,10 @@
             <button type="button" role="tab" data-target="darwin-amd64" aria-selected="false">macOS Intel</button>
           </div>
           <div class="dl">
-            <code><span class="p">$ </span><span id="dl-line">mkdir -p ~/.folder-sync/bin; curl -fsSL https://github.com/zacharyyamaoka/folder-sync/releases/download/v0.1.0/folder-sync-linux-amd64 -o ~/.folder-sync/bin/folder-sync; chmod +x ~/.folder-sync/bin/folder-sync</span></code>
+            <code><span class="p">$ </span><span id="dl-line">mkdir -p ~/.folder-sync/bin; curl -fsSL https://github.com/zacharyyamaoka/folder-sync/releases/download/v0.2.0/folder-sync-linux-amd64 -o ~/.folder-sync/bin/folder-sync; chmod +x ~/.folder-sync/bin/folder-sync</span></code>
             <button class="copy" type="button" id="copy">copy</button>
           </div>
-          <p class="assets">Then put <code>~/.folder-sync/bin</code> on your PATH. Check it: <a href="https://github.com/zacharyyamaoka/folder-sync/releases/download/v0.1.0/SHA256SUMS">SHA256SUMS</a>. The macOS builds are not signed.</p>
+          <p class="assets">Then put <code>~/.folder-sync/bin</code> on your PATH. Check it: <a href="https://github.com/zacharyyamaoka/folder-sync/releases/download/v0.2.0/SHA256SUMS">SHA256SUMS</a>. The macOS builds are not signed.</p>
           <h3 style="margin-top:22px">Or build from source</h3>
           <pre class="term"><span class="p">$ </span>git clone https://github.com/zacharyyamaoka/folder-sync
 <span class="p">$ </span>go -C folder-sync build -o ~/.folder-sync/bin/folder-sync ./cmd/folder-sync</pre>
@@ -457,7 +459,7 @@
           <p class="note">With your own bucket a save uploads at once and your other computers pull every 10 s (push between machines needs an account). <code>folder-sync publish --viewer</code> writes a read-only web viewer (R2-Explorer, behind Cloudflare Access) for you to deploy. Cloud agents can set <code>FOLDER_SYNC_ACCOUNT_ID</code>, <code>FOLDER_SYNC_ACCESS_KEY_ID</code> and <code>FOLDER_SYNC_SECRET_ACCESS_KEY</code> instead of <code>login --key</code>.</p>
         </div>
       </div>
-      <div class="callout">Hosted accounts (Google sign-in, push between machines, the web view) are <b>invite-only</b>. Have one? <a href="https://folder-sync-accounts.zach-yamaoka.workers.dev/fs/signin?return=/fs/account">Sign in</a> here, and run <code>folder-sync login</code> on each computer: it prints a code you approve in the browser.</div>
+      <div class="callout">Hosted accounts (Google sign-in, push between machines, the web view) are <b>invite-only</b>. Have one? <a href="https://folder-sync-accounts.zach-yamaoka.workers.dev/fs/signin?return=/fs/account">Sign in</a> here, and run <code>folder-sync login</code> on each computer: it prints a code you approve in the browser. Then open the <a href="https://folder-sync-demo.zach-yamaoka.workers.dev/">live demo</a>: your folders online, each computer's files, and recent activity with each sync's time.</div>
     </div>
   </section>
 
@@ -482,7 +484,7 @@
 
 <script>
   // The download line follows the platform tab; the page reads fine without this script (Linux x86-64 is the default).
-  const RELEASE = "https://github.com/zacharyyamaoka/folder-sync/releases/download/v0.1.0/";
+  const RELEASE = "https://github.com/zacharyyamaoka/folder-sync/releases/download/v0.2.0/";
   const lineFor = (target) => "mkdir -p ~/.folder-sync/bin; curl -fsSL " + RELEASE + "folder-sync-" + target +
     " -o ~/.folder-sync/bin/folder-sync; chmod +x ~/.folder-sync/bin/folder-sync";
   const tabs = [...document.querySelectorAll(".tabs button")];
