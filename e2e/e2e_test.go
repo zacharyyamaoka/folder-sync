@@ -31,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	"folder-sync/internal/layout"
 	"folder-sync/internal/testtools"
 )
 
@@ -252,18 +253,38 @@ func (w *world) record(step, machineName, command, output string, ops []op) {
 	})
 }
 
+// rcloneDiskNames is how rclone's local backend spells on a Windows disk the characters Windows cannot hold: the
+// fullwidth look-alikes. The stand-in (rclone serve s3 over a folder) stores a key such as
+// _history/…/2026-10-29T01:33:50.1Z_ab… under such a name, and a test that reads the folder directly must too.
+var rcloneDiskNames = strings.NewReplacer(":", "：", "<", "＜", ">", "＞", `"`, "＂", "*", "＊", "?", "？", "|", "｜")
+var rcloneKeyNames = strings.NewReplacer("：", ":", "＜", "<", "＞", ">", "＂", `"`, "＊", "*", "？", "?", "｜", "|")
+
+func diskName(key string) string {
+	if runtime.GOOS == "windows" {
+		return rcloneDiskNames.Replace(key)
+	}
+	return key
+}
+
+func keyName(disk string) string {
+	if runtime.GOOS == "windows" {
+		return rcloneKeyNames.Replace(disk)
+	}
+	return disk
+}
+
 func (w *world) object(key string) (string, bool) {
-	data, err := os.ReadFile(filepath.Join(w.data, bucket, filepath.FromSlash(key)))
+	data, err := os.ReadFile(filepath.Join(w.data, bucket, filepath.FromSlash(diskName(key))))
 	return string(data), err == nil
 }
 
 func (w *world) objects(prefix string) []string {
 	var keys []string
 	root := filepath.Join(w.data, bucket)
-	filepath.WalkDir(filepath.Join(root, filepath.FromSlash(prefix)), func(path string, d fs.DirEntry, err error) error {
+	filepath.WalkDir(filepath.Join(root, filepath.FromSlash(diskName(prefix))), func(path string, d fs.DirEntry, err error) error {
 		if err == nil && !d.IsDir() {
 			rel, _ := filepath.Rel(root, path)
-			keys = append(keys, filepath.ToSlash(rel))
+			keys = append(keys, keyName(filepath.ToSlash(rel)))
 		}
 		return nil
 	})
@@ -402,11 +423,11 @@ func missingPythonModule(python, module string) string {
 func serviceExpectation(goos, home string) (glob, command string) {
 	switch goos {
 	case "darwin":
-		return filepath.Join(home, "Library", "LaunchAgents", "dev.folder-sync.demo-*.plist"), "launchctl bootstrap gui/$(id -u) "
+		return layout.Join(goos, home, "Library", "LaunchAgents", "dev.folder-sync.demo-*.plist"), "launchctl bootstrap gui/$(id -u) "
 	case "windows":
-		return filepath.Join(home, ".folder-sync", "service", "folder-sync-demo-*.xml"), `schtasks /Create /TN "folder-sync\demo-`
+		return layout.Join(goos, home, ".folder-sync", "service", "folder-sync-demo-*.xml"), `schtasks /Create /TN "folder-sync\demo-`
 	default:
-		return filepath.Join(home, ".folder-sync", "service", "folder-sync-demo-*.service"), "systemctl --user enable --now "
+		return layout.Join(goos, home, ".folder-sync", "service", "folder-sync-demo-*.service"), "systemctl --user enable --now "
 	}
 }
 
@@ -598,6 +619,13 @@ func TestTwoMachines(t *testing.T) {
 		}
 	})
 
+	if runtime.GOOS == "windows" {
+		// The next subtest cannot run here (below), but what it leaves behind is what the ones after it start from: A has
+		// found B and pulled from it, and B has pulled A's latest. Do that part with plain rounds.
+		w.must(a, "sync", "--once", "--discover")
+		w.must(b, "sync", "--once")
+		w.ops.take()
+	}
 	t.Run("sync --watch picks up a change, and stops cleanly", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			t.Skip("a Go test cannot deliver Ctrl-C to a child on Windows; the stop path is covered by internal/syncer's tests")

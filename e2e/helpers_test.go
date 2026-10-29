@@ -69,7 +69,7 @@ func TestServiceExpectationPerOS(t *testing.T) {
 		t.Errorf("darwin: %s %s", glob, command)
 	}
 	glob, command = serviceExpectation("windows", `C:\Users\BAM`)
-	if !strings.HasSuffix(glob, ".folder-sync"+string(filepath.Separator)+"service"+string(filepath.Separator)+"folder-sync-demo-*.xml") || !strings.HasPrefix(command, "schtasks /Create") {
+	if !strings.HasSuffix(glob, `.folder-sync\service\folder-sync-demo-*.xml`) || !strings.HasPrefix(command, "schtasks /Create") {
 		t.Errorf("windows: %s %s", glob, command)
 	}
 	glob, command = serviceExpectation("linux", "/home/bam")
