@@ -42,6 +42,17 @@ func Exe(name string) string {
 	return name
 }
 
+// NoConfig is a path to an empty rclone config file, for --config. WHY not os.DevNull: on Windows that is "NUL", which
+// rclone refuses as a reserved device name.
+func NoConfig(t testing.TB) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "rclone.conf")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // Terminate asks a process this test started to stop: SIGTERM, so rclone and folder-sync clean up. Windows has no
 // SIGTERM to send, so there it is a plain kill, the same stop internal/rclone gives it.
 func Terminate(process *os.Process) {

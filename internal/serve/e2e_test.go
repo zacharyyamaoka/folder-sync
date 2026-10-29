@@ -100,7 +100,7 @@ func newE2E(t *testing.T) *e2e {
 	addr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
 	key, secret := "serve"+fmt.Sprint(time.Now().UnixNano()%1e6), "secret-for-the-stand-in-only"
 	background(t, filepath.Join(work, "stand-in.log"), os.Environ(), work, rcloneBin, "serve", "s3", "--addr", addr, "--auth-key", key+","+secret,
-		"--config", os.DevNull, "--cache-dir", filepath.Join(work, "stand-in-cache"), e.data)
+		"--config", testtools.NoConfig(t), "--cache-dir", filepath.Join(work, "stand-in-cache"), e.data)
 	for i := 0; ; i++ {
 		if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
 			conn.Close()

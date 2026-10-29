@@ -49,7 +49,9 @@ func TestACutFetchLeavesNoPartial(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		// 4 MiB at 200 KiB/s: about 20 s, so the stop always lands mid-fetch
-		_, err := r.Run(ctx, "copy", "--bwlimit", "200k", src, dst)
+		// WHY --disable Copy: on macOS rclone clones a file between two local folders at once (macOS CI, 2026-10-29: the whole
+		// 4 MiB in 0.08 s, no .partial, --bwlimit ignored). A fetch from the bucket is always a stream, so make this one too.
+		_, err := r.Run(ctx, "copy", "--disable", "Copy", "--bwlimit", "200k", src, dst)
 		done <- err
 	}()
 	for deadline := time.Now().Add(15 * time.Second); len(partials()) == 0; time.Sleep(20 * time.Millisecond) {

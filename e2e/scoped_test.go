@@ -150,7 +150,7 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 	os.MkdirAll(filepath.Join(data, scopedBucket), 0o755)
 	gateLog := filepath.Join(work, "gate.jsonl")
 	startProcess(t, "storage", filepath.Join(work, "storage.log"), rcloneBin, "serve", "s3", "--addr", storageAddr,
-		"--config", os.DevNull, "--cache-dir", filepath.Join(work, "storage-cache"), data)
+		"--config", testtools.NoConfig(t), "--cache-dir", filepath.Join(work, "storage-cache"), data)
 	startProcess(t, "gate", filepath.Join(work, "gate.log"), standin, "serve", "--listen", gateAddr, "--backend", storageAddr,
 		"--account", account, "--parent", parentID+":"+parentSecret, "--log", gateLog)
 	waitPort(t, storageAddr)

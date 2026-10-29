@@ -139,7 +139,7 @@ func startStandIn(t *testing.T, rcloneBin, dataDir, keyID, secret string) {
 	}
 	logFile := filepath.Join(filepath.Dir(dataDir), "stand-in.log")
 	cmd := exec.Command(rcloneBin, "serve", "s3", "--addr", standInAddr, "--auth-key", keyID+","+secret,
-		"--config", os.DevNull, "--cache-dir", filepath.Join(filepath.Dir(dataDir), "stand-in-cache"),
+		"--config", testtools.NoConfig(t), "--cache-dir", filepath.Join(filepath.Dir(dataDir), "stand-in-cache"),
 		"-vv", "--log-file", logFile, dataDir)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

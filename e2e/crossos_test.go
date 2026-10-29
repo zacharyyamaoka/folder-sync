@@ -356,7 +356,7 @@ func memoryStandIn(t *testing.T, rcloneBin, keyID, secret string) *s3.Client {
 	}
 	work := t.TempDir()
 	logFile := filepath.Join(work, "stand-in.log")
-	cmd := exec.Command(rcloneBin, "serve", "s3", "--addr", standInAddr, "--auth-key", keyID+","+secret, "--config", os.DevNull,
+	cmd := exec.Command(rcloneBin, "serve", "s3", "--addr", standInAddr, "--auth-key", keyID+","+secret, "--config", testtools.NoConfig(t),
 		"--cache-dir", filepath.Join(work, "cache"), "-vv", "--log-file", logFile, ":memory:")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

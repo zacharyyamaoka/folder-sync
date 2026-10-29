@@ -29,7 +29,9 @@ case "$machine" in
     exit 1 ;;
 esac
 exe=""
-case "$platform" in windows-*) exe=".exe" ;; esac
+# WHY no --config /dev/null on Windows: Git Bash turns it into "nul", which rclone refuses as a reserved device name
+config_args=(--config /dev/null)
+case "$platform" in windows-*) exe=".exe"; config_args=() ;; esac
 RCLONE_SHA256="$(awk -v key="\"$platform\":" '$1 == key {gsub(/[",]/, "", $2); print $2}' "$pins")"
 zip_name="rclone-$RCLONE_VERSION-$platform.zip"
 url="$BASE_URL/$RCLONE_VERSION/$zip_name"
@@ -42,7 +44,7 @@ if [[ "${1:-}" == "--print-plan" ]]; then
   exit 0
 fi
 
-if [[ -x "$tools/rclone$exe" ]] && "$tools/rclone$exe" version --config /dev/null | head -1 | grep -q "rclone $RCLONE_VERSION"; then
+if [[ -x "$tools/rclone$exe" ]] && "$tools/rclone$exe" version ${config_args[@]+"${config_args[@]}"} | head -1 | grep -q "rclone $RCLONE_VERSION"; then
   echo "dev-tools: $tools/rclone$exe is already $RCLONE_VERSION"
   exit 0
 fi
@@ -82,4 +84,4 @@ else
   exit 1
 fi
 rm -f "$zip"
-"$tools/rclone$exe" version --config /dev/null | head -1
+"$tools/rclone$exe" version ${config_args[@]+"${config_args[@]}"} | head -1
