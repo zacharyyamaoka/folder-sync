@@ -1,0 +1,88 @@
+# The tests, on the three OSes folder-sync ships on (Zach, 2026-10-29: test every place the app touches the OS, on every
+# OS; the UI once). `go vet` and `go test ./...` (the e2e included) run on Linux, macOS and Windows on every push and pull
+# request.
+#
+# Each job's summary says how many e2e tests ran and how many skipped (scripts/testsummary), because a skipped e2e looks
+# green and tests nothing. FOLDER_SYNC_E2E_REQUIRE=1 turns a skip for a missing tool (rclone, node, python's jsonschema)
+# into a failure (internal/testtools).
+# WHY every action pinned to a full commit SHA, with its release in the comment, at least two weeks old (Zach's rule for new
+# dependencies, 2026-10-28). desktop-release.yml pins the same releases by tag.
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FOLDER_SYNC_E2E_REQUIRE: "1"
+  # Cases a run found failing, skipped under their id until fixed (what is wrong: knownBugs in e2e/crossos_test.go). The
+  # summary lists them as quarantined. Empty this to see them fail.
+  FOLDER_SYNC_QUARANTINE: "junk-files,unicode-normalization"
+
+jobs:
+  test:
+    name: test (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            # WHY 22.04: the oldest Ubuntu a release builds on (desktop-release.yml)
+            runner: ubuntu-22.04
+          - name: macos
+            runner: macos-latest
+          - name: windows
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        # WHY bash everywhere: scripts/dev-tools is bash; Git Bash is what windows-latest ships
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # e2e needs node >= 22.18 (it runs the Worker reader's TypeScript directly)
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: jsonschema (the manifest-schema check)
+        run: python -m pip install jsonschema
+
+      - name: The pinned rclone (scripts/dev-tools)
+        run: scripts/dev-tools
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (e2e included)
+        run: |
+          set +e
+          go test -count=1 -json ./... > "$RUNNER_TEMP/test.json"
+          status=$?
+          go run ./scripts/testsummary -os "$RUNNER_OS" < "$RUNNER_TEMP/test.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          go run ./scripts/testsummary -failures < "$RUNNER_TEMP/test.json"
+          exit $status
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: test-json-${{ matrix.name }}
+          path: ${{ runner.temp }}/test.json
+          retention-days: 7
