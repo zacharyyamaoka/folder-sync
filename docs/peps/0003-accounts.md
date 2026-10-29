@@ -201,6 +201,13 @@ until they are back under (their machines' deletes, through the Worker, free spa
 their quota. A tighter bound needs R2 itself to meter the prefix (an R2 bucket per person, or a
 Worker in the write path), not built.
 
+**Per-person ceilings, and where they go next (Zach, 2026-10-29).** `QUOTA_BY_OWNER` (a JSON var, `{"<user id>":
+{"bytes": n, "objects": n}}`, read by `quotaOf(env, owner)`) overrides the two defaults for one person. The operator
+sets it by hand: Zach's own account is at 10 GiB. Direction, not built: follow Obsidian Sync, where each account gets
+its own storage partition. The ceiling comes from the person's subscription plan, not an operator edit.
+`QUOTA_BY_OWNER` is the stand-in until billing exists. Zach's words: "eventually though it would only be settable based
+on your subscription plan".
+
 ### 3.8 Go-live: production email codes
 
 Zach sets these himself; no value is ever in a file or a chat:
