@@ -1,8 +1,14 @@
 package names
 
 import (
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
+
+	"folder-sync/internal/testtools"
 )
 
 func TestCheckRelative(t *testing.T) {
@@ -60,5 +66,36 @@ func TestLint(t *testing.T) {
 	}
 	if !reflect.DeepEqual(paths, []string{"README.md", "readme.md", "CON.txt", "manifest.json"}) {
 		t.Fatalf("skipped = %q", paths)
+	}
+}
+
+// TestEveryTrackedPathChecksOutOnWindows: git cannot create a file with a ':' (or a reserved device name, or a trailing
+// dot) on Windows, so such a path in the repo breaks `git clone` there, before any test runs (a fixture named after an
+// RFC 3339 time did exactly that, 2026-10-29). The rule is internal/names' own CheckWindows, the one the sync applies.
+func TestEveryTrackedPathChecksOutOnWindows(t *testing.T) {
+	_, here, _, _ := runtime.Caller(0)
+	repo := filepath.Join(filepath.Dir(here), "..", "..")
+	cmd := exec.Command("git", "ls-files", "-z")
+	cmd.Dir = repo
+	out, err := cmd.Output()
+	if err != nil {
+		testtools.Missing(t, "git ls-files: %v", err)
+	}
+	var paths []string
+	for _, p := range strings.Split(string(out), "\x00") {
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) < 100 {
+		t.Fatalf("git ls-files listed only %d paths: is this a checkout?", len(paths))
+	}
+	for _, p := range paths {
+		if err := CheckWindows(p); err != nil {
+			t.Errorf("tracked path cannot be checked out on Windows: %v", err)
+		}
+	}
+	for _, group := range CaseTwins(paths) {
+		t.Errorf("tracked paths differ only by case, so one is lost on Windows and macOS: %v", group)
 	}
 }
