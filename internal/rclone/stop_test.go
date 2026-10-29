@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"folder-sync/internal/layout"
+	"folder-sync/internal/testtools"
 )
 
 // A stop cuts rclone mid-fetch. rclone writes a fetch to <name>.<hash>.partial and renames it at the end; killed
@@ -21,10 +22,7 @@ func TestACutFetchLeavesNoPartial(t *testing.T) {
 		t.Skip("Windows has no SIGTERM: a stop there is still a plain kill")
 	}
 	_, here, _, _ := runtime.Caller(0)
-	bin := filepath.Join(filepath.Dir(here), "..", "..", ".tools", "rclone")
-	if _, err := os.Stat(bin); err != nil {
-		t.Skip("no .tools/rclone: run scripts/dev-tools")
-	}
+	bin := testtools.PinnedRclone(t, filepath.Join(filepath.Dir(here), "..", ".."))
 	home := t.TempDir()
 	l, err := layout.For(runtime.GOOS, func(key string) string { return map[string]string{"HOME": home}[key] })
 	if err != nil {
@@ -51,10 +49,24 @@ func TestACutFetchLeavesNoPartial(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		// 4 MiB at 200 KiB/s: about 20 s, so the stop always lands mid-fetch
-		_, err := r.Run(ctx, "copy", "--bwlimit", "200k", src, dst)
+		// WHY --disable Copy: on macOS rclone clones a file between two local folders at once (macOS CI, 2026-10-29: the whole
+		// 4 MiB in 0.08 s, no .partial, --bwlimit ignored). A fetch from the bucket is always a stream, so make this one too.
+		_, err := r.Run(ctx, "copy", "--disable", "Copy", "--bwlimit", "200k", src, dst)
 		done <- err
 	}()
 	for deadline := time.Now().Add(15 * time.Second); len(partials()) == 0; time.Sleep(20 * time.Millisecond) {
+		// WHY look at done: a copy that ended before any .partial showed (rclone cloning the file, or failing to start) is a
+		// different problem from a slow start, and the message must say which
+		select {
+		case err := <-done:
+			entries, _ := os.ReadDir(dst)
+			names := []string{}
+			for _, entry := range entries {
+				names = append(names, entry.Name())
+			}
+			t.Fatalf("rclone returned (err=%v) before any .partial appeared; %s holds %v", err, dst, names)
+		default:
+		}
 		if time.Now().After(deadline) {
 			stop()
 			t.Fatal("rclone never started the fetch")

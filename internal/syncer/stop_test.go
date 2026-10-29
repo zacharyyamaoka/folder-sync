@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -30,6 +31,9 @@ esac
 // contract (a no-change round is one conditional GET) breaks, which the e2e suite caught as a
 // flaky "second round with no changes".
 func TestStopDuringTheManifestPublishStillCommitsIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fakes are /bin/sh scripts")
+	}
 	root := t.TempDir()
 	fake := filepath.Join(root, "rclone")
 	if err := os.WriteFile(fake, []byte(fakeRclone), 0o755); err != nil {

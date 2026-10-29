@@ -113,7 +113,20 @@ func TestLoginIsTheDeviceGrantAndStoresAccountJSON(t *testing.T) {
 	if info, _ := os.Stat(l.Account); info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %v", info.Mode().Perm())
 	}
-	want := "folder-sync/" + version + " (" + h.Name + "; "
+	// WHY not h.Name as is: account.UserAgent keeps a header to one safe latin-1 line, so it turns anything outside
+	// [A-Za-z0-9._ -] into "?" and cuts the name at 64 bytes (a macOS runner's hostname is longer than that).
+	// Spelled out here, not by calling UserAgent, so the test is not its own oracle.
+	safe := ""
+	for _, r := range h.Name {
+		if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._ -", r) {
+			r = '?'
+		}
+		safe += string(r)
+	}
+	if len(safe) > 64 {
+		safe = safe[:64]
+	}
+	want := "folder-sync/" + version + " (" + safe + "; "
 	for _, agent := range fake.agents {
 		if !strings.HasPrefix(agent, want) {
 			t.Fatalf("User-Agent %q, want %q…", agent, want)

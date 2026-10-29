@@ -1,0 +1,76 @@
+# Builds the Windows and macOS installers and installs them silently, WITHOUT publishing anything (PEP 0006). The same smoke
+# runs inside desktop-release.yml, but that workflow only starts from a desktop-v* tag or a dispatch that creates one and
+# publishes; this one lets a pull request or a plain dispatch find a broken installer first.
+#   Windows  msiexec /i <msi> /qn, and the NSIS -setup.exe /S        macOS  mount the .dmg, copy the .app
+# then each installed copy's `folder-sync version` must exit 0 (app/scripts/smoke_install.sh).
+# No release job, no secrets, contents: read only. WHY every action pinned to a full commit SHA, as in test.yml.
+name: desktop-smoke
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - ".github/workflows/desktop-*.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: smoke (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            runner: macos-latest
+            target: universal-apple-darwin
+            rust_targets: aarch64-apple-darwin x86_64-apple-darwin
+            args: --target universal-apple-darwin --bundles app,dmg
+            bundle_dir: app/src-tauri/target/universal-apple-darwin/release/bundle
+          - name: windows
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            rust_targets: x86_64-pc-windows-msvc
+            args: --bundles msi,nsis
+            bundle_dir: app/src-tauri/target/release/bundle
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      # The hosted images carry rustup and a stable Rust; only the targets need adding (no third-party rust action).
+      - name: Rust targets
+        run: rustup target add ${{ matrix.rust_targets }}
+
+      - name: Engine sidecar (Go, ${{ matrix.target }})
+        run: app/scripts/build_engine.sh "${{ matrix.target }}" "desktop-smoke-$(git rev-parse --short HEAD)"
+
+      - name: Tauri CLI (pinned in app/package-lock.json)
+        run: npm ci --prefix app --no-audit --no-fund
+
+      - name: Build the installers
+        working-directory: app
+        env:
+          NO_STRIP: "true"
+        run: npm run tauri -- build ${{ matrix.args }}
+
+      - name: Silent-install smoke (installers install, the installed engine runs)
+        run: app/scripts/smoke_install.sh "${{ matrix.name }}" "${{ matrix.bundle_dir }}"

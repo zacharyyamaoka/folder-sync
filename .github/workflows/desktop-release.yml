@@ -115,6 +115,14 @@ jobs:
             windows) ls nsis/*-setup.exe msi/*.msi ;;
           esac
 
+      # WHY here, before the upload: a bundle that builds but will not install silently, or installs without the engine,
+      # fails the job, and `release` needs this job, so nothing is published from it. Linux is covered by the dpkg check above.
+      # Adds no publish path: it only runs the installers on this runner (app/scripts/smoke_install.sh).
+      - name: Silent-install smoke (installers install, the installed engine runs)
+        if: matrix.name != 'linux'
+        shell: bash
+        run: app/scripts/smoke_install.sh "${{ matrix.name }}" "${{ matrix.bundle_dir }}"
+
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: bundles-${{ matrix.name }}

@@ -23,6 +23,7 @@ import (
 
 	"folder-sync/internal/history"
 	"folder-sync/internal/manifest"
+	"folder-sync/internal/testtools"
 )
 
 var repo = func() string {
@@ -67,7 +68,7 @@ func background(t *testing.T, logPath string, env []string, dir string, argv ...
 	done := make(chan struct{})
 	go func() { cmd.Wait(); log.Close(); close(done) }()
 	t.Cleanup(func() {
-		cmd.Process.Signal(syscall.SIGTERM)
+		testtools.Terminate(cmd.Process)
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
@@ -82,12 +83,9 @@ func newE2E(t *testing.T) *e2e {
 	if testing.Short() {
 		t.Skip("-short: no stand-in")
 	}
-	rcloneBin := filepath.Join(repo, ".tools", "rclone")
-	if _, err := os.Stat(rcloneBin); err != nil {
-		t.Skip("no .tools/rclone: run scripts/dev-tools first")
-	}
+	rcloneBin := testtools.PinnedRclone(t, repo)
 	work := t.TempDir()
-	e := &e2e{t: t, bin: filepath.Join(work, "folder-sync"), home: filepath.Join(work, "home"), folder: filepath.Join(work, "notes"), data: filepath.Join(work, "s3")}
+	e := &e2e{t: t, bin: filepath.Join(work, testtools.Exe("folder-sync")), home: filepath.Join(work, "home"), folder: filepath.Join(work, "notes"), data: filepath.Join(work, "s3")}
 	build := exec.Command("go", "build", "-o", e.bin, "./cmd/folder-sync")
 	build.Dir = repo
 	if goroot := runtime.GOROOT(); goroot != "" {
@@ -102,7 +100,7 @@ func newE2E(t *testing.T) *e2e {
 	addr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
 	key, secret := "serve"+fmt.Sprint(time.Now().UnixNano()%1e6), "secret-for-the-stand-in-only"
 	background(t, filepath.Join(work, "stand-in.log"), os.Environ(), work, rcloneBin, "serve", "s3", "--addr", addr, "--auth-key", key+","+secret,
-		"--config", os.DevNull, "--cache-dir", filepath.Join(work, "stand-in-cache"), e.data)
+		"--config", testtools.NoConfig(t), "--cache-dir", filepath.Join(work, "stand-in-cache"), e.data)
 	for i := 0; ; i++ {
 		if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
 			conn.Close()
@@ -114,11 +112,11 @@ func newE2E(t *testing.T) *e2e {
 		time.Sleep(100 * time.Millisecond)
 	}
 	for _, kv := range os.Environ() {
-		if upper := strings.ToUpper(kv); !strings.HasPrefix(upper, "HOME=") && !strings.HasPrefix(upper, "FOLDER_SYNC_") && !strings.HasPrefix(upper, "RCLONE_") {
+		if upper := strings.ToUpper(kv); !testtools.IsHomeVar(kv) && !strings.HasPrefix(upper, "FOLDER_SYNC_") && !strings.HasPrefix(upper, "RCLONE_") {
 			e.env = append(e.env, kv)
 		}
 	}
-	e.env = append(e.env, "HOME="+e.home, "FOLDER_SYNC_RCLONE="+rcloneBin, "FOLDER_SYNC_ACCESS_KEY_ID="+key,
+	e.env = append(append(e.env, testtools.HomeEnv(e.home)...), "FOLDER_SYNC_RCLONE="+rcloneBin, "FOLDER_SYNC_ACCESS_KEY_ID="+key,
 		"FOLDER_SYNC_SECRET_ACCESS_KEY="+secret, "FOLDER_SYNC_ENDPOINT=http://"+addr)
 	return e
 }
@@ -126,7 +124,11 @@ func newE2E(t *testing.T) *e2e {
 func (e *e2e) must(args ...string) string {
 	e.t.Helper()
 	cmd := exec.Command(e.bin, args...)
-	cmd.Env, cmd.Dir = e.env, e.folder
+	// WHY PWD: a shell sets it, and Go's os.Getwd (so filepath.Abs(".")) then answers the folder as the person reached it. Without it
+	// the kernel answers the real path, and on macOS t.TempDir() (/var/folders/…) comes back as /private/var/folders/…. The engine
+	// keeps the folder as configured, never canonicalised: someone whose folder is a symlink (~/Dropbox -> …) expects to see their
+	// own path, and the project's state key is made from it.
+	cmd.Env, cmd.Dir = append(append([]string{}, e.env...), "PWD="+e.folder), e.folder
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		e.t.Fatalf("folder-sync %s: %v\n%s", strings.Join(args, " "), err, out)
@@ -286,6 +288,9 @@ func TestServeEndToEndOnTheStandIn(t *testing.T) {
 		t.Errorf("kept %q is not a version id", kept)
 	}
 
+	if runtime.GOOS == "windows" {
+		return // no SIGTERM to send: a kill leaves serve.json for the next serve to find stale
+	}
 	serving.Process.Signal(syscall.SIGTERM)
 	for i := 0; i < 100; i++ {
 		if _, err := os.Stat(filepath.Join(e.home, ".folder-sync", "serve.json")); os.IsNotExist(err) {

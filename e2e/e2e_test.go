@@ -30,6 +30,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"folder-sync/internal/layout"
+	"folder-sync/internal/testtools"
 )
 
 const (
@@ -137,7 +140,7 @@ func startStandIn(t *testing.T, rcloneBin, dataDir, keyID, secret string) {
 	}
 	logFile := filepath.Join(filepath.Dir(dataDir), "stand-in.log")
 	cmd := exec.Command(rcloneBin, "serve", "s3", "--addr", standInAddr, "--auth-key", keyID+","+secret,
-		"--config", os.DevNull, "--cache-dir", filepath.Join(filepath.Dir(dataDir), "stand-in-cache"),
+		"--config", testtools.NoConfig(t), "--cache-dir", filepath.Join(filepath.Dir(dataDir), "stand-in-cache"),
 		"-vv", "--log-file", logFile, dataDir)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -145,7 +148,7 @@ func startStandIn(t *testing.T, rcloneBin, dataDir, keyID, secret string) {
 	pid := cmd.Process.Pid
 	t.Logf("stand-in: rclone serve s3 on %s, pid %d", standInAddr, pid)
 	t.Cleanup(func() {
-		cmd.Process.Signal(syscall.SIGTERM)
+		testtools.Terminate(cmd.Process)
 		done := make(chan struct{})
 		go func() { cmd.Wait(); close(done) }()
 		select {
@@ -197,7 +200,7 @@ func baseEnv() []string {
 	var env []string
 	for _, kv := range os.Environ() {
 		upper := strings.ToUpper(kv)
-		if strings.HasPrefix(upper, "HOME=") || strings.HasPrefix(upper, "FOLDER_SYNC_") || strings.HasPrefix(upper, "RCLONE_") {
+		if testtools.IsHomeVar(kv) || strings.HasPrefix(upper, "FOLDER_SYNC_") || strings.HasPrefix(upper, "RCLONE_") {
 			continue
 		}
 		env = append(env, kv)
@@ -210,7 +213,7 @@ func (w *world) newMachine(name string, withKeyEnv bool) *machine {
 	m := &machine{name: name, home: filepath.Join(root, "home-"+name), folder: filepath.Join(root, name)}
 	os.MkdirAll(m.home, 0o700)
 	os.MkdirAll(m.folder, 0o755)
-	m.env = append(baseEnv(), "HOME="+m.home, "FOLDER_SYNC_RCLONE="+w.rclone)
+	m.env = append(append(baseEnv(), testtools.HomeEnv(m.home)...), "FOLDER_SYNC_RCLONE="+w.rclone)
 	if withKeyEnv {
 		m.env = append(m.env, w.keyEnv()...)
 	}
@@ -250,18 +253,38 @@ func (w *world) record(step, machineName, command, output string, ops []op) {
 	})
 }
 
+// rcloneDiskNames is how rclone's local backend spells on a Windows disk the characters Windows cannot hold: the
+// fullwidth look-alikes. The stand-in (rclone serve s3 over a folder) stores a key such as
+// _history/…/2026-10-29T01:33:50.1Z_ab… under such a name, and a test that reads the folder directly must too.
+var rcloneDiskNames = strings.NewReplacer(":", "：", "<", "＜", ">", "＞", `"`, "＂", "*", "＊", "?", "？", "|", "｜")
+var rcloneKeyNames = strings.NewReplacer("：", ":", "＜", "<", "＞", ">", "＂", `"`, "＊", "*", "？", "?", "｜", "|")
+
+func diskName(key string) string {
+	if runtime.GOOS == "windows" {
+		return rcloneDiskNames.Replace(key)
+	}
+	return key
+}
+
+func keyName(disk string) string {
+	if runtime.GOOS == "windows" {
+		return rcloneKeyNames.Replace(disk)
+	}
+	return disk
+}
+
 func (w *world) object(key string) (string, bool) {
-	data, err := os.ReadFile(filepath.Join(w.data, bucket, filepath.FromSlash(key)))
+	data, err := os.ReadFile(filepath.Join(w.data, bucket, filepath.FromSlash(diskName(key))))
 	return string(data), err == nil
 }
 
 func (w *world) objects(prefix string) []string {
 	var keys []string
 	root := filepath.Join(w.data, bucket)
-	filepath.WalkDir(filepath.Join(root, filepath.FromSlash(prefix)), func(path string, d fs.DirEntry, err error) error {
+	filepath.WalkDir(filepath.Join(root, filepath.FromSlash(diskName(prefix))), func(path string, d fs.DirEntry, err error) error {
 		if err == nil && !d.IsDir() {
 			rel, _ := filepath.Rel(root, path)
-			keys = append(keys, filepath.ToSlash(rel))
+			keys = append(keys, keyName(filepath.ToSlash(rel)))
 		}
 		return nil
 	})
@@ -330,6 +353,14 @@ func editConfig(t *testing.T, m *machine, from, to string) {
 	os.WriteFile(path, []byte(strings.Replace(string(data), from, to, 1)), 0o644)
 }
 
+// mtimeGranularity is how finely this OS's filesystem keeps a modification time.
+var mtimeGranularity = func() time.Duration {
+	if runtime.GOOS == "windows" {
+		return 100 * time.Nanosecond
+	}
+	return time.Nanosecond
+}()
+
 func nodeBinary(t *testing.T) string {
 	for _, candidate := range []string{"/usr/bin/node", "node"} {
 		path, err := exec.LookPath(candidate)
@@ -343,7 +374,7 @@ func nodeBinary(t *testing.T) string {
 			return path
 		}
 	}
-	t.Skip("node ≥ 22.18 not found")
+	testtools.Missing(t, "node ≥ 22.18 not found")
 	return ""
 }
 
@@ -392,21 +423,20 @@ func missingPythonModule(python, module string) string {
 func serviceExpectation(goos, home string) (glob, command string) {
 	switch goos {
 	case "darwin":
-		return filepath.Join(home, "Library", "LaunchAgents", "dev.folder-sync.demo-*.plist"), "launchctl bootstrap gui/$(id -u) "
+		return layout.Join(goos, home, "Library", "LaunchAgents", "dev.folder-sync.demo-*.plist"), "launchctl bootstrap gui/$(id -u) "
+	case "windows":
+		return layout.Join(goos, home, ".folder-sync", "service", "folder-sync-demo-*.xml"), `schtasks /Create /TN "folder-sync\demo-`
 	default:
-		return filepath.Join(home, ".folder-sync", "service", "folder-sync-demo-*.service"), "systemctl --user enable --now "
+		return layout.Join(goos, home, ".folder-sync", "service", "folder-sync-demo-*.service"), "systemctl --user enable --now "
 	}
 }
 
 // --- the test -----------------------------------------------------------------------
 
 func TestTwoMachines(t *testing.T) {
-	rcloneBin := filepath.Join(repo, ".tools", "rclone")
-	if _, err := os.Stat(rcloneBin); err != nil {
-		t.Skip("no .tools/rclone: run scripts/dev-tools first")
-	}
+	rcloneBin := testtools.PinnedRclone(t, repo)
 	work := t.TempDir()
-	bin := filepath.Join(work, "folder-sync")
+	bin := filepath.Join(work, testtools.Exe("folder-sync"))
 	build := exec.Command("go", "build", "-o", bin, "./cmd/folder-sync")
 	build.Dir = repo
 	if goroot := runtime.GOROOT(); goroot != "" {
@@ -437,7 +467,7 @@ func TestTwoMachines(t *testing.T) {
 	if !strings.Contains(out, "Stored key …") || strings.Contains(out, w.secret) {
 		t.Fatalf("login output: %s", out)
 	}
-	a.env = append(baseEnv(), "HOME="+a.home, "FOLDER_SYNC_RCLONE="+w.rclone)
+	a.env = append(append(baseEnv(), testtools.HomeEnv(a.home)...), "FOLDER_SYNC_RCLONE="+w.rclone)
 
 	// A's folder: files to sync, files the default ignores must keep out, names Windows can't hold.
 	mtime := time.Date(2026, 10, 1, 10, 20, 30, 123456789, time.UTC)
@@ -534,7 +564,8 @@ func TestTwoMachines(t *testing.T) {
 			t.Fatalf("B's copy: %q %v\n%s", data, err, out)
 		}
 		info, _ := os.Stat(copyPath)
-		if !info.ModTime().Equal(mtime) {
+		// WHY a tolerance: NTFS stores times in 100 ns steps, so a nanosecond mtime reads back rounded there
+		if got := info.ModTime(); got.Sub(mtime).Abs() >= mtimeGranularity {
 			t.Errorf("mtime %s, want %s", info.ModTime().UTC().Format(time.RFC3339Nano), mtime.Format(time.RFC3339Nano))
 		}
 		if _, err := os.Stat(filepath.Join(b.folder, "hosts", idA, ".env")); err == nil {
@@ -588,7 +619,17 @@ func TestTwoMachines(t *testing.T) {
 		}
 	})
 
+	if runtime.GOOS == "windows" {
+		// The next subtest cannot run here (below), but what it leaves behind is what the ones after it start from: A has
+		// found B and pulled from it, and B has pulled A's latest. Do that part with plain rounds.
+		w.must(a, "sync", "--once", "--discover")
+		w.must(b, "sync", "--once")
+		w.ops.take()
+	}
 	t.Run("sync --watch picks up a change, and stops cleanly", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("a Go test cannot deliver Ctrl-C to a child on Windows; the stop path is covered by internal/syncer's tests")
+		}
 		editConfig(t, a, `interval = "10s"`, `interval = "1s"`)
 		cmd := exec.Command(w.bin, "sync", "--watch")
 		cmd.Env, cmd.Dir = a.env, a.folder
@@ -754,6 +795,17 @@ func TestTwoMachines(t *testing.T) {
 		w.record("A: install-service", "A", "folder-sync sync --install-service", out, w.ops.take())
 		glob, command := serviceExpectation(runtime.GOOS, a.home)
 		units, _ := filepath.Glob(glob)
+		if runtime.GOOS == "windows" {
+			// the task XML is UTF-16, and the schtasks line names the task, then the XML path
+			if len(units) != 1 || !strings.Contains(out, command) || !strings.Contains(out, `/XML "`+units[0]+`"`) {
+				t.Fatalf("%s -> %v\n%s", glob, units, out)
+			}
+			unit, _ := os.ReadFile(units[0])
+			if !bytes.Contains(unit, utf16LE(`sync --watch --dir`)) {
+				t.Fatalf("task XML lacks the watch command (%d bytes)", len(unit))
+			}
+			return
+		}
 		if len(units) != 1 || !strings.Contains(out, command+units[0]) {
 			t.Fatalf("%s -> %v\n%s", glob, units, out)
 		}
@@ -806,8 +858,8 @@ func TestTwoMachines(t *testing.T) {
 		if len(manifests) != 4 {
 			t.Fatalf("want 4 manifests (A, B, guard, guard's peer B), got %v", manifests)
 		}
-		if reason := missingPythonModule("python3", "jsonschema"); reason != "" {
-			t.Skip(reason)
+		if reason := missingPythonModule(testtools.PythonBinary(), "jsonschema"); reason != "" {
+			testtools.Missing(t, "%s", reason)
 		}
 		script := `import json, sys, jsonschema
 schema = json.load(open(sys.argv[1]))
@@ -815,7 +867,7 @@ for path in sys.argv[2:]:
     jsonschema.validate(json.load(open(path)), schema, format_checker=jsonschema.FormatChecker())
 print("valid:", len(sys.argv) - 2)`
 		args := append([]string{"-c", script, filepath.Join(repo, "schema", "manifest.schema.json")}, manifests...)
-		out, err := exec.Command("python3", args...).CombinedOutput()
+		out, err := exec.Command(testtools.PythonBinary(), args...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("%v\n%s", err, out)
 		}
@@ -825,7 +877,7 @@ print("valid:", len(sys.argv) - 2)`
 	readerEnv := append(baseEnv(), w.keyEnv()...)
 
 	t.Run("the Python reader lists and reads B's view", func(t *testing.T) {
-		cmd := exec.Command("python3", filepath.Join(repo, "readers", "python", "folder_sync_read.py"), "--bucket", bucket, "--project", project, "list")
+		cmd := exec.Command(testtools.PythonBinary(), filepath.Join(repo, "readers", "python", "folder_sync_read.py"), "--bucket", bucket, "--project", project, "list")
 		cmd.Env = readerEnv
 		out, err := cmd.Output()
 		if err != nil {
@@ -837,7 +889,7 @@ print("valid:", len(sys.argv) - 2)`
 			var raw map[string]any
 			json.Unmarshal([]byte(line), &raw)
 			ref.HostID, ref.Path = raw["host_id"].(string), raw["path"].(string)
-			cat := exec.Command("python3", filepath.Join(repo, "readers", "python", "folder_sync_read.py"), "--bucket", bucket, "--project", project, "cat", ref.HostID, ref.Path)
+			cat := exec.Command(testtools.PythonBinary(), filepath.Join(repo, "readers", "python", "folder_sync_read.py"), "--bucket", bucket, "--project", project, "cat", ref.HostID, ref.Path)
 			cat.Env = readerEnv
 			data, err := cat.Output()
 			if err != nil {
@@ -911,7 +963,9 @@ print("valid:", len(sys.argv) - 2)`
 				t.Errorf("the secret was printed: %s", out)
 			}
 		}
-		if info, err := os.Stat(filepath.Join(a.home, ".folder-sync", "credentials.json")); err != nil || info.Mode().Perm() != 0o600 {
+		// WHY not on Windows: it has no Unix mode bits; the file sits under the user's profile, which only they can read
+		info, err := os.Stat(filepath.Join(a.home, ".folder-sync", "credentials.json"))
+		if err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 			t.Errorf("credentials.json: %v %v", info, err)
 		}
 	})

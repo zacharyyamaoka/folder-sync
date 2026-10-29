@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -779,7 +780,9 @@ func TestServeJSONMatchesTheFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o600 {
+	// WHY not the mode on Windows: it has no Unix mode bits (Stat says 0666); the file sits under the user's profile folder,
+	// which other accounts cannot read
+	if err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatalf("serve.json: %v %v", err, info.Mode())
 	}
 	var got, want map[string]any

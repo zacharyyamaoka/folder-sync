@@ -159,6 +159,10 @@ func TestDevToolsScriptUsesTheSamePin(t *testing.T) {
 		{"Linux", "aarch64", "linux-arm64"},
 		{"Darwin", "arm64", "osx-arm64"},
 		{"Darwin", "x86_64", "osx-amd64"},
+		// Git Bash on a Windows runner: uname -s carries the Windows build; MSYS2 says MSYS_NT
+		{"MINGW64_NT-10.0-20348", "x86_64", "windows-amd64"},
+		{"MSYS_NT-10.0-26100", "x86_64", "windows-amd64"},
+		{"MINGW64_NT-10.0-26100", "aarch64", "windows-arm64"},
 	}
 	for _, target := range targets {
 		fields, stderr, err := devToolsPlan(t, target.uname, target.machine)
@@ -179,7 +183,7 @@ func TestDevToolsScriptUsesTheSamePin(t *testing.T) {
 }
 
 func TestDevToolsScriptRefusesWhatIsNotPinned(t *testing.T) {
-	for _, target := range [][2]string{{"Linux", "riscv64"}, {"Darwin", "ppc"}, {"MINGW64_NT-10.0", "x86_64"}} {
+	for _, target := range [][2]string{{"Linux", "riscv64"}, {"Darwin", "ppc"}, {"MINGW64_NT-10.0", "riscv64"}, {"FreeBSD", "amd64"}} {
 		_, stderr, err := devToolsPlan(t, target[0], target[1])
 		if err == nil || !strings.Contains(stderr, "no pinned rclone") {
 			t.Errorf("%v: want a refusal naming the missing pin, got %v %q", target, err, stderr)

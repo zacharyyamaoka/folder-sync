@@ -172,7 +172,10 @@ const rules = [
 		run: (path) => {
 			const doc = json(path);
 			const errors = valid(doc, "pulls.schema.json");
-			if (!path.endsWith(`${doc.at}.json`)) errors.push(`the file name must end in the record's at (${doc.at}.json)`);
+			// WHY basic ISO 8601 (no colons) in the FILE name: git cannot check out a ':' on Windows. The bucket key keeps the
+			// extended form, `pulls/<at>.json` (docs/CONTRACT.md); nothing writes that key to a local disk.
+			const basic = String(doc.at).replace(/[-:.]/g, "");
+			if (!path.endsWith(`-${basic}.json`)) errors.push(`the file name must end in the record's at in basic form (-${basic}.json)`);
 			const order = (doc.events ?? []).map((e) => `${e.peer}/${e.path}`);
 			if (JSON.stringify(order) !== JSON.stringify([...order].sort())) errors.push("events must be in (peer, path) order");
 			for (const [i, ev] of (doc.events ?? []).entries()) {

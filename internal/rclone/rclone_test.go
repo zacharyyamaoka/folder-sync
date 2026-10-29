@@ -3,6 +3,7 @@ package rclone
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -63,6 +64,9 @@ func TestPath(t *testing.T) {
 // WHY: `rclone version` alone creates ~/.config/rclone, which the README promises never
 // happens (everything lives in ~/.folder-sync/). Version must say where the config is.
 func TestVersionPassesTheConfigUnderFolderSync(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fakes are /bin/sh scripts")
+	}
 	home := t.TempDir()
 	l, err := layout.For("darwin", func(key string) string { return map[string]string{"HOME": home}[key] })
 	if err != nil {
