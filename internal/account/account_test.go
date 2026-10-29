@@ -108,6 +108,7 @@ type fakeServer struct {
 	bearers    map[string]string
 	signedOut  bool
 	visibility string
+	limited    []string // Retry-After values (or "" for none) of the 429s the token poll answers first, one each
 }
 
 func (f *fakeServer) handler(t *testing.T) http.Handler {
@@ -131,7 +132,15 @@ func (f *fakeServer) handler(t *testing.T) http.Handler {
 			io.WriteString(w, `{"device_code":"dev-code-1","user_code":"ABCDEFGH","verification_uri":"`+"http://"+r.Host+`/fs/device","verification_uri_complete":"http://`+r.Host+`/fs/device?user_code=ABCDEFGH","expires_in":900,"interval":1}`)
 		case "POST /fs/api/auth/device/token":
 			f.polls++
-			if f.polls <= f.pending {
+			if f.polls <= len(f.limited) {
+				if after := f.limited[f.polls-1]; after != "" {
+					w.Header().Set("Retry-After", after)
+				}
+				w.WriteHeader(429)
+				io.WriteString(w, `{"message":"Too many requests. Please try again later."}`)
+				return
+			}
+			if f.polls <= len(f.limited)+f.pending {
 				w.WriteHeader(400)
 				io.WriteString(w, `{"error":"authorization_pending","error_description":"Authorization pending"}`)
 				return
@@ -235,6 +244,53 @@ func TestDeviceGrantDeniedOrExpired(t *testing.T) {
 	_, err := c.AwaitApproval(context.Background(), Device{DeviceCode: "x", UserCode: "y", URI: "z", ExpiresIn: 0, Interval: 1}, noSleep)
 	if err == nil || !strings.Contains(err.Error(), "expired") {
 		t.Fatalf("an expired code: %v", err)
+	}
+}
+
+// Better Auth's rate limiter answers a poll 429 when a person waits long enough (found on a real Windows sign-in,
+// 2026-10-29): the grant is still alive, so the engine waits and keeps polling.
+func TestDeviceGrantBacksOffOnTooManyRequestsInsteadOfDying(t *testing.T) {
+	f := &fakeServer{limited: []string{"", "7"}}
+	srv := httptest.NewServer(f.handler(t))
+	defer srv.Close()
+	c := NewClient(srv.URL, "ua")
+	d, _ := c.StartDevice(context.Background())
+	var waits []time.Duration
+	record := func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+	token, err := c.AwaitApproval(context.Background(), d, record)
+	if err != nil || token != "tok-machine" {
+		t.Fatalf("token %q, %v", token, err)
+	}
+	// 1 s first; a bare 429 grows the interval as slow_down does (+5 s); Retry-After: 7 is waited out; then the approval
+	want := []time.Duration{time.Second, 6 * time.Second, 7 * time.Second}
+	if f.polls != 3 || len(waits) != 3 || waits[0] != want[0] || waits[1] != want[1] || waits[2] != want[2] {
+		t.Fatalf("%d polls, waits %v, want 3 polls and %v", f.polls, waits, want)
+	}
+}
+
+func TestDeviceGrantBackoffIsCappedAndTheCodesExpiryStillEndsIt(t *testing.T) {
+	for _, status := range []int{429, 503} {
+		polls := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			polls++
+			w.WriteHeader(status)
+			io.WriteString(w, `{"message":"slow down"}`)
+		}))
+		c := NewClient(srv.URL, "ua")
+		var longest time.Duration
+		tick := func(_ context.Context, d time.Duration) error {
+			longest = max(longest, d)
+			time.Sleep(5 * time.Millisecond)
+			return nil
+		}
+		_, err := c.AwaitApproval(context.Background(), Device{DeviceCode: "x", UserCode: "y", URI: "z", ExpiresIn: 1, Interval: 1}, tick)
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "refused") {
+			t.Fatalf("%d for the code's whole life: %v, want the code expired", status, err)
+		}
+		if polls < 5 || longest > time.Minute {
+			t.Fatalf("%d: %d polls, longest wait %v: the engine must keep polling and never wait past a minute", status, polls, longest)
+		}
 	}
 }
 
