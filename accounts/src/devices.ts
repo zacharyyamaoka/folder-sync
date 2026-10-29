@@ -247,7 +247,7 @@ const count = (n: number) => n.toLocaleString("en-US");
 
 /** The storage line: what GET /fs/v1/usage answers (quota.ts), or why it cannot be had now. */
 async function usageLine(env: Env, deps: Deps, userId: string): Promise<string> {
-	const quota = quotaOf(env);
+	const quota = quotaOf(env, userId);
 	const root = userRoot(userId);
 	let used: { bytes: number; objects: number; measured_at?: string; partial?: boolean } | null;
 	let over: string | null = null;

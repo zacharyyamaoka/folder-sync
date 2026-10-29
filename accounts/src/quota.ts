@@ -19,6 +19,8 @@ export interface QuotaEnv {
 	QUOTA_RECHECK_S?: string;
 	/** How old a measurement may be and still admit writes when no newer one can be taken (default 3600). */
 	QUOTA_MAX_AGE_S?: string;
+	/** Per-person ceilings over QUOTA_BYTES / QUOTA_OBJECTS, as JSON: {"<user id>": {"bytes": n, "objects": n}}. */
+	QUOTA_BY_OWNER?: string;
 }
 
 export interface Quota {
@@ -89,8 +91,25 @@ function positive(value: string | undefined, fallback: number): number {
 	return value && Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
 }
 
-export function quotaOf(env: QuotaEnv): Quota {
-	return { bytes: positive(env.QUOTA_BYTES, 1024 ** 3), objects: positive(env.QUOTA_OBJECTS, 100_000), recheckS: positive(env.QUOTA_RECHECK_S, 300), maxAgeS: positive(env.QUOTA_MAX_AGE_S, 3600) };
+/** The quota for `owner`: QUOTA_BYTES / QUOTA_OBJECTS, or that person's entry in QUOTA_BY_OWNER.
+ *  WHY per person, not a bigger global figure (Zach, 2026-10-29: "please increase my limit"): anyone may sign up, so
+ *  raising QUOTA_BYTES raises everyone's share of the operator's bucket; the operator grants more one person at a time.
+ *  A malformed QUOTA_BY_OWNER is ignored rather than failing every request. */
+export function quotaOf(env: QuotaEnv, owner?: string): Quota {
+	let own: { bytes?: unknown; objects?: unknown } = {};
+	if (owner && env.QUOTA_BY_OWNER) {
+		try {
+			own = JSON.parse(env.QUOTA_BY_OWNER)?.[owner] ?? {};
+		} catch {
+			own = {};
+		}
+	}
+	return {
+		bytes: positive(own.bytes === undefined ? env.QUOTA_BYTES : String(own.bytes), positive(env.QUOTA_BYTES, 1024 ** 3)),
+		objects: positive(own.objects === undefined ? env.QUOTA_OBJECTS : String(own.objects), positive(env.QUOTA_OBJECTS, 100_000)),
+		recheckS: positive(env.QUOTA_RECHECK_S, 300),
+		maxAgeS: positive(env.QUOTA_MAX_AGE_S, 3600),
+	};
 }
 
 /** No measurement can be had yet: another is under way, or the last one failed less than a minute ago (503). */

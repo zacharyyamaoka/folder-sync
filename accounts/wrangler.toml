@@ -79,6 +79,9 @@ QUOTA_OBJECTS = "100000"
 QUOTA_RECHECK_S = "300"
 # A measurement older than this (s) admits no new writes when no newer one can be taken: read-only keys, web writes 503
 QUOTA_MAX_AGE_S = "3600"
+# Per-person ceilings over the two above (src/quota.ts quotaOf), by user id: the operator grants more one person at a time.
+# ysoJLOgtD3znbT8X0noLOHEZIyfiyeOG is Zach (zach.yamaoka@gmail.com): 10 GiB (Zach, 2026-10-29: "please increase my limit").
+QUOTA_BY_OWNER = '{"ysoJLOgtD3znbT8X0noLOHEZIyfiyeOG": {"bytes": 10737418240}}'
 # Who sign-in codes come from (an address on a domain verified in Resend); empty: no email codes in production.
 # Codes go out once this and the secret RESEND_API_KEY are both set (src/email.ts, PEP 0003 §3.3).
 EMAIL_FROM = "Robot Parts <signin@robotparts.dev>"
