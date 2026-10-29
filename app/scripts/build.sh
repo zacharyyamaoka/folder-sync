@@ -6,12 +6,8 @@ set -euo pipefail
 APP="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="$(cd "$APP/.." && pwd)"
 GO="${GO:-$(command -v go || echo "$HOME/.local/go/bin/go")}"
-TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 cd "$APP"
-mkdir -p "$APP/src-tauri/binaries"
-VERSION="desktop-$(git -C "$REPO" rev-parse --short HEAD)"
-echo "engine: $GO build ($VERSION) -> src-tauri/binaries/folder-sync-$TRIPLE"
-CGO_ENABLED=0 "$GO" -C "$REPO" build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$APP/src-tauri/binaries/folder-sync-$TRIPLE" ./cmd/folder-sync
+GO="$GO" "$APP/scripts/build_engine.sh"
 if [ ! -x "$APP/node_modules/.bin/tauri" ]; then
   npm --prefix "$APP" install --no-audit --no-fund
 fi

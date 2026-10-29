@@ -143,6 +143,14 @@ fn engine(settings: &Settings) -> Command {
         cmd.env_remove(name);
     }
     cmd.stdin(Stdio::null());
+    // WHY CREATE_NO_WINDOW: the engine is a console program; started from this windowless app, Windows would open a
+    // console window for it on every start (README "macOS and Windows"). rclone, its child, inherits the hidden console.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     cmd
 }
 
@@ -223,12 +231,9 @@ pub fn log(path: &Path, line: &str) {
 }
 
 fn now_hms() -> String {
-    // local time without a time crate: the engine's events carry RFC 3339; the menu wants HH:MM:SS
-    let out = Command::new("date").arg("+%H:%M:%S").output();
-    match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => String::new(),
-    }
+    // WHY chrono, not `date`: Windows has no date.exe and macOS's BSD date has no -d, so the menu's times went blank
+    // there (found building the installers, 2026-10-28). chrono is already in Tauri's tree.
+    chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
 /// On start: signed in (keychain) → folder → engine, or the first step that is missing.
@@ -557,11 +562,8 @@ fn on_event(app: &AppHandle, generation: u64, ev: &Value) {
 
 /// HH:MM:SS of an RFC 3339 UTC stamp, in local time.
 fn local_hms(stamp: &str) -> Option<String> {
-    let out = Command::new("date").args(["-d", stamp, "+%H:%M:%S"]).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    let at = chrono::DateTime::parse_from_rfc3339(stamp).ok()?;
+    Some(at.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
 }
 
 /// Stop the engine and wait for it (SIGTERM: `--watch` finishes the round and the manifest publish first).
@@ -610,5 +612,18 @@ pub fn set_paused(app: &AppHandle, paused: bool) {
         set_status(app, Status::Paused);
     } else {
         start_engine(app);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_hms;
+
+    #[test]
+    fn local_hms_reads_rfc3339_without_a_date_command() {
+        let shown = local_hms("2026-10-28T12:34:56Z").expect("a valid stamp");
+        assert_eq!(shown.len(), 8);
+        assert!(shown.ends_with(":34:56") || shown.ends_with(":04:56"), "{shown}"); // whole- or half-hour zones
+        assert!(local_hms("not a time").is_none());
     }
 }

@@ -262,6 +262,11 @@ class Proof:
 
     def tray_icon_at(self):
         # stalonetray grows from the right edge (east gravity): the app's icon is its rightmost slot
+        # WHY raise it first: with no window manager the stacking order is whoever mapped last, and the browser (opened
+        # for the sign-in) can sit over the tray; the click then lands on the browser and no menu opens (2026-10-28 run)
+        for wid in self.x("search", "--classname", "stalonetray").split():
+            self.x("windowraise", wid)
+        time.sleep(0.15)
         return (W - 24, 22)
 
     def tray_menu(self, name: str, keep_open=False):

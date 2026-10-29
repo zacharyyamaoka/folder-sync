@@ -21,6 +21,8 @@ tauri-plugin-dialog = "=2.7.2"
 keyring = { version = "=3.6.3", features = ["sync-secret-service", "crypto-rust", "apple-native", "windows-native"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# WHY: local HH:MM:SS for the menu and the log on every OS (was the `date` command); already in Tauri's tree
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

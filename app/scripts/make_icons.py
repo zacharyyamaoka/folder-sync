@@ -2,6 +2,7 @@
 """Draw the app icon and the tray's state icons (PNG) for the folder-sync desktop app.
 
 Run: python3 app/scripts/make_icons.py   (needs Pillow). The PNGs are committed; this is how they were made.
+icon.icns (macOS) is made from icon.png by Tauri: npx --prefix app tauri icon app/src-tauri/icons/icon.png -o <scratch>, copy icon.icns.
 WHY one glyph and a small state badge: a tray icon is ~22 px, so the state must read from colour and shape at a
 glance; amber and red are kept for the two states the person must act on (over quota, error), per Zach's calm-UI rule.
 """

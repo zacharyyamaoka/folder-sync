@@ -1,0 +1,188 @@
+# The desktop app's installers (PEP 0006), unsigned for now: push a tag desktop-v<semver> (e.g. desktop-v0.1.0-rc1).
+#   macOS   .dmg (universal: Apple silicon + Intel)        Windows  -setup.exe (NSIS, per user) + .msi
+#   Linux   .AppImage + .deb
+# Each job cross-compiles the Go engine for its target as Tauri's sidecar (app/scripts/build_engine.sh), then builds
+# with Tauri's own tauri-action. The release job renames, checksums (SHA256SUMS), writes the notes with the first-run
+# steps for unsigned apps (app/release/NOTES.md), publishes the GitHub Release, and, once the R2 secrets exist, copies
+# everything to the folder-sync-downloads bucket that /fs/download serves (accounts/src/download.ts).
+# WHY every action pinned to an exact release at least two weeks old (Zach's rule for new dependencies, 2026-10-28).
+name: desktop-release
+
+on:
+  push:
+    tags: ["desktop-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and publish (desktop-v<semver>); it is created at this commit if missing"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref }}-${{ inputs.tag }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            # WHY macos-latest (Apple silicon): Tauri does not cross-compile to macOS; universal-apple-darwin builds
+            # both architectures here and lipo joins them
+            runner: macos-latest
+            target: universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin --bundles app,dmg
+            bundle_dir: app/src-tauri/target/universal-apple-darwin/release/bundle
+          - name: windows
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            rust_targets: x86_64-pc-windows-msvc
+            args: --bundles msi,nsis
+            bundle_dir: app/src-tauri/target/release/bundle
+          - name: linux
+            # WHY 22.04: the AppImage carries no glibc, so it runs only on systems at least as new as the builder's
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            rust_targets: x86_64-unknown-linux-gnu
+            args: --bundles deb,appimage
+            bundle_dir: app/src-tauri/target/release/bundle
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Linux build dependencies
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libdbus-1-dev pkg-config patchelf file
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: ${{ matrix.rust_targets }}
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: app/src-tauri -> target
+          key: ${{ matrix.target }}
+
+      - name: Engine sidecar (Go, ${{ matrix.target }})
+        shell: bash
+        run: app/scripts/build_engine.sh "${{ matrix.target }}" "desktop-${GITHUB_REF_NAME#desktop-v}-$(git rev-parse --short HEAD)"
+
+      - name: Tauri CLI (pinned in app/package-lock.json)
+        run: npm ci --prefix app --no-audit --no-fund
+
+      - name: Build (tauri-action)
+        uses: tauri-apps/tauri-action@action-v1.0.0
+        env:
+          # WHY NO_STRIP: linuxdeploy's bundled strip is too old for the ELF sections current Rust emits (a known
+          # AppImage failure); the release profile already strips
+          NO_STRIP: "true"
+        with:
+          projectPath: app
+          tauriScript: npm run tauri
+          args: ${{ matrix.args }}
+
+      - name: The sidecar is in the bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ matrix.bundle_dir }}"
+          # WHY no `| head`: under pipefail its SIGPIPE fails the step (exit 141) once the listing is long
+          find . -maxdepth 2 -not -path '*/.*' | sort
+          case "${{ matrix.name }}" in
+            macos)   lipo -info macos/folder-sync.app/Contents/MacOS/folder-sync
+                     ls -la macos/folder-sync.app/Contents/MacOS/
+                     codesign -dv macos/folder-sync.app 2>&1 | head -5 ;;
+            linux)   dpkg-deb -c deb/*.deb | grep -E 'usr/bin/folder-sync(-desktop)?$' ;;
+            windows) ls nsis/*-setup.exe msi/*.msi ;;
+          esac
+
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: bundles-${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            ${{ matrix.bundle_dir }}/dmg/*.dmg
+            ${{ matrix.bundle_dir }}/nsis/*-setup.exe
+            ${{ matrix.bundle_dir }}/msi/*.msi
+            ${{ matrix.bundle_dir }}/appimage/*.AppImage
+            ${{ matrix.bundle_dir }}/deb/*.deb
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      # The downloads bucket and its account (accounts/wrangler.toml); the token is scoped to this bucket only
+      R2_ACCOUNT_ID: c2747ee6a8842e150e38acc3d044adde
+      R2_BUCKET: folder-sync-downloads
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: bundles-*
+          path: bundles
+
+      - name: Rename, checksum, notes, latest.json
+        run: python3 app/scripts/release_assets.py --tag "$TAG" --commit "$GITHUB_SHA" --bundles bundles --out out
+
+      - name: GitHub Release
+        run: |
+          set -euo pipefail
+          pre=""; case "$TAG" in *-*) pre="--prerelease" ;; esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/folder-sync-* out/SHA256SUMS --clobber
+            gh release edit "$TAG" --notes-file out/NOTES.md $pre
+          else
+            gh release create "$TAG" out/folder-sync-* out/SHA256SUMS --target "$GITHUB_SHA" \
+              --title "folder-sync desktop ${TAG#desktop-v}" --notes-file out/NOTES.md $pre
+          fi
+          echo "### Release" >> "$GITHUB_STEP_SUMMARY"
+          gh release view "$TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Copy to R2 for /fs/download
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_DOWNLOADS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_DOWNLOADS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          # WHY: R2 rejects the newer AWS CLI's default CRC checksum trailers on some uploads; send them only when needed
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          set -euo pipefail
+          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+            echo "::notice::R2_DOWNLOADS_* secrets are not set: the release is on GitHub only, /fs/download is not updated"
+            exit 0
+          fi
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          dest="s3://${R2_BUCKET}/downloads/desktop/${TAG}"
+          for f in out/folder-sync-* out/SHA256SUMS; do
+            aws s3 cp "$f" "$dest/$(basename "$f")" --endpoint-url "$endpoint" --only-show-errors
+          done
+          # WHY the manifest last: /fs/download only ever lists files that are already there
+          aws s3 cp out/latest.json "s3://${R2_BUCKET}/downloads/desktop/latest.json" --endpoint-url "$endpoint" \
+            --content-type application/json --cache-control no-cache --only-show-errors
+          echo "Published to R2: $dest" >> "$GITHUB_STEP_SUMMARY"
