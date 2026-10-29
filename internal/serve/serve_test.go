@@ -276,6 +276,7 @@ type fixture struct {
 		Status int             `json:"status"`
 		Body   json.RawMessage `json:"body"`
 	} `json:"response"`
+	BodySchema string `json:"body_schema"`
 }
 
 // clampOld is web's kept hearts/clamp-24.json, restore-online's given bytes.
@@ -287,6 +288,17 @@ func clampOld(t *testing.T) string {
 	}
 	readJSON(t, filepath.Join(testdata, "view-api", "restore-online.json"), &fx)
 	return fx.Given.Bytes[web+"/hearts/clamp-24.json@2026-10-28T19:02:11.481Z_763d2e71f45a8d0f"]
+}
+
+// fileBody is a file fixture's bytes: its response body, a string.
+func fileBody(t *testing.T, name string) string {
+	var fx fixture
+	readJSON(t, filepath.Join(testdata, "view-api", name+".json"), &fx)
+	var body string
+	if err := json.Unmarshal(fx.Response.Body, &body); err != nil {
+		t.Fatalf("%s: a file fixture's body is a string: %v", name, err)
+	}
+	return body
 }
 
 func sha(s string) string {
@@ -312,8 +324,15 @@ func notes(t *testing.T, name string) *world {
 	case "folders-serve":
 		w.addFolder("vt", "vibetracks", bucket, "/home/bam/vt")
 	}
+	plan := entry("notes/plan.md", 1980, "9f2c1a3b4c5d6e7f00112233445566778899aabbccddeeff0011223344556677", "2026-10-28T20:46:12.004Z")
+	if name == "files-serve" {
+		// its given: this machine's manifest names the fixture's bytes, and the bucket holds them
+		live := fileBody(t, name)
+		plan.Size, plan.SHA256 = int64(len(live)), sha(live)
+		w.s3.put("notes/hosts/"+gpu+"/notes/plan.md", []byte(live), mustTime(plan.WrittenAt))
+	}
 	w.saveManifest(state, gpu, "bam-GPU", 46, "2026-10-28T21:10:00.000Z",
-		entry("notes/plan.md", 1980, "9f2c1a3b4c5d6e7f00112233445566778899aabbccddeeff0011223344556677", "2026-10-28T20:46:12.004Z"),
+		plan,
 		entry("notes/new-idea.md", 311, "4a1f0c9e8d7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f", "2026-10-28T20:41:00.402Z"),
 		entry("notes/scratch.md", 12, "0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c", "2026-10-28T20:41:00.415Z"),
 		entry("logs/agent.log", 88123, "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "2026-10-28T20:41:00.418Z"))
@@ -356,15 +375,7 @@ func notes(t *testing.T, name string) *world {
 	switch {
 	case strings.HasPrefix(name, "activity-"):
 		data, _ := os.ReadFile(filepath.Join(testdata, "events", "file-events.jsonl"))
-		var lines []string
-		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-			// WHY without its truncated line: activity-serve and activity-warn list every other line of the log, and
-			// that one (23:59:01, warn) in neither; reported to the contract owner rather than edited
-			if !strings.Contains(line, `"event":"truncated"`) {
-				lines = append(lines, line)
-			}
-		}
-		w.localLog(state, "2026-10-28", lines...)
+		w.localLog(state, "2026-10-28", strings.Split(strings.TrimSpace(string(data)), "\n")...)
 	default:
 		round := func(at string, ok bool, extra string) string {
 			return fmt.Sprintf(`{"schema":"folder-sync-event/1","event":"round","at":%q,"level":"info","project":"notes","host":%q,"host_name":"bam-GPU","ok":%v%s}`, at, gpu, ok, extra)
@@ -498,6 +509,12 @@ func TestEveryServeFixtureIsAnsweredByteForShape(t *testing.T) {
 			w, status, _, data := answerFixture(t, fx)
 			if status != fx.Response.Status {
 				t.Fatalf("status %d, want %d: %s", status, fx.Response.Status, data)
+			}
+			if fx.BodySchema == "file" {
+				if want := fileBody(t, fx.Name); string(data) != want {
+					t.Errorf("the bytes %q, want %q", data, want)
+				}
+				return
 			}
 			var got, want any
 			if err := json.Unmarshal(w.generalize(data), &got); err != nil {
@@ -649,8 +666,81 @@ func TestStatusAndActivityAnswerWithNoNetwork(t *testing.T) {
 	if status != http.StatusOK || len(body.Events) != 13 {
 		t.Errorf("activity offline: %d, %d events (this machine's 13), %s", status, len(body.Events), data)
 	}
-	if status, _, data := w.do(http.MethodGet, "/fs/v1/folders/notes/history/"+gpu+"/notes/plan.md", "owner", nil); status != http.StatusBadGateway || !strings.Contains(string(data), "needs the network") {
+	if status, _, data := w.do(http.MethodGet, "/fs/v1/folders/notes/history/"+gpu+"/notes/plan.md", "owner", nil); status != http.StatusServiceUnavailable || !strings.Contains(string(data), `"error":"unavailable"`) || !strings.Contains(string(data), "needs the network") {
 		t.Errorf("history offline: %d %s", status, data)
+	}
+}
+
+// A live file answers as online (PEP 0003 §3.3): typed by suffix, ETag "<sha256>", private, one Range, a 304 for
+// its ETag, HEAD; bytes that are not the manifest's are 404, and so is a path the host does not publish; with no
+// network it is 503 unavailable.
+func TestFileAnswersAsOnline(t *testing.T) {
+	w := notes(t, "files-serve")
+	live := fileBody(t, "files-serve")
+	path := "/fs/v1/folders/notes/files/" + gpu + "/notes/plan.md"
+	status, h, data := w.do(http.MethodGet, path, "owner", nil)
+	if status != http.StatusOK || string(data) != live {
+		t.Fatalf("%d %q", status, data)
+	}
+	want := map[string]string{"Content-Type": "text/markdown; charset=utf-8", "ETag": `"` + sha(live) + `"`, "Cache-Control": "private, no-store",
+		"X-Content-Type-Options": "nosniff", "Accept-Ranges": "bytes", "Content-Length": fmt.Sprint(len(live))}
+	for k, v := range want {
+		if h.Get(k) != v {
+			t.Errorf("%s: %q, want %q", k, h.Get(k), v)
+		}
+	}
+	if h.Get("Content-Security-Policy") != "" {
+		t.Errorf("a .md is not sandboxed: %q", h.Get("Content-Security-Policy"))
+	}
+	// the page's cookie reads it too, with ?folder= as the element sends it
+	if status, _, data := w.do(http.MethodGet, path+"?folder="+url.QueryEscape(w.folders["/home/bam/notes"]), "cookie", nil); status != http.StatusOK || string(data) != live {
+		t.Errorf("cookie and ?folder=: %d %q", status, data)
+	}
+
+	send := func(method string, header map[string]string) (int, http.Header, []byte) {
+		req, _ := http.NewRequest(method, strings.TrimRight(w.base, "/")+path, nil)
+		req.Header.Set("Authorization", "Bearer "+w.srv.Token())
+		for k, v := range header {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, resp.Header, body
+	}
+	if status, h, data := send(http.MethodGet, map[string]string{"Range": "bytes=0-5"}); status != http.StatusPartialContent || string(data) != live[:6] || h.Get("Content-Range") != fmt.Sprintf("bytes 0-5/%d", len(live)) {
+		t.Errorf("Range: %d %q %q", status, data, h.Get("Content-Range"))
+	}
+	if status, _, data := send(http.MethodGet, map[string]string{"If-None-Match": `"` + sha(live) + `"`}); status != http.StatusNotModified || len(data) != 0 {
+		t.Errorf("If-None-Match: %d %q", status, data)
+	}
+	if status, h, data := send(http.MethodHead, nil); status != http.StatusOK || len(data) != 0 || h.Get("Content-Length") != fmt.Sprint(len(live)) {
+		t.Errorf("HEAD: %d %q %q", status, data, h.Get("Content-Length"))
+	}
+	if status, _, _ := send(http.MethodPost, nil); status != http.StatusMethodNotAllowed {
+		t.Errorf("POST: %d", status)
+	}
+
+	if status, _, data := w.do(http.MethodGet, "/fs/v1/folders/notes/files/"+gpu+"/notes/old-ideas.md", "owner", nil); status != http.StatusNotFound || !strings.Contains(string(data), "does not publish") {
+		t.Errorf("a deleted file: %d %s", status, data)
+	}
+	if status, _, data := w.do(http.MethodGet, "/fs/v1/folders/notes/files/not-a-host/notes/plan.md", "owner", nil); status != http.StatusBadRequest || !strings.Contains(string(data), "bad_host") {
+		t.Errorf("a bad host: %d %s", status, data)
+	}
+	if status, _, data := w.do(http.MethodGet, path, "none", nil); status != http.StatusUnauthorized {
+		t.Errorf("no token: %d %s", status, data)
+	}
+	// an upload since this machine's manifest: the bucket's bytes are not the ones it names
+	w.s3.put("notes/hosts/"+gpu+"/notes/plan.md", []byte(live+"- one more line\n"), w.now)
+	if status, _, data := w.do(http.MethodGet, path, "owner", nil); status != http.StatusNotFound || !strings.Contains(string(data), "changed or went away") {
+		t.Errorf("changed bytes: %d %s", status, data)
+	}
+	w.s3.server.Close()
+	if status, _, data := w.do(http.MethodGet, path, "owner", nil); status != http.StatusServiceUnavailable || !strings.Contains(string(data), `"error":"unavailable"`) {
+		t.Errorf("no network: %d %s", status, data)
 	}
 }
 

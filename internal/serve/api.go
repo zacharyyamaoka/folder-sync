@@ -27,15 +27,17 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	project, route, rest := segments[1], segments[2], segments[3:]
-	method := map[string]string{"status": http.MethodGet, "activity": http.MethodGet, "deleted": http.MethodGet, "restore": http.MethodPost, "history": http.MethodGet}[route]
+	method := map[string]string{"status": http.MethodGet, "activity": http.MethodGet, "deleted": http.MethodGet, "restore": http.MethodPost, "history": http.MethodGet, "files": http.MethodGet}[route]
 	if route == "history" && len(rest) == 1 && rest[0] == "purge" {
 		method = http.MethodPost
 	}
-	if method == "" || (route != "history" && len(rest) > 0) || (route == "history" && len(rest) == 0) {
+	underPath := route == "history" || route == "files"
+	if method == "" || (!underPath && len(rest) > 0) || (underPath && len(rest) == 0) {
 		writeError(w, errNotFound)
 		return
 	}
-	if r.Method != method {
+	// a live file also answers HEAD, as online (PEP 0003 §3.3)
+	if r.Method != method && !(route == "files" && r.Method == http.MethodHead) {
 		writeError(w, errMethod)
 		return
 	}
@@ -62,6 +64,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, body)
 	case "history":
 		s.history(w, r, f, rest)
+	case "files":
+		s.file(w, r, f, rest)
 	case "deleted":
 		body, err := s.deleted(r, f)
 		if err != nil {
