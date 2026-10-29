@@ -85,6 +85,13 @@ func TestServerIsHTTPSOrLoopback(t *testing.T) {
 	}
 }
 
+func TestUserAgentCutsALongHostNameAt64Bytes(t *testing.T) {
+	long := strings.Repeat("h", 70)
+	if got := UserAgent("v0.3", long, "darwin"); got != "folder-sync/v0.3 ("+strings.Repeat("h", 64)+"; darwin)" {
+		t.Errorf("a 70-byte host name: %q", got)
+	}
+}
+
 func TestUserAgentNamesTheMachineOnOneSafeLine(t *testing.T) {
 	if got := UserAgent("v0.3", "bam-GPU", "linux"); got != "folder-sync/v0.3 (bam-GPU; linux)" {
 		t.Fatalf("got %q", got)

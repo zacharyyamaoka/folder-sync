@@ -53,6 +53,18 @@ func TestACutFetchLeavesNoPartial(t *testing.T) {
 		done <- err
 	}()
 	for deadline := time.Now().Add(15 * time.Second); len(partials()) == 0; time.Sleep(20 * time.Millisecond) {
+		// WHY look at done: a copy that ended before any .partial showed (rclone cloning the file, or failing to start) is a
+		// different problem from a slow start, and the message must say which
+		select {
+		case err := <-done:
+			entries, _ := os.ReadDir(dst)
+			names := []string{}
+			for _, entry := range entries {
+				names = append(names, entry.Name())
+			}
+			t.Fatalf("rclone returned (err=%v) before any .partial appeared; %s holds %v", err, dst, names)
+		default:
+		}
 		if time.Now().After(deadline) {
 			stop()
 			t.Fatal("rclone never started the fetch")

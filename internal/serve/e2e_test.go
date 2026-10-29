@@ -124,7 +124,11 @@ func newE2E(t *testing.T) *e2e {
 func (e *e2e) must(args ...string) string {
 	e.t.Helper()
 	cmd := exec.Command(e.bin, args...)
-	cmd.Env, cmd.Dir = e.env, e.folder
+	// WHY PWD: a shell sets it, and Go's os.Getwd (so filepath.Abs(".")) then answers the folder as the person reached it. Without it
+	// the kernel answers the real path, and on macOS t.TempDir() (/var/folders/…) comes back as /private/var/folders/…. The engine
+	// keeps the folder as configured, never canonicalised: someone whose folder is a symlink (~/Dropbox -> …) expects to see their
+	// own path, and the project's state key is made from it.
+	cmd.Env, cmd.Dir = append(append([]string{}, e.env...), "PWD="+e.folder), e.folder
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		e.t.Fatalf("folder-sync %s: %v\n%s", strings.Join(args, " "), err, out)

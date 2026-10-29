@@ -865,6 +865,11 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 	}
 	localRoot := filepath.Join(p.Folder, p.Config.PeersDir, peerID)
 	oldIndex := cached.Index()
+	// WHY before any file is compared: a rename that only changes letter case is the same file on a case-insensitive disk,
+	// and the removal pass below would delete it (see adoptCaseRenames)
+	if err := adoptCaseRenames(osDisk, localRoot, oldIndex, m.Files); err != nil {
+		return pr, err
+	}
 	stamp := Stamp(p.Now())
 
 	var fetch []string
