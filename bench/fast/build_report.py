@@ -15,6 +15,9 @@ import html
 import json
 import math
 import os
+import shutil
+
+MEDIA_DIR = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIRS = ["m2m", "m2w", "w2m", "m2a", "offline"]
@@ -22,9 +25,9 @@ DTITLE = {"m2m": "Machine → machine", "m2w": "Machine → web", "w2m": "Web �
           "offline": "Offline catch-up"}
 WORKLOADS = ["1k", "100k", "10m", "200m", "many100", "storm"]
 WTITLE = {"1k": "1 KB JSON", "100k": "100 KB", "10m": "10 MB", "200m": "200 MB", "many100": "100 × 1 KB", "storm": "save storm (20 × 50 ms)"}
-FS_ORDER = ["head", "push", "push-best", "poll"]
+FS_ORDER = ["head", "push", "push-optimal", "poll"]
 FS_NAME = {"head": "folder-sync head (v0 now: push + history)", "push": "folder-sync push (lane/fast-sync)",
-           "push-best": "folder-sync tuned (push + best config)", "poll": "folder-sync poll (v0 before push)"}
+           "push-optimal": "folder-sync tuned (push, debounce 50 ms, reconnect cap 1 s, safety poll 300 s)", "poll": "folder-sync poll (v0 before push)"}
 
 e = html.escape
 
@@ -41,7 +44,7 @@ def ms(v):
 
 def short(series):
     s = series.replace("folder-sync ", "fs ")
-    return s.replace("fs push-best", "fs tuned")
+    return s.replace("fs push-optimal", "fs tuned")
 
 
 def is_fs(series):
@@ -198,7 +201,14 @@ def hero_block(mp4, label):
             extra = " (after the clip ends)" if r.get("in_video") is False else ""
             lis.append(f"<li>{e(str(name))}: <b>{ms(val)}</b>{e(extra)}</li>")
         readouts = f'<ul class="readouts">{"".join(lis)}</ul>' if lis else ""
-    fallback = f'<img src="{embed(gif, "image/gif")}" alt="{e(label)}" class="gif">' if os.path.exists(gif) else ""
+    fallback = ""
+    if os.path.exists(gif) and MEDIA_DIR:
+        # WHY a sibling file, not a data URI: two GIFs inline would push the page past the desktop preview's ~1.9 MB
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+        name = os.path.basename(gif)
+        shutil.copyfile(gif, os.path.join(MEDIA_DIR, name))
+        fallback = f'<img src="{e(os.path.basename(MEDIA_DIR))}/{e(name)}" alt="{e(label)}" class="gif">'
+
     return (f'<figure class="hero"><video autoplay muted loop playsinline controls src="{embed(mp4, "video/mp4")}">{fallback}</video>'
             f'<figcaption>{e(label)}{readouts}</figcaption></figure>')
 
@@ -231,6 +241,8 @@ ul.tight li{margin:3px 0}details{margin:8px 0}summary{cursor:pointer;font-weight
 
 
 def build(a):
+    global MEDIA_DIR
+    MEDIA_DIR = os.path.splitext(a.out)[0]
     summary = json.load(open(os.path.join(HERE, "results", f"summary-{a.tag}.json")))
     notes = json.load(open(a.notes)) if a.notes else {}
     published = json.load(open(os.path.join(HERE, "published.json")))
@@ -333,7 +345,11 @@ def build(a):
     # not run
     nr = []
     for t in published["not_run"]:
-        lat = "; ".join(f'{x["value"]}: {x["what"]} (<a href="{e(x["source"])}">{e(x.get("kind", "source"))}</a>)' for x in t.get("latency", [])) or "not published"
+        raw = t.get("latency")
+        if isinstance(raw, str):
+            lat = e(raw)
+        else:
+            lat = "; ".join(f'<b>{e(x["value"])}</b>: {e(x["what"])} (<a href="{e(x["source"])}">{e(x.get("kind", "source"))}</a>)' for x in raw or []) or "not published"
         nr.append(f'<tr><th>{e(t["tool"])}</th><td>{e(t["status"])}</td><td>{lat}</td></tr>')
     parts.append(f'<h2>Not run (published numbers only)</h2><p class="mut">These need a paid or online account, so the bench never ran them; the numbers are the sources’ own, accessed {e(published["accessed"])}, and are not comparable one-to-one with the measured rows.</p>'
                  f'<div class="tw"><table><tbody>{"".join(nr)}</tbody></table></div>')

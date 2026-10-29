@@ -93,17 +93,58 @@ Peer-to-peer tools cost $0 on Cloudflare and have no web or agent copy at all.
 The sweep uses `bench/fast/patches/fast-sync-tunables.patch`, which turns those constants into env overrides on an
 exported copy of `lane/fast-sync`, with the defaults unchanged. It is a proposal and is never committed to that branch.
 
-## 6. Results
+## 6. Results (measured 2026-10-28/29, local loopback, 2,581 trials)
 
-Measured, local loopback, 2026-10-28: see §6 of the report and `bench/fast/results/summary-20261028.json`. The
-decision this PEP asks for is in §7.
+These are 1 KB p50 / p95 values in ms; offline is the `drop` fault. The ratio is folder-sync divided by the best networked
+off-the-shelf tool that lost no write in that cell. Full tables, charts and the hero clips are in the report;
+the rows are in `bench/fast/results/summary-20261028.json`.
 
-## 7. Decision
+| Direction | poll (v0 before push) | push (`lane/fast-sync`) | head (v0 now) | **tuned** | best off-the-shelf | tuned ratio |
+|---|---|---|---|---|---|---|
+| m2m | 14,723 / 18,430 | 439 / 453 | 444 / 2,136 | **390 / 413** | Unison (supervised) 515 | 0.76 |
+| m2w | 5,481 / 9,295 | 1,244 / 4,582 (load 40) | 418 / 449 | **328 / 436** | rclone bisync (2 s) 1,468 | 0.22 |
+| w2m | 2,800 / 8,908 | 426 / 1,826 | 349 / 408 | **286 / 393** | rclone bisync (2 s) 1,754 | 0.16 |
+| m2a | 4,146 / 7,922 | 542 / 900 | 382 / 427 | **327 / 357** | rclone bisync (2 s) 1,278 | 0.26 |
+| offline | 9,376 / 11,751 | 19,174 / 21,989 | 6,160 / 24,848 | **652 / 1,467** | Unison (supervised) 118 | 5.53 |
 
-Pending the measured run (filled in from the summary, never ahead of it).
+Ranks of tuned, correct cells only: m2m 2nd of 14 (only Mutagen's local-only session, 40 ms, is faster); m2w, w2m
+and m2a 1st of 6 (only rclone bisync also has a cloud copy); offline 3rd of 12, behind Unison supervised and lsyncd tuned
+(213 ms).
+
+Constraints for **tuned** = push + debounce 50 ms + reconnect cap 1 s + safety poll 300 s:
+
+| Constraint | Bound | Measured | Met? |
+|---|---|---|---|
+| C1 cost (modelled) | ≤ $5.00 | $5.67 (R2 class B 11.8M against 10M free, under the pessimistic "every device reads every change" model) | no, by $0.67 |
+| C2 idle CPU | ≤ 0.1 % | 0.062 % (push default 0.36 %, poll 1.53 %) | yes |
+| C3 idle bandwidth | ≤ 10 KB/min | 1.9 KB/min | yes |
+| C4 wakeups | ≤ 300/min | 161/min | yes |
+| C5 correctness | 0 lost, 0 conflict copies, 100 % sha256 | 0 lost, 100 % sha256; **2 false conflict copies in 40 save storms** | **no** |
+
+**C5 failure, pre-existing and in every configuration.** On the save storm, a machine that pulled a peer's (or the web
+host's) fast-changing file sometimes logs `conflict: <path> was edited here, but it is <host>'s file` and parks a
+copy in `~/.folder-sync/conflicts/`. The final bytes are always correct. Rates: head 10 of 10 web storms; poll at 1 s
+16 conflict copies in 8 web storms; push default 0 in 40; every debounce point at least one. It is a race in the
+"edited here" check against a pull, not a setting.
+
+What the sweep showed:
+- **Reconnect cap:** offline drop 16.5 s at 30 s, 2.1 s at 5 s, 1.4 s at 2 s, 0.9 s at 1 s. All runs were correct.
+- **Debounce:** 1–25 ms saves 20–40 ms but trips the storm race most. 50 ms was the only clean sweep point. At 250 ms, m2m is 536 ms.
+- **Safety poll:** 300 s takes idle CPU from 0.36 % to 0.031 % at the same latency (the hub carries every change). 15 s costs 0.50 %.
+- **Poll interval:** 1–2 s gets web directions under 1.4 s, but costs 2.3–4.5 % of a core idle and $19–32/month.
+- **rclone bisync:** at its 2 s loop it costs about $332/month on R2 at this scale and lost the final save in 3 of 10 storms.
+
+## 7. Decision (proposed; Zach decides at merge)
+
+1. Keep push sync (PEP 0005). It is the fastest networked option on every online path at about $5/month.
+2. Change three engine defaults, as measured: hub reconnect cap 30 s → **1 s**, safety-net poll 60 s → **300 s**,
+   debounce 100 ms → **50 ms**. Each is one constant (`bench/fast/patches/fast-sync-tunables.patch` shows where).
+3. Fix the storm false conflict before calling C5 met; the bench's `storm` workload is its regression test.
+4. Track the KPIs on the Vibe Tracks child track `faster-folder-sync` (producer `producers/folder-sync-bench`).
+   Re-run after each engine change.
 
 ## 8. Re-run
 
 ```bash
-systemd-run --user --scope -p MemoryMax=16G -- bash /home/bam/folder-sync/bench/fast/run_all.sh
+systemd-run --user --scope -p MemoryMax=16G -- bash /home/bam/folder-sync/.claude/worktrees/bench/bench/fast/run_all.sh
 ```

@@ -277,7 +277,7 @@ def catalog(generated):
     how = ("bench/fast (PEP 0008) in /home/bam/folder-sync, branch lane/sync-bench: two machines + a web host + an agent on "
            "loopback (rclone serve s3 + the R2 stand-in + wrangler dev), each machine behind its own TCP proxy; 1 KB file, "
            "10 trials at random phases. Headline = head (claude/folder-sync-v0 as it is now); push = lane/fast-sync; "
-           "tuned = push with the bench's best config; poll = v0 before push.")
+           "tuned = push with debounce 50 ms, a 1 s hub reconnect cap and a 300 s safety poll (the sweep's best that meets the cost and idle-CPU bounds); poll = v0 before push.")
     kpis = []
     for d in DIRECTIONS:
         unit_note = " (clock starts when the network comes back)" if d == "offline" else ""
@@ -320,7 +320,7 @@ def catalog(generated):
 
 def variant_of(series):
     s = series.replace("folder-sync ", "")
-    return {"push-best": "tuned"}.get(s, s)
+    return {"push-optimal": "tuned"}.get(s, s)
 
 
 def kpi_points(summary, t, run_id, code):
@@ -330,7 +330,8 @@ def kpi_points(summary, t, run_id, code):
         vv = variant_of(v)
         if vv not in ("head", "push", "tuned", "poll"):
             continue
-        per = summary["headline"].get(v, {})
+        # WHY the short name: headline is keyed "head"/"push"/…, the series list carries "folder-sync head"
+        per = summary["headline"].get(v.replace("folder-sync ", ""), {})
         values = {}
         for d in DIRECTIONS:
             h = per.get(d) or {}
@@ -390,7 +391,7 @@ def main():
     for d in DIRECTIONS:
         pts = []
         for s in series_all:
-            if s.startswith("folder-sync") and s.replace("folder-sync ", "") not in ("poll", "push", "head", "push-best"):
+            if s.startswith("folder-sync") and s.replace("folder-sync ", "") not in ("poll", "push", "head", "push-optimal"):
                 continue
             c = headline_cell(cs, s, d)
             if not c or c["p50"] is None:
@@ -423,6 +424,12 @@ def main():
     print(out_path)
 
     if not a.no_kpi:
+        # WHY a guard: a lookup bug once wrote every latency KPI as null while cost and CPU looked fine; a run whose
+        # measured head cells are all null must fail loudly, never land in Vibe Tracks
+        points = kpi_points(summary, "check", "check", code)
+        lat = [p for p in points if p["kpi"].endswith("_p50_ms") and p["labels"]["variant"] == "head" and "slice" not in p]
+        if lat and all(p["value"] is None for p in lat) and any(c["series"] == "folder-sync head" and c["n"] for c in cs):
+            raise SystemExit("refusing to write KPIs: every head latency point is null although head cells were measured")
         os.makedirs(a.out, exist_ok=True)
         t = stamp(datetime.now(timezone.utc))
         run_id = f"ffs-{a.tag}-{code}"

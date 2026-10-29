@@ -1,0 +1,45 @@
+{
+ "headline_variant": "push-optimal",
+ "verdict": "folder-sync with push sync is the fastest networked tool measured in four of five directions (machine→machine 390 ms, web paths 286–328 ms, agent 327 ms, 1 KB p50), 3–5× ahead of the only off-the-shelf tool with a web copy. It still loses offline catch-up after a network drop, and every configuration makes false conflict copies on a save storm. All of this is on branch lane/sync-bench, not merged.",
+ "verdict_points": [
+  "<b>Measured, not tabled:</b> 2 machines + a web host + an agent, each machine behind its own proxy, on this computer; 10 trials per cell at random phases, sha256 on every arrival. Five off-the-shelf tools ran on the same workloads from checksummed official binaries.",
+  "<b>Off the shelf, nothing beats it on a network hop:</b> Unison 515 ms, lsyncd tuned 1.06 s, Syncthing 1.38 s at its fastest watcher setting (8.4 s by default), rclone bisync 1.5 s. Only Mutagen is faster (40 ms), and only because its local session has no network at all.",
+  "<b>Web and agent:</b> rclone bisync is the only off-the-shelf tool with a cloud copy. It is 3–5× slower (m2w 1.47 s, w2m 1.75 s, m2a 1.28 s) and would cost about <b>$332/month</b> on R2 at Zach's scale (modelled), against folder-sync's $5.67. It also lost the final save in 3 of 10 storms.",
+  "<b>The one loss is catch-up after a network drop.</b> Push's hub reconnect backoff (0.5 s doubling to a 30 s cap) made it 19.2 s, worse than polling's 9.4 s. A 1 s cap brings it to <b>0.65 s</b> (Unison supervised 118 ms, lsyncd 213 ms). The sweep below has every point.",
+  "<b>A correctness bug the bench found:</b> on the save storm (20 saves 50 ms apart), the receiving machine sometimes logs “edited here, but it is &lt;host&gt;'s file” and parks a <i>false</i> conflict copy. The final bytes are always right (0 lost writes, 0 bad hashes in every folder-sync cell). It happens in every configuration, polling included, and most often on today's v0 head: 10 of 10 web storms."
+ ],
+ "best_series": ["folder-sync push-optimal"],
+ "optimized": "<p><b>debounce 50 ms · hub reconnect cap 1 s · safety-net poll 300 s</b> (lane/fast-sync + <code>bench/fast/patches/fast-sync-tunables.patch</code>; defaults are 100 ms, 30 s, 60 s). Confirmed end to end on the full small matrix (<code>sw-push-optimal</code>):</p><ul class=tight><li>m2m 390 ms · m2w 328 ms · w2m 286 ms · m2a 327 ms · offline drop <b>652 ms</b> (was 19.2 s) · offline sleep 265 ms (p50s, 1 KB)</li><li>Idle per machine: <b>0.062 % CPU</b> (bound 0.1 %; push's default 60 s poll is 0.36 %), 161 wakeups/min (bound 300), 1.9 KB/min (bound 10 KB)</li><li>Cost: <b>$5.67/month</b> modelled, $0.67 over the $5 Workers Paid bound; all of it is R2 class B reads (11.8M against 10M free) under the pessimistic “every change read by all 14 other devices” assumption</li><li>Per constraint: C2 idle CPU, C3 bandwidth and C4 wakeups are met. C1 cost misses by $0.67 (modelled). C5 correctness is not met, because of the storm false conflict (2 copies in 40 storm trials), which no setting fixes.</li></ul><p>Rejected settings:</p><ul class=tight><li>A 25 ms or 1 ms debounce is 20–40 ms faster but triggered the storm race most often (20 conflict copies in the 25 ms best-combination run). 50 ms was the only debounce with a clean sweep point.</li><li>A 15 s safety poll costs more idle CPU (0.50 %) for nothing.</li><li>Poll at 1–2 s gets m2w and w2m under 1.4 s, but at 2.3–4.5 % of a core idle and $19–32/month.</li></ul>",
+ "method_limits": [
+  "Every host runs on one machine over loopback, so there is no WAN round trip; real use adds the same RTTs to every networked tool. Rows say <code>env: local-loopback</code>.",
+  "The machine was shared with other work. Each row records <code>load1</code>, and push's baseline ran at load 20–50. Its m2w 1 KB p95 of 4.6 s is that noise: the identical code with tuned settings ran at load 3–5 and gave 436 ms.",
+  "Real R2 was not run: Zach's account is over its 1 GiB quota (403 <code>over_quota</code> at the first PUT).",
+  "Cost is modelled from measured request rates. The hub's Durable Object load is not observable locally, so the fast-sync report's pessimistic 151k requests/month is used.",
+  "Wakeups count context switches of processes alive at the end of each window, a battery proxy that undercounts short-lived rclone runs (poll most).",
+  "Mutagen ran local-to-local in one daemon (no network, no drop fault), so it is shown but excluded from the competitiveness ratio.",
+  "Unison “supervised” (client restarted every 1 s) is a bench preset: bare Unison never recovered from a drop (10/10 timed out). lsyncd is one-way A→B.",
+  "200 MB through the web host is refused by design (413: the web host takes files up to 32 MiB), so those cells are errors, not timeouts.",
+  "A 100-file burst through the web host is slow in every folder-sync variant (m2w 10.7 s, w2m 15 s, against about 2 s machine to machine). The path is untuned, and the bench shows it."
+ ],
+ "done": [
+  "PEP 0008 (draft): the problem as a constrained optimisation, the matrix, the cost model and the tunables (<code>docs/peps/0008-fast-folder-sync-bench.md</code>).",
+  "Harness, competitors, sweep, analysis and this report, all re-runnable from <code>bench/fast/run_all.sh</code>; 2,581 measured trials.",
+  "Vibe Tracks KPIs written by the producer <code>~/vt/zach/producers/folder-sync-bench</code>: p50/p95 per direction, competitiveness per direction and worst case, $/month and idle CPU, with lines for head, push, tuned and poll.",
+  "Hero clips recorded from the real running machines, push and poll."
+ ],
+ "left": [
+  "<b>Fix the storm false conflict</b> (the engine's “edited here” check races a pull of a fast-changing peer file). It is the only C5 failure, and it is pre-existing. Next, not blocked.",
+  "Land the reconnect cap (1 s) and the 300 s safety poll in the engine as real defaults; today they exist only in the bench patch. Next.",
+  "The 100-file web burst (10–15 s). Next.",
+  "The real-R2 run, blocked on quota."
+ ],
+ "needs_zach": [
+  "<b>Accept the child track:</b> <code>vt accept 58581e67bf36b8b07596d16f</code>, then on the writer host <code>vt set faster-folder-sync vibe-kpi '[producers/folder-sync-bench]'</code>. vt makes an agent's new track a proposal and lets only the writer host set <code>vibe-kpi</code>. Recommendation: yes. Default if you say nothing: the producer keeps writing and the track stays proposed.",
+  "<b>Real R2:</b> the account is at 1.01 of 1.00 GiB. Free space or raise the quota, then run <code>node /home/bam/folder-sync/.claude/worktrees/bench/bench/latency/bench.mjs run --stack prod --no-kpi</code>. Default: skipped."
+ ],
+ "not_done": [
+  "No change to <code>claude/folder-sync-v0</code> or <code>lane/fast-sync</code>; the tunables are a patch file on this branch only. No merge, no deploy.",
+  "No audit (none asked for).",
+  "Upload concurrency was not swept: neither ref passes <code>--transfers</code> to rclone, and the engine strips <code>RCLONE_*</code>, so there is no knob to turn."
+ ]
+}
