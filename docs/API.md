@@ -16,7 +16,8 @@ every app's `/fs/` mount, PEP 0003 §3.2) and **`folder-sync serve`** on a machi
   bytes, keyed `<host>/<path>@<version>`, and the version's sha16 is theirs (`restore-online`: web's
   `hearts/clamp-24.json` at `2026-10-28T19:02:11.481Z_763d2e71f45a8d0f`, 230 bytes, sha256 `763d2e71…22fb0e`).
 - **Nothing here is new for the files themselves:** reading a live file is still
-  `GET /fs/v1/folders/:project/files/:host/<path>` (PEP 0003 §3.3).
+  `GET /fs/v1/folders/:project/files/:host/<path>` (PEP 0003 §3.3), and `folder-sync serve` answers it the same way
+  (`files` below).
 
 ## Auth
 
@@ -60,6 +61,7 @@ public), each with what their role may see.
 | `GET …/activity?before=&limit=&level=&host=` | `activity` | owner: every host's published `upload` / `delete` / `restore` events and pulled `download` / `remove_copy` events | owner: this machine's whole local log, plus the others' published events |
 | `GET …/history/:host/<path>` | `history` | owner | owner (old bytes need the network) |
 | `GET …/history/:host/<path>?version=<id>` | the bytes | owner | owner |
+| `GET …/files/:host/<path>` | the bytes | owner, readers, public (exists, PEP 0003 §3.3) | owner (the bytes need the network) |
 | `GET …/deleted[?host=]` | `deleted` | owner | owner |
 | `POST …/restore` | `restore_request` → `restore_response` | owner | owner |
 | `POST …/history/purge` | `purge_request` → `purge_response` | owner | `501 online_only` |
@@ -94,6 +96,13 @@ public), each with what their role may see.
   `X-Folder-Sync-Version: <id>`, `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff` and, for
   `.html`/`.htm`/`.svg`, `Content-Security-Policy: sandbox`. A version that has been pruned is `410 pruned`; an id that
   is not one is `400 bad_version`.
+- **`files`** is a live file's bytes, as PEP 0003 §3.3 serves them online: typed by suffix, `ETag: "<sha256>"`,
+  `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox` for
+  `.html`/`.htm`/`.svg`, `Accept-Ranges: bytes` with one `Range` (`206`), `If-None-Match` (`304`), `If-Range` and
+  `HEAD`. A path the host's manifest does not list is `404 not_found`. On `serve` the manifest is the one this
+  machine published or last pulled, and the bytes are read from the bucket and checked against its sha256 before
+  anything is sent; bytes that are not that manifest's (a newer upload) are `404 not_found`. Version history's
+  "Current" reads it.
 - **`deleted`** lists every path with a kept version and no live entry, newest deletion first, each with the
   `version` to restore. One listing per host, at most 10,000 versions per call (`more`).
 - **`restore`** takes up to 1,000 `{host, path, version}` items and answers `applied` (written now as a new version:
@@ -126,6 +135,7 @@ Every non-2xx JSON answer is `{ "error": "<code>", "why": "<sentence>" }` (PEP 0
 | 421 | `wrong_host` | `Host` is not `127.0.0.1:<port>` | serve |
 | 501 | `online_only` | purge | serve |
 | 503 | `recovering` | the web host is settling a cut-off change (PEP 0003) | Worker |
+| 503 | `unavailable` | a route that reads the bucket (`history`, `files`, `deleted`) could not reach it: no network, or sync's credentials did not open the folder | serve |
 
 ## The element: `<folder-sync-status>`
 

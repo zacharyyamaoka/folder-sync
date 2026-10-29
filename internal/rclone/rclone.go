@@ -17,7 +17,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"folder-sync/internal/creds"
@@ -45,6 +47,9 @@ type Runner struct {
 	// from cron keeps rclone's full retries.
 	FailFast bool
 }
+
+// StopGrace is how long a stopped rclone has to clean up after SIGTERM before it is killed.
+const StopGrace = 2 * time.Second
 
 // FailFastFlags are added to every call when FailFast is set.
 var FailFastFlags = []string{"--retries", "1", "--low-level-retries", "2", "--contimeout", "5s"}
@@ -103,6 +108,13 @@ func Path(bucket, key string) string {
 func (r Runner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	full := append(append([]string{}, args[:1]...), append(r.GlobalFlags(), args[1:]...)...)
 	cmd := exec.CommandContext(ctx, r.Bin, full...)
+	// WHY SIGTERM first: a cancelled CommandContext kills outright, and a fetch cut that way leaves its
+	// <name>.<hash>.partial in the peer-copy folder; asked to stop, rclone removes it and exits. It gets StopGrace,
+	// then the kill. Windows has no SIGTERM to send, so a stop there stays a plain kill.
+	if runtime.GOOS != "windows" {
+		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+		cmd.WaitDelay = StopGrace
+	}
 	cmd.Env = r.Env(os.Environ())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

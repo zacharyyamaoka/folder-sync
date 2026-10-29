@@ -114,18 +114,19 @@ func (s *Server) manifests(f folder) map[string]manifest.Manifest {
 	return out
 }
 
-// open opens the folder with sync's credentials, for a route that reads the bucket.
+// open opens the folder with sync's credentials, for a route that reads the bucket: without them the bucket is out
+// of reach too (503 unavailable).
 func (s *Server) open(f folder) (*syncer.Project, error) {
 	p, err := s.cfg.Open(f.reg.Folder)
 	if err != nil {
-		return nil, fail(http.StatusBadGateway, "failed", "This machine could not open "+f.reg.Folder+": "+err.Error())
+		return nil, fail(http.StatusServiceUnavailable, "unavailable", "This machine could not open "+f.reg.Folder+": "+err.Error())
 	}
 	return p, nil
 }
 
-// offline is a bucket call that failed: the old bytes and the others' records live in the bucket.
+// offline is a bucket call that failed (503 unavailable): the old bytes and the others' records live in the bucket.
 func offline(p *syncer.Project, err error) error {
-	return fail(http.StatusBadGateway, "failed", "This needs the network, and the bucket did not answer: "+p.Creds.Scrub(err.Error()))
+	return fail(http.StatusServiceUnavailable, "unavailable", "This needs the network, and the bucket did not answer: "+p.Creds.Scrub(err.Error()))
 }
 
 // localLine is one line of the local activity log, kept as written, with the fields this package reads.

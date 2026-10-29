@@ -6,8 +6,9 @@
 //   import { startStub } from "./stub.mjs"                                                        the tests
 //
 // A scenario is a list of fixture names. A request is answered by the first fixture in the list whose request has the
-// same method and path (query included), else the same method and path without its query. A version's or a live
-// file's bytes are not JSON fixtures; they come from BYTES below, and only for versions the history fixtures list.
+// same method and path (query included), else the same method and path without its query. A live file's bytes are
+// a file fixture's (body_schema "file"), whatever the scenario; a version's bytes are not fixtures, they come from
+// BYTES below, and only for versions the history fixtures list.
 // It listens on 127.0.0.1 on a port the OS picks.
 
 import { readFileSync, readdirSync } from "node:fs";
@@ -36,9 +37,8 @@ const PLAN = {
 	v2140: "# Plan\n\n- order the clamp\n- print the bracket v3\n- test the wrist camera at 30 fps\n- write up the latency numbers\n",
 };
 
-/** The bytes the element reads besides JSON: `<host>/<path>` with `@<version id>`, or `@live` for the files route. */
+/** A version's bytes, `<host>/<path>@<version id>` (a live file's are its file fixture, files-serve). */
 export const BYTES = {
-	[`${GPU}/notes/plan.md@live`]: PLAN.v1980,
 	[`${GPU}/notes/plan.md@2026-10-28T20:41:00.410Z_7e3b9d0a1c2f4e5d`]: PLAN.v2140,
 	[`${GPU}/notes/plan.md@2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f`]: PLAN.v1980,
 	[`${GPU}/notes/plan.md@2026-10-28T20:00:00.000Z_unlisted`]: PLAN.unlisted,
@@ -115,8 +115,15 @@ export function startStub({ scenario = "online", first = [] } = {}) {
 		}
 		const folder = url.pathname.match(/^\/fs\/v1\/folders\/notes\/(files|history)\/([^/]+)\/(.+)$/);
 		const version = url.searchParams.get("version");
-		if (folder && (folder[1] === "files" || version)) {
-			const key = `${folder[2]}/${decodeURIComponent(folder[3])}@${folder[1] === "files" ? "live" : version}`;
+		if (folder && folder[1] === "files") {
+			const file = Object.values(fixtures).find((f) => f.body_schema === "file" && f.request.method === req.method && f.request.path === url.pathname);
+			if (file) {
+				served.add(file.name);
+				return send(file.response.status, file.response.body, TYPES[extname(folder[3])] || "application/octet-stream");
+			}
+		}
+		if (folder && version) {
+			const key = `${folder[2]}/${decodeURIComponent(folder[3])}@${version}`;
 			if (key in BYTES) return send(200, BYTES[key], TYPES[extname(folder[3])] || "application/octet-stream");
 		}
 		const pick = (match) => names.map((n) => fixtures[n]).find((f) => f && f.request.method === req.method && match(f.request.path));

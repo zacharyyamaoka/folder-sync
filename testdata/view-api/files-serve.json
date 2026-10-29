@@ -1,0 +1,20 @@
+{
+  "fixture": "folder-sync-view-fixture/1",
+  "name": "a live file's bytes, Version history's Current",
+  "servers": [
+    "serve"
+  ],
+  "given": {
+    "note": "bam-GPU's manifest names notes/plan.md with these bytes (their sha256 and size), and the bucket holds them at notes/hosts/<bam-GPU>/notes/plan.md"
+  },
+  "request": {
+    "method": "GET",
+    "path": "/fs/v1/folders/notes/files/b55e9683-7854-4121-a56a-9bae7c3ab1da/notes/plan.md",
+    "auth": "owner"
+  },
+  "response": {
+    "status": 200,
+    "body": "# Plan\n\n- order the clamp\n- print the bracket v2\n- test the wrist camera\n- write up the latency numbers\n"
+  },
+  "body_schema": "file"
+}

@@ -45,7 +45,7 @@
           }
         },
         "body_schema": {
-          "enum": ["error", "status", "activity", "history", "deleted", "restore_response", "purge_response", "usage", "folders"]
+          "enum": ["error", "status", "activity", "history", "deleted", "restore_response", "purge_response", "usage", "folders", "file"]
         }
       }
     },
@@ -59,7 +59,7 @@
           "enum": [
             "bad_request", "bad_project", "bad_path", "bad_host", "bad_version", "signed_out", "no_token", "wrong_host",
             "csrf", "wrong_user", "not_found", "pruned", "ambiguous_folder", "online_only", "over_quota", "too_large",
-            "json_only", "method", "recovering"
+            "json_only", "method", "recovering", "unavailable"
           ]
         },
         "why": { "type": "string", "minLength": 1 }
@@ -444,6 +444,10 @@
         },
         "readable": { "type": "array" }
       }
+    },
+    "file": {
+      "description": "A live file's bytes (GET …/files/:host/<path>, PEP 0003 §3.3), the one answer that is not JSON: a fixture gives them as response.body, a UTF-8 string, and a server's test compares the bytes it answers with it.",
+      "type": "string"
     },
     "serve_json": {
       "description": "~/.folder-sync/serve.json, mode 0600, written by `folder-sync serve` once it listens and removed when it stops. An app on the machine reads it to forward /fs/* with the token.",

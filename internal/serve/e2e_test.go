@@ -1,9 +1,9 @@
 package serve
 
 // `folder-sync serve` end to end, on the stand-in (rclone serve s3) with the real binary: serve a synced folder,
-// edit a file and sync, see the old version in its history (and its bytes), restore it from the API, and the next
-// sync round puts it back on disk and publishes it; delete a file and it is in deleted. Stopping serve removes
-// serve.json. Skipped without .tools/rclone (scripts/dev-tools) or with -short.
+// edit a file and sync, see the old version in its history (its bytes, and the current ones), restore it from the
+// API, and the next sync round puts it back on disk and publishes it; delete a file and it is in deleted. Stopping
+// serve removes serve.json. Skipped without .tools/rclone (scripts/dev-tools) or with -short.
 
 import (
 	"bytes"
@@ -220,6 +220,11 @@ func TestServeEndToEndOnTheStandIn(t *testing.T) {
 	var old []byte
 	if status := e.api(http.MethodGet, "/fs/v1/folders/notes/history/"+me+"/notes/plan.md?version="+kept, nil, &old); status != http.StatusOK || string(old) != v1 {
 		t.Fatalf("the old bytes: %d %q", status, old)
+	}
+	// and the current ones, Version history's "Current"
+	var current []byte
+	if status := e.api(http.MethodGet, "/fs/v1/folders/notes/files/"+me+"/notes/plan.md", nil, &current); status != http.StatusOK || string(current) != v2 {
+		t.Fatalf("the current bytes: %d %q", status, current)
 	}
 	var activity struct {
 		Events []map[string]any `json:"events"`
