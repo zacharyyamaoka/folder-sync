@@ -64,6 +64,8 @@ Usage:
                                                                      another's: asks that machine)
   folder-sync deleted [--restore PREFIX] [--json] [--dir PATH]       this machine's deleted files; --restore puts back
                                                                      every one under PREFIX
+  folder-sync serve   [--port N]                                     the sync view on this machine: prints its page's
+                                                                     URL (127.0.0.1, a token per start)
   folder-sync version
 
 The key comes from FOLDER_SYNC_ACCESS_KEY_ID, FOLDER_SYNC_SECRET_ACCESS_KEY and
@@ -110,6 +112,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdRestore(args[1:], stdout)
 	case "deleted":
 		err = cmdDeleted(args[1:], stdout)
+	case "serve":
+		err = cmdServe(args[1:], stdout)
 	case "version":
 		l := mustLayout()
 		v, _ := rclone.Version(rcloneBinary(l), l)
