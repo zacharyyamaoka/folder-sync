@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"folder-sync/internal/layout"
+	"folder-sync/internal/testtools"
 )
 
 // A stop cuts rclone mid-fetch. rclone writes a fetch to <name>.<hash>.partial and renames it at the end; killed
@@ -21,10 +22,7 @@ func TestACutFetchLeavesNoPartial(t *testing.T) {
 		t.Skip("Windows has no SIGTERM: a stop there is still a plain kill")
 	}
 	_, here, _, _ := runtime.Caller(0)
-	bin := filepath.Join(filepath.Dir(here), "..", "..", ".tools", "rclone")
-	if _, err := os.Stat(bin); err != nil {
-		t.Skip("no .tools/rclone: run scripts/dev-tools")
-	}
+	bin := testtools.PinnedRclone(t, filepath.Join(filepath.Dir(here), "..", ".."))
 	home := t.TempDir()
 	l, err := layout.For(runtime.GOOS, func(key string) string { return map[string]string{"HOME": home}[key] })
 	if err != nil {

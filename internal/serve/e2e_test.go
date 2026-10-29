@@ -23,6 +23,7 @@ import (
 
 	"folder-sync/internal/history"
 	"folder-sync/internal/manifest"
+	"folder-sync/internal/testtools"
 )
 
 var repo = func() string {
@@ -67,7 +68,7 @@ func background(t *testing.T, logPath string, env []string, dir string, argv ...
 	done := make(chan struct{})
 	go func() { cmd.Wait(); log.Close(); close(done) }()
 	t.Cleanup(func() {
-		cmd.Process.Signal(syscall.SIGTERM)
+		testtools.Terminate(cmd.Process)
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
@@ -82,12 +83,9 @@ func newE2E(t *testing.T) *e2e {
 	if testing.Short() {
 		t.Skip("-short: no stand-in")
 	}
-	rcloneBin := filepath.Join(repo, ".tools", "rclone")
-	if _, err := os.Stat(rcloneBin); err != nil {
-		t.Skip("no .tools/rclone: run scripts/dev-tools first")
-	}
+	rcloneBin := testtools.PinnedRclone(t, repo)
 	work := t.TempDir()
-	e := &e2e{t: t, bin: filepath.Join(work, "folder-sync"), home: filepath.Join(work, "home"), folder: filepath.Join(work, "notes"), data: filepath.Join(work, "s3")}
+	e := &e2e{t: t, bin: filepath.Join(work, testtools.Exe("folder-sync")), home: filepath.Join(work, "home"), folder: filepath.Join(work, "notes"), data: filepath.Join(work, "s3")}
 	build := exec.Command("go", "build", "-o", e.bin, "./cmd/folder-sync")
 	build.Dir = repo
 	if goroot := runtime.GOROOT(); goroot != "" {
@@ -114,11 +112,11 @@ func newE2E(t *testing.T) *e2e {
 		time.Sleep(100 * time.Millisecond)
 	}
 	for _, kv := range os.Environ() {
-		if upper := strings.ToUpper(kv); !strings.HasPrefix(upper, "HOME=") && !strings.HasPrefix(upper, "FOLDER_SYNC_") && !strings.HasPrefix(upper, "RCLONE_") {
+		if upper := strings.ToUpper(kv); !testtools.IsHomeVar(kv) && !strings.HasPrefix(upper, "FOLDER_SYNC_") && !strings.HasPrefix(upper, "RCLONE_") {
 			e.env = append(e.env, kv)
 		}
 	}
-	e.env = append(e.env, "HOME="+e.home, "FOLDER_SYNC_RCLONE="+rcloneBin, "FOLDER_SYNC_ACCESS_KEY_ID="+key,
+	e.env = append(append(e.env, testtools.HomeEnv(e.home)...), "FOLDER_SYNC_RCLONE="+rcloneBin, "FOLDER_SYNC_ACCESS_KEY_ID="+key,
 		"FOLDER_SYNC_SECRET_ACCESS_KEY="+secret, "FOLDER_SYNC_ENDPOINT=http://"+addr)
 	return e
 }
@@ -286,6 +284,9 @@ func TestServeEndToEndOnTheStandIn(t *testing.T) {
 		t.Errorf("kept %q is not a version id", kept)
 	}
 
+	if runtime.GOOS == "windows" {
+		return // no SIGTERM to send: a kill leaves serve.json for the next serve to find stale
+	}
 	serving.Process.Signal(syscall.SIGTERM)
 	for i := 0; i < 100; i++ {
 		if _, err := os.Stat(filepath.Join(e.home, ".folder-sync", "serve.json")); os.IsNotExist(err) {

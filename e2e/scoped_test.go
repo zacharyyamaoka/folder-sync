@@ -26,11 +26,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"folder-sync/internal/s3"
+	"folder-sync/internal/testtools"
 )
 
 const scopedBucket = "fs-test"
@@ -67,7 +67,7 @@ func startProcess(t *testing.T, name, logPath string, argv ...string) {
 	}
 	t.Logf("%s: pid %d", name, cmd.Process.Pid)
 	t.Cleanup(func() {
-		cmd.Process.Signal(syscall.SIGTERM)
+		testtools.Terminate(cmd.Process)
 		done := make(chan struct{})
 		go func() { cmd.Wait(); close(done) }()
 		select {
@@ -132,16 +132,16 @@ func readGateLog(t *testing.T, path string) []gateEntry {
 func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 	rcloneBin := os.Getenv("FOLDER_SYNC_E2E_RCLONE")
 	if rcloneBin == "" {
-		rcloneBin = filepath.Join(repo, ".tools", "rclone")
+		rcloneBin = testtools.PinnedRcloneIn(repo)
 	}
 	if _, err := os.Stat(rcloneBin); err != nil {
-		t.Skip("no pinned rclone (.tools/rclone or FOLDER_SYNC_E2E_RCLONE): run scripts/dev-tools first")
+		testtools.Missing(t, "no pinned rclone (%s or FOLDER_SYNC_E2E_RCLONE): run scripts/dev-tools first", testtools.PinnedRcloneIn(repo))
 	}
 	gateAddr, storageAddr := addr("FOLDER_SYNC_E2E_GATE", "127.0.0.1:4912"), addr("FOLDER_SYNC_E2E_STORAGE", "127.0.0.1:4913")
 	portFree(t, gateAddr)
 	portFree(t, storageAddr)
 	work := t.TempDir()
-	bin, standin := filepath.Join(work, "folder-sync"), filepath.Join(work, "r2standin")
+	bin, standin := filepath.Join(work, testtools.Exe("folder-sync")), filepath.Join(work, testtools.Exe("r2standin"))
 	goBuild(t, bin, "./cmd/folder-sync")
 	goBuild(t, standin, "./e2e/r2standin")
 
@@ -355,6 +355,9 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 	})
 
 	t.Run("over quota: read-only keys hold uploads, deletes go through the accounts server, pull still works", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("this case's credential process is a /bin/sh script; Windows has none")
+		}
 		// review r2 #7. A1's credential process answers read-only keys with ReadOnly and Reason, as the accounts Worker
 		// does past a person's quota; A1 is signed in (account.json) to a stand-in for the Worker's delete endpoint,
 		// which applies exactly what folder-sync sends with A's own read-write key.
@@ -486,6 +489,9 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 	})
 
 	t.Run("over quota: a lost answer is asked for again with the same job, and the round still pulls", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("this case's credential process is a /bin/sh script; Windows has none")
+		}
 		// review r3 #2. The stand-in endpoint keeps each job's answer (as the Worker's folder object does); the first
 		// time it commits the delete but the answer is lost (502). Then a delete whose job file is gone: the server
 		// says the manifest moved on (409), and the read-only round adopts the bucket's own manifest (a read).
@@ -607,6 +613,9 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 	})
 
 	t.Run("signed out: exit 4 and the cached keys are dropped", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("this case's credential process is a /bin/sh script; Windows has none")
+		}
 		script := filepath.Join(work, "signed-out.sh")
 		os.WriteFile(script, []byte("#!/bin/sh\necho 'this machine is signed out' >&2\nexit 3\n"), 0o755)
 		argv, _ := json.Marshal([]string{script})

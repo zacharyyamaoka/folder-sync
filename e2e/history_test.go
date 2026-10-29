@@ -18,22 +18,19 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"folder-sync/internal/s3"
+	"folder-sync/internal/testtools"
 )
 
 // historyWorld is TestTwoMachines' setup: a fresh binary, the stand-in, the counting proxy, and two machines with
 // the key in their environment.
 func historyWorld(t *testing.T) (*world, *machine, *machine) {
-	rcloneBin := filepath.Join(repo, ".tools", "rclone")
-	if _, err := os.Stat(rcloneBin); err != nil {
-		t.Skip("no .tools/rclone: run scripts/dev-tools first")
-	}
+	rcloneBin := testtools.PinnedRclone(t, repo)
 	work := t.TempDir()
-	bin := filepath.Join(work, "folder-sync")
+	bin := filepath.Join(work, testtools.Exe("folder-sync"))
 	goBuild(t, bin, "./cmd/folder-sync")
 	w := &world{t: t, bin: bin, rclone: rcloneBin, data: filepath.Join(work, "s3"), keyID: "e2e" + randomHex(8), secret: randomHex(20), ops: &opLog{}}
 	os.MkdirAll(filepath.Join(w.data, bucket), 0o755)
@@ -152,7 +149,10 @@ func manifestSeq(t *testing.T, w *world, host string) int64 {
 // resolving the schemas' relative $refs between files.
 func validateAgainst(t *testing.T, schema string, docs ...string) {
 	t.Helper()
-	if reason := missingPythonModule("python3", "jsonschema"); reason != "" {
+	if reason := missingPythonModule(testtools.PythonBinary(), "jsonschema"); reason != "" {
+		if testtools.Required() {
+			t.Fatalf("%s is set, so a missing tool fails instead of skipping: %s", testtools.RequireEnv, reason)
+		}
 		t.Log(reason)
 		return
 	}
@@ -170,7 +170,7 @@ for doc in sys.argv[3:]:
     jsonschema.validate(json.loads(doc), schema, resolver=resolver)
 print("valid:", len(sys.argv) - 3)`
 	args := append([]string{"-c", script, filepath.Join(repo, "schema"), schema}, docs...)
-	if out, err := exec.Command("python3", args...).CombinedOutput(); err != nil {
+	if out, err := exec.Command(testtools.PythonBinary(), args...).CombinedOutput(); err != nil {
 		t.Fatalf("%s: %v\n%s", schema, err, out)
 	}
 }
@@ -408,7 +408,7 @@ func TestHistory(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() {
-			cmd.Process.Signal(syscall.SIGTERM)
+			testtools.Terminate(cmd.Process)
 			cmd.Wait()
 			editConfig(t, a, `interval = "1s"`, `interval = "10s"`)
 		}()

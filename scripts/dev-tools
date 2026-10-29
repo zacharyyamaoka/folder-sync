@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Fetch the pinned rclone into <repo>/.tools/ for development and the end-to-end test.
 # The version and checksums are read from internal/rclonebin/install.go, the same table
-# `folder-sync init` verifies against, so there is one pin. Runs on Linux and macOS.
+# `folder-sync init` verifies against, so there is one pin. Runs on Linux, macOS and Windows (Git Bash:
+# `uname -s` is MINGW64_NT-… or MSYS_NT-…; the binary lands as .tools/rclone.exe).
 #   scripts/dev-tools --print-plan   print "<platform> <url> <sha256>" and stop (used by a Go test)
+# FOLDER_SYNC_TOOLS_DIR installs somewhere other than <repo>/.tools (a scratch dir, to try the fetch without touching it).
 # FOLDER_SYNC_UNAME_S / FOLDER_SYNC_UNAME_M stand in for `uname -s` / `uname -m` (tests pose as another machine).
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 pins="$repo/internal/rclonebin/install.go"
-tools="$repo/.tools"
+tools="${FOLDER_SYNC_TOOLS_DIR:-$repo/.tools}"
 
 RCLONE_VERSION="$(awk -F'"' '/^const Version = /{print $2}' "$pins")"
 BASE_URL="$(awk -F'"' '/^const BaseURL = /{print $2}' "$pins")"
@@ -19,10 +21,15 @@ case "$machine" in
   Linux-aarch64|Linux-arm64) platform="linux-arm64" ;;
   Darwin-x86_64)         platform="osx-amd64" ;;
   Darwin-arm64)          platform="osx-arm64" ;;
+  # WHY the globs: Git Bash reports the Windows build too (MINGW64_NT-10.0-20348), and MSYS2/Cygwin shells say MSYS_NT / CYGWIN_NT
+  MINGW*-x86_64|MSYS*-x86_64|CYGWIN*-x86_64) platform="windows-amd64" ;;
+  MINGW*-aarch64|MSYS*-aarch64|CYGWIN*-aarch64|MINGW*-arm64|MSYS*-arm64) platform="windows-arm64" ;;
   *)
-    echo "dev-tools: no pinned rclone for $machine; use 'folder-sync init' (Windows: see the README)" >&2
+    echo "dev-tools: no pinned rclone for $machine; use 'folder-sync init'" >&2
     exit 1 ;;
 esac
+exe=""
+case "$platform" in windows-*) exe=".exe" ;; esac
 RCLONE_SHA256="$(awk -v key="\"$platform\":" '$1 == key {gsub(/[",]/, "", $2); print $2}' "$pins")"
 zip_name="rclone-$RCLONE_VERSION-$platform.zip"
 url="$BASE_URL/$RCLONE_VERSION/$zip_name"
@@ -35,8 +42,8 @@ if [[ "${1:-}" == "--print-plan" ]]; then
   exit 0
 fi
 
-if [[ -x "$tools/rclone" ]] && "$tools/rclone" version --config /dev/null | head -1 | grep -q "rclone $RCLONE_VERSION"; then
-  echo "dev-tools: $tools/rclone is already $RCLONE_VERSION"
+if [[ -x "$tools/rclone$exe" ]] && "$tools/rclone$exe" version --config /dev/null | head -1 | grep -q "rclone $RCLONE_VERSION"; then
+  echo "dev-tools: $tools/rclone$exe is already $RCLONE_VERSION"
   exit 0
 fi
 mkdir -p "$tools"
@@ -48,15 +55,31 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   echo "$RCLONE_SHA256  $zip" | shasum -a 256 -c -
 fi
-python3 - "$zip" "$tools/rclone" <<'PY'
+# Python is the one unzipper on all three platforms' bash (Git Bash has no unzip); the Windows Store's python3 stub fails
+# this probe, so try both names and then unzip.
+unzipper=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "import zipfile" >/dev/null 2>&1; then unzipper="$candidate"; break; fi
+done
+if [[ -n "$unzipper" ]]; then
+"$unzipper" - "$zip" "$tools/rclone$exe" "rclone$exe" <<'PY'
 import sys, zipfile, os
-zip_path, out = sys.argv[1], sys.argv[2]
+zip_path, out, leaf = sys.argv[1], sys.argv[2], sys.argv[3]
 with zipfile.ZipFile(zip_path) as archive:
-    member = next(name for name in archive.namelist() if name.endswith("/rclone"))
+    member = next(name for name in archive.namelist() if name.endswith("/" + leaf))
     with archive.open(member) as src, open(out + ".tmp", "wb") as dst:
         dst.write(src.read())
 os.chmod(out + ".tmp", 0o755)
 os.replace(out + ".tmp", out)
 PY
+elif command -v unzip >/dev/null 2>&1; then
+  member="$(unzip -Z1 "$zip" | grep "/rclone$exe\$" | head -1)"
+  unzip -p "$zip" "$member" > "$tools/rclone$exe.tmp"
+  chmod 755 "$tools/rclone$exe.tmp"
+  mv -f "$tools/rclone$exe.tmp" "$tools/rclone$exe"
+else
+  echo "dev-tools: need python3, python or unzip to unpack $zip_name" >&2
+  exit 1
+fi
 rm -f "$zip"
-"$tools/rclone" version --config /dev/null | head -1
+"$tools/rclone$exe" version --config /dev/null | head -1

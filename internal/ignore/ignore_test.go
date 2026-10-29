@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"folder-sync/internal/testtools"
 )
 
 func TestToRcloneShapes(t *testing.T) {
@@ -58,12 +60,9 @@ func TestDefaultsAreFirstAndOverridable(t *testing.T) {
 // must be exactly the files git does not ignore.
 func TestMatchesGit(t *testing.T) {
 	_, here, _, _ := runtime.Caller(0)
-	rcloneBin := filepath.Join(filepath.Dir(here), "..", "..", ".tools", "rclone")
-	if _, err := os.Stat(rcloneBin); err != nil {
-		t.Skip("no .tools/rclone: run scripts/dev-tools")
-	}
+	rcloneBin := testtools.PinnedRclone(t, filepath.Join(filepath.Dir(here), "..", ".."))
 	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("no git")
+		testtools.Missing(t, "no git")
 	}
 	root := t.TempDir()
 	files := []string{

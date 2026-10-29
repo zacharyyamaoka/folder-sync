@@ -30,6 +30,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"folder-sync/internal/testtools"
 )
 
 const (
@@ -145,7 +147,7 @@ func startStandIn(t *testing.T, rcloneBin, dataDir, keyID, secret string) {
 	pid := cmd.Process.Pid
 	t.Logf("stand-in: rclone serve s3 on %s, pid %d", standInAddr, pid)
 	t.Cleanup(func() {
-		cmd.Process.Signal(syscall.SIGTERM)
+		testtools.Terminate(cmd.Process)
 		done := make(chan struct{})
 		go func() { cmd.Wait(); close(done) }()
 		select {
@@ -197,7 +199,7 @@ func baseEnv() []string {
 	var env []string
 	for _, kv := range os.Environ() {
 		upper := strings.ToUpper(kv)
-		if strings.HasPrefix(upper, "HOME=") || strings.HasPrefix(upper, "FOLDER_SYNC_") || strings.HasPrefix(upper, "RCLONE_") {
+		if testtools.IsHomeVar(kv) || strings.HasPrefix(upper, "FOLDER_SYNC_") || strings.HasPrefix(upper, "RCLONE_") {
 			continue
 		}
 		env = append(env, kv)
@@ -210,7 +212,7 @@ func (w *world) newMachine(name string, withKeyEnv bool) *machine {
 	m := &machine{name: name, home: filepath.Join(root, "home-"+name), folder: filepath.Join(root, name)}
 	os.MkdirAll(m.home, 0o700)
 	os.MkdirAll(m.folder, 0o755)
-	m.env = append(baseEnv(), "HOME="+m.home, "FOLDER_SYNC_RCLONE="+w.rclone)
+	m.env = append(append(baseEnv(), testtools.HomeEnv(m.home)...), "FOLDER_SYNC_RCLONE="+w.rclone)
 	if withKeyEnv {
 		m.env = append(m.env, w.keyEnv()...)
 	}
@@ -330,6 +332,14 @@ func editConfig(t *testing.T, m *machine, from, to string) {
 	os.WriteFile(path, []byte(strings.Replace(string(data), from, to, 1)), 0o644)
 }
 
+// mtimeGranularity is how finely this OS's filesystem keeps a modification time.
+var mtimeGranularity = func() time.Duration {
+	if runtime.GOOS == "windows" {
+		return 100 * time.Nanosecond
+	}
+	return time.Nanosecond
+}()
+
 func nodeBinary(t *testing.T) string {
 	for _, candidate := range []string{"/usr/bin/node", "node"} {
 		path, err := exec.LookPath(candidate)
@@ -343,7 +353,7 @@ func nodeBinary(t *testing.T) string {
 			return path
 		}
 	}
-	t.Skip("node ≥ 22.18 not found")
+	testtools.Missing(t, "node ≥ 22.18 not found")
 	return ""
 }
 
@@ -393,6 +403,8 @@ func serviceExpectation(goos, home string) (glob, command string) {
 	switch goos {
 	case "darwin":
 		return filepath.Join(home, "Library", "LaunchAgents", "dev.folder-sync.demo-*.plist"), "launchctl bootstrap gui/$(id -u) "
+	case "windows":
+		return filepath.Join(home, ".folder-sync", "service", "folder-sync-demo-*.xml"), `schtasks /Create /TN "folder-sync\demo-`
 	default:
 		return filepath.Join(home, ".folder-sync", "service", "folder-sync-demo-*.service"), "systemctl --user enable --now "
 	}
@@ -401,12 +413,9 @@ func serviceExpectation(goos, home string) (glob, command string) {
 // --- the test -----------------------------------------------------------------------
 
 func TestTwoMachines(t *testing.T) {
-	rcloneBin := filepath.Join(repo, ".tools", "rclone")
-	if _, err := os.Stat(rcloneBin); err != nil {
-		t.Skip("no .tools/rclone: run scripts/dev-tools first")
-	}
+	rcloneBin := testtools.PinnedRclone(t, repo)
 	work := t.TempDir()
-	bin := filepath.Join(work, "folder-sync")
+	bin := filepath.Join(work, testtools.Exe("folder-sync"))
 	build := exec.Command("go", "build", "-o", bin, "./cmd/folder-sync")
 	build.Dir = repo
 	if goroot := runtime.GOROOT(); goroot != "" {
@@ -437,7 +446,7 @@ func TestTwoMachines(t *testing.T) {
 	if !strings.Contains(out, "Stored key …") || strings.Contains(out, w.secret) {
 		t.Fatalf("login output: %s", out)
 	}
-	a.env = append(baseEnv(), "HOME="+a.home, "FOLDER_SYNC_RCLONE="+w.rclone)
+	a.env = append(append(baseEnv(), testtools.HomeEnv(a.home)...), "FOLDER_SYNC_RCLONE="+w.rclone)
 
 	// A's folder: files to sync, files the default ignores must keep out, names Windows can't hold.
 	mtime := time.Date(2026, 10, 1, 10, 20, 30, 123456789, time.UTC)
@@ -534,7 +543,8 @@ func TestTwoMachines(t *testing.T) {
 			t.Fatalf("B's copy: %q %v\n%s", data, err, out)
 		}
 		info, _ := os.Stat(copyPath)
-		if !info.ModTime().Equal(mtime) {
+		// WHY a tolerance: NTFS stores times in 100 ns steps, so a nanosecond mtime reads back rounded there
+		if got := info.ModTime(); got.Sub(mtime).Abs() >= mtimeGranularity {
 			t.Errorf("mtime %s, want %s", info.ModTime().UTC().Format(time.RFC3339Nano), mtime.Format(time.RFC3339Nano))
 		}
 		if _, err := os.Stat(filepath.Join(b.folder, "hosts", idA, ".env")); err == nil {
@@ -589,6 +599,9 @@ func TestTwoMachines(t *testing.T) {
 	})
 
 	t.Run("sync --watch picks up a change, and stops cleanly", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("a Go test cannot deliver Ctrl-C to a child on Windows; the stop path is covered by internal/syncer's tests")
+		}
 		editConfig(t, a, `interval = "10s"`, `interval = "1s"`)
 		cmd := exec.Command(w.bin, "sync", "--watch")
 		cmd.Env, cmd.Dir = a.env, a.folder
@@ -754,6 +767,17 @@ func TestTwoMachines(t *testing.T) {
 		w.record("A: install-service", "A", "folder-sync sync --install-service", out, w.ops.take())
 		glob, command := serviceExpectation(runtime.GOOS, a.home)
 		units, _ := filepath.Glob(glob)
+		if runtime.GOOS == "windows" {
+			// the task XML is UTF-16, and the schtasks line names the task, then the XML path
+			if len(units) != 1 || !strings.Contains(out, command) || !strings.Contains(out, `/XML "`+units[0]+`"`) {
+				t.Fatalf("%s -> %v\n%s", glob, units, out)
+			}
+			unit, _ := os.ReadFile(units[0])
+			if !bytes.Contains(unit, utf16LE(`sync --watch --dir`)) {
+				t.Fatalf("task XML lacks the watch command (%d bytes)", len(unit))
+			}
+			return
+		}
 		if len(units) != 1 || !strings.Contains(out, command+units[0]) {
 			t.Fatalf("%s -> %v\n%s", glob, units, out)
 		}
@@ -806,8 +830,8 @@ func TestTwoMachines(t *testing.T) {
 		if len(manifests) != 4 {
 			t.Fatalf("want 4 manifests (A, B, guard, guard's peer B), got %v", manifests)
 		}
-		if reason := missingPythonModule("python3", "jsonschema"); reason != "" {
-			t.Skip(reason)
+		if reason := missingPythonModule(testtools.PythonBinary(), "jsonschema"); reason != "" {
+			testtools.Missing(t, "%s", reason)
 		}
 		script := `import json, sys, jsonschema
 schema = json.load(open(sys.argv[1]))
@@ -815,7 +839,7 @@ for path in sys.argv[2:]:
     jsonschema.validate(json.load(open(path)), schema, format_checker=jsonschema.FormatChecker())
 print("valid:", len(sys.argv) - 2)`
 		args := append([]string{"-c", script, filepath.Join(repo, "schema", "manifest.schema.json")}, manifests...)
-		out, err := exec.Command("python3", args...).CombinedOutput()
+		out, err := exec.Command(testtools.PythonBinary(), args...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("%v\n%s", err, out)
 		}
@@ -825,7 +849,7 @@ print("valid:", len(sys.argv) - 2)`
 	readerEnv := append(baseEnv(), w.keyEnv()...)
 
 	t.Run("the Python reader lists and reads B's view", func(t *testing.T) {
-		cmd := exec.Command("python3", filepath.Join(repo, "readers", "python", "folder_sync_read.py"), "--bucket", bucket, "--project", project, "list")
+		cmd := exec.Command(testtools.PythonBinary(), filepath.Join(repo, "readers", "python", "folder_sync_read.py"), "--bucket", bucket, "--project", project, "list")
 		cmd.Env = readerEnv
 		out, err := cmd.Output()
 		if err != nil {
@@ -837,7 +861,7 @@ print("valid:", len(sys.argv) - 2)`
 			var raw map[string]any
 			json.Unmarshal([]byte(line), &raw)
 			ref.HostID, ref.Path = raw["host_id"].(string), raw["path"].(string)
-			cat := exec.Command("python3", filepath.Join(repo, "readers", "python", "folder_sync_read.py"), "--bucket", bucket, "--project", project, "cat", ref.HostID, ref.Path)
+			cat := exec.Command(testtools.PythonBinary(), filepath.Join(repo, "readers", "python", "folder_sync_read.py"), "--bucket", bucket, "--project", project, "cat", ref.HostID, ref.Path)
 			cat.Env = readerEnv
 			data, err := cat.Output()
 			if err != nil {
@@ -911,7 +935,9 @@ print("valid:", len(sys.argv) - 2)`
 				t.Errorf("the secret was printed: %s", out)
 			}
 		}
-		if info, err := os.Stat(filepath.Join(a.home, ".folder-sync", "credentials.json")); err != nil || info.Mode().Perm() != 0o600 {
+		// WHY not on Windows: it has no Unix mode bits; the file sits under the user's profile, which only they can read
+		info, err := os.Stat(filepath.Join(a.home, ".folder-sync", "credentials.json"))
+		if err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 			t.Errorf("credentials.json: %v %v", info, err)
 		}
 	})

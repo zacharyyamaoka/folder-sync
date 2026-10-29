@@ -72,11 +72,11 @@ These assume the checkout is at `~/folder-sync`; Go is on your `PATH`, or at `~/
 PATH="$HOME/.local/go/bin:$PATH" go -C "$HOME/folder-sync" test ./...
 ```
 
-`scripts/dev-tools` fetches the pinned rclone for Linux (amd64, arm64) or macOS (Intel, Apple silicon) into `.tools/`, checked against the same SHA-256 table `init` uses (`internal/rclonebin/install.go`). On Windows, use `folder-sync init`.
+`scripts/dev-tools` fetches the pinned rclone for Linux (amd64, arm64), macOS (Intel, Apple silicon) or Windows (amd64, arm64; run it from Git Bash, it writes `.tools/rclone.exe`) into `.tools/`, checked against the same SHA-256 table `init` uses (`internal/rclonebin/install.go`).
 
 The end-to-end test (`e2e/`) runs two simulated machines (two HOME dirs, two folders) against `rclone serve s3` on 127.0.0.1:4801 with throwaway keys, through a counting proxy on :4802. It needs:
 
-- `.tools/rclone` from `scripts/dev-tools`, or the whole suite skips.
+- `.tools/rclone` from `scripts/dev-tools`, or the whole suite skips. CI sets `FOLDER_SYNC_E2E_REQUIRE=1`, which turns every such skip (rclone, node, python's `jsonschema`, git) into a failure.
 - `python3` with the `jsonschema` module (`python3 -m pip install jsonschema`) for the manifest-schema check. macOS's stock `python3` (3.9) does not ship it; without it that one subtest skips and says so.
 - `node` ≥ 22.18 for the Worker-reader check, which skips without it.
 - Ports 4801 and 4802 free.
