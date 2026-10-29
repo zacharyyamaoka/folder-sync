@@ -7,6 +7,7 @@
 //   GET  /fs/dev/mailbox?email=                   dev + loopback only: the last sign-in code
 //   GET  /fs/v1/me                                the session's person, root and app
 //   GET  /fs/v1/usage                             the session's storage, its quota, and whether it is over
+//   GET  /fs/v1/usage/breakdown                   what is in it: by project, kind and device, the biggest, what to free (storage.ts)
 //   GET  /fs/v1/devices, POST …/devices/revoke    the person's sessions (machines, browsers); revoke one (devices.ts)
 //   GET  /fs/account, POST …/revoke | …/sign-out  the account page, no script (devices.ts)
 //   POST /fs/v1/sign-out                          ends this session
@@ -49,6 +50,7 @@ import { downloadRoute, type DownloadsBucket } from "./download.ts";
 import { servedFile } from "./ranges.ts";
 import type { CloseOrder } from "./hub.ts";
 import { activityRoute, browserOf, deleted, history, purge, restore, status, ui } from "./view.ts";
+import { storageBreakdown } from "./storage.ts";
 
 export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
 	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
@@ -970,6 +972,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 
 	if (what === "me" && rest.length === 1) return read ? me(request, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (what === "usage" && rest.length === 1) return read ? usage(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (what === "usage" && rest.length === 2 && project === "breakdown") return read ? storageBreakdown(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (what === "sign-out" && rest.length === 1) return method === "POST" ? signOut(request, env, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
 	if (what === "credentials" && rest.length === 1) return method === "POST" ? credentials(request, env, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
 	if (what === "devices") return devicesApi(request, env, deps, app, rest.slice(1), method);

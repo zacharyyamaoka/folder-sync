@@ -5,7 +5,7 @@
 //
 // Obsidian Sync's model: a pill with the folder's state; clicking it opens a menu (the native `popover`) with the
 // status, an amber warning only when the person must act, the devices, Activity log, Version history, Deleted files,
-// and online the storage and a link to /fs/account. Each opens a panel in a native <dialog> (or inline, with `view`).
+// Storage (what is in the account, online), the storage line and a link to /fs/account. Each opens a panel in a native <dialog> (or inline, with `view`).
 // Everything is in Shadow DOM, so an app's CSS cannot reach in and ours cannot reach out; the app themes it with
 // --fs-* custom properties and ::part(pill | menu | panel). Data comes only from this page's own origin, from the
 // accounts Worker online or `folder-sync serve` on the machine, which answer the same routes (docs/API.md "Routes").
@@ -16,7 +16,10 @@ const HUB_PING_MS = 30_000;
 const FREE_UP_DAYS = 7;
 const TEXT_LIMIT = 1_048_576;
 const SPLIT_KEY = "folder-sync-status/history-split";
-const VIEWS = { activity: "Activity log", history: "Version history", deleted: "Deleted files" };
+const VIEWS = { activity: "Activity log", history: "Version history", deleted: "Deleted files", storage: "Storage" };
+// the Storage tab's kinds (accounts/src/storage.ts): what each is called, and in what colour its slice of the bar
+const KIND_LABELS = { live: "Files", history: "Version history", trash: "Trash", changes: "Change records", requests: "Restore requests", other: "Other" };
+const KIND_PHRASES = { live: "your files", history: "version history", trash: "old copies in trash", changes: "change records", requests: "restore requests", other: "other files" };
 const FILTERS = { all: "All", errors: "Errors", skipped: "Skipped", conflicts: "Conflicts" };
 
 // WHY every colour is var(--fs-x, default): a custom property set on :host would override one the app sets on an
@@ -111,10 +114,33 @@ pre.text .same { display: block; }
 table { border-collapse: collapse; width: 100%; } td, th { text-align: left; padding: 6px 6px; border-bottom: 1px solid var(--_line); vertical-align: middle; }
 th { font-weight: 600; color: var(--_muted); } td.num { white-space: nowrap; }
 .empty { color: var(--_muted); padding: 24px 0; text-align: center; }
+.answer { font-size: 15px; margin: 0 0 8px; } .answer b { font-size: 18px; font-weight: 600; }
+.sbar { height: 10px; border-radius: 5px; background: var(--_soft); overflow: hidden; display: flex; margin: 6px 0; }
+.sbar i { display: block; min-width: 2px; } .sbar.over { outline: 1px solid var(--_error); }
+.k-live { --_k: var(--_accent); } .k-history { --_k: color-mix(in srgb, var(--_accent) 45%, var(--_bg)); }
+.k-trash { --_k: color-mix(in srgb, var(--_fg) 40%, var(--_bg)); } .k-changes, .k-requests, .k-other { --_k: color-mix(in srgb, var(--_fg) 18%, var(--_bg)); }
+.sbar i, .dot { background: var(--_k); } .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+.legend { display: flex; flex-wrap: wrap; gap: 2px 16px; margin: 4px 0 14px; }
+.sec { margin: 18px 0 6px; font-weight: 600; } .sec small { font-weight: 400; color: var(--_muted); }
+.sugg { list-style: none; margin: 0; padding: 0; }
+.sugg li { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; align-items: center; padding: 8px 10px; margin-bottom: 6px;
+  border: 1px solid var(--_line); border-radius: calc(var(--_radius) - 2px); }
+.sugg li > div > span { display: block; overflow-wrap: anywhere; } .sugg .free { white-space: nowrap; }
+details.proj { border-top: 1px solid var(--_line); } details.proj:last-of-type { border-bottom: 1px solid var(--_line); }
+details.proj > summary { cursor: pointer; padding: 7px 4px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+details.proj > summary .grow { flex: 1; } details.proj > table { margin: 0 0 8px 18px; width: calc(100% - 18px); }
+tr.host td { color: var(--_muted); } tr.host td:first-child { padding-left: 24px; }
+tr.kind td:first-child { white-space: nowrap; } td.path { overflow-wrap: anywhere; }
+details.more { margin-top: 6px; } details.more > summary { cursor: pointer; padding: 6px 0; font-weight: 600; }
+details.more > summary small { font-weight: 400; color: var(--_muted); }
 `;
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const bytes = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1073741824).toFixed(2)} GB`);
+// WHY KiB/MiB/GiB here and KB/MB/GB in the menu's line: the Storage tab says what the account's quota says
+// (accounts/src/storage.ts sized()), "10 GiB", trimmed of a trailing zero
+const size = (n) => { const t = (x, d) => String(Number(x.toFixed(d))); return n < 1024 ? `${n} B` : n < 1048576 ? `${t(n / 1024, 1)} KiB` : n < 1073741824 ? `${t(n / 1048576, 1)} MiB` : `${t(n / 1073741824, 2)} GiB`; };
+const shortDay = (iso) => new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 const pad = (n) => String(n).padStart(2, "0");
 const clock = (iso) => { const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
 const day = (iso) => new Date(iso).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
@@ -387,13 +413,13 @@ ${h.why ? `<p class="note ${h.state === "error" ? "error" : h.state === "attenti
 		html += `<ul class="devices" aria-label="Devices">${devices.map(device).join("")}</ul>`;
 		if (this.isOwner) {
 			html += `<div class="sep"></div>${Object.entries(VIEWS).map(([v, label]) => `<button class="item" role="menuitem" data-open="${v}">${label}</button>`).join("")}`;
-			if (s.storage) html += `<div class="sep"></div>${this.storageHtml(s.storage)}`;
+			if (s.storage) html += `<div class="sep"></div>${this.storageMenuHtml(s.storage)}`;
 			if (!this.onMachine) html += `<a class="item" role="menuitem" href="${esc(`${this.base}/account`)}">Devices and sharing</a>`;
 		}
 		menu.innerHTML = html;
 	}
 
-	storageHtml(st) {
+	storageMenuHtml(st) {
 		const quota = st.quota.bytes || 1, pct = (n) => `${Math.min(100, Math.max(n ? 0.5 : 0, (100 * n) / quota)).toFixed(1)}%`;
 		const freeing = this.freeing;
 		let action = "";
@@ -482,9 +508,9 @@ ${h.why ? `<p class="note ${h.state === "error" ? "error" : h.state === "attenti
 
 	isPanelOpen() { return !!(this.panel && (this.inline || this.panel.open)); }
 
-	/** Opens a panel: `activity`, `history` (with { host, path }, that file's versions) or `deleted`. */
+	/** Opens a panel: `activity`, `history` (with { host, path }, that file's versions), `deleted` or `storage`. */
 	async open(view, target) {
-		if (!VIEWS[view]) throw new TypeError(`folder-sync-status: no view "${view}" (activity, history or deleted)`);
+		if (!VIEWS[view]) throw new TypeError(`folder-sync-status: no view "${view}" (activity, history, deleted or storage)`);
 		if (!this.built) this.build();
 		this.view = view;
 		if (view === "history") {
@@ -740,6 +766,63 @@ ${files.map((f) => `<tr><td><input type="checkbox" data-pick="${esc(keyOf(f.host
 </tbody></table>`;
 	}
 
+	// Storage: what is in this account (accounts/src/storage.ts, GET <base>/v1/usage/breakdown). One calm answer, the bar,
+	// what could be freed (shown only: nothing here deletes yet), then the table, opened a level at a time.
+	// WHY the account's and not the folder's: the quota is the person's, so the answer is every project's; and WHY only
+	// the owner's, online: a reader's own account would be a different thing than the folder they are looking at
+
+	async storageHtml() {
+		// WHY status first: a reader's or a machine's page must not ask for an account's storage, and whose it is comes from status
+		if (!this.status && !this.statusError) await this.refresh();
+		if (this.onMachine) return `<p class="note info" data-storage-note="online">Storage is measured online: open this folder in the app's own page to see what is in the account.</p>`;
+		if (this.status && !this.isOwner) return `<p class="note info" data-storage-note="owner">Only the folder's owner sees what is in the account.</p>`;
+		const b = (this.breakdown = await this.call(`${this.base}/v1/usage/breakdown`));
+		const quota = b.quota.bytes || 1, over = !!b.over;
+		const total = b.kinds.reduce((n, k) => n + k.bytes, 0);
+		if (!total) return `<div class="empty" data-storage-view>Nothing is stored in this account yet.</div>`;
+		return `<div data-storage-view>${this.storageAnswerHtml(b, quota, over)}${this.suggestionsHtml(b)}${this.projectsHtml(b)}${this.biggestHtml(b)}</div>`;
+	}
+
+	storageAnswerHtml(b, quota, over) {
+		const dominant = b.kinds.slice().sort((x, y) => y.bytes - x.bytes)[0];
+		const share = Math.round((100 * dominant.bytes) / Math.max(1, b.used.bytes));
+		const slice = (n) => `${Math.min(100, (100 * n) / quota).toFixed(2)}%`;
+		// WHY amber/red only over quota (calm UI): every other colour here is a neutral or the accent
+		const sentence = over ? `<b class="err" data-over>${size(b.used.bytes)} of ${size(b.quota.bytes)}</b> <span class="err">· ${b.used.bytes > b.quota.bytes ? `over by ${size(b.used.bytes - b.quota.bytes)}` : "over its limit"}</span>`
+			: `<b>${size(b.used.bytes)} of ${size(b.quota.bytes)}</b> <span class="muted">· ${share}% is ${KIND_PHRASES[dominant.kind]}</span>`;
+		const legend = b.kinds.map((k) => `<span class="k-${k.kind}"><span class="dot"></span>${KIND_LABELS[k.kind]} ${size(k.bytes)}</span>`).join("");
+		return `<p class="answer" data-answer>${sentence}</p>
+<div class="sbar${over ? " over" : ""}" role="img" aria-label="${esc(b.kinds.map((k) => `${KIND_LABELS[k.kind]} ${size(k.bytes)}`).join(", "))} of ${size(b.quota.bytes)}">${b.kinds.map((k) => `<i class="k-${k.kind}" style="width:${slice(k.bytes)}"></i>`).join("")}</div>
+<div class="legend muted">${legend}</div>${over ? `<p class="note error" data-over-why>${esc(b.over)}</p>` : ""}
+<p class="muted" style="margin:0 0 4px">${b.used.objects.toLocaleString()} of ${b.quota.objects.toLocaleString()} files · measured ${esc(ago(b.measured_at))} <button class="link" data-act="storage-refresh">Refresh</button></p>
+${b.partial ? `<p class="note info" data-partial>This account holds more than one listing covers, so these figures are a lower bound.</p>` : ""}`;
+	}
+
+	suggestionsHtml(b) {
+		if (!b.suggestions.length) return "";
+		return `<div class="sec">Free up space <small>· suggestions overlap, so their amounts do not add up</small></div>
+<ul class="sugg" data-suggestions>${b.suggestions.map((s) => `<li data-suggestion="${esc(s.id)}"><div><span><b>${esc(s.title)}</b> <span class="free">— frees ${size(s.bytes)}</span></span><span class="muted">${esc(s.why)}</span></div>
+<span><button disabled title="Coming next" aria-label="Free up: ${esc(s.title)} (coming next)">Free up</button> <small class="muted">coming next</small></span></li>`).join("")}</ul>`;
+	}
+
+	projectsHtml(b) {
+		const span = (k) => k.oldest && k.newest ? (k.oldest.slice(0, 10) === k.newest.slice(0, 10) ? shortDay(k.newest) : `${shortDay(k.oldest)} – ${shortDay(k.newest)}`) : "";
+		const hostName = (h) => h.host_name || `device ${String(h.host).slice(0, 8)}`;
+		return `<div class="sec">By folder <small>· project, then kind, then device</small></div>${b.projects.map((p, i) => `<details class="proj" data-project="${esc(p.project)}" ${i === 0 ? "open" : ""}>
+<summary><b>${esc(p.project || "Outside any folder")}</b><span class="muted">${size(p.bytes)}</span></summary>
+<table><thead><tr><th>Kind</th><th>Size</th><th>Files</th><th>Dates</th></tr></thead><tbody>${p.kinds.map((k) => `<tr class="kind" data-kind="${esc(k.kind)}"><td><span class="k-${k.kind}"><span class="dot"></span></span>${KIND_LABELS[k.kind]}</td><td class="num">${size(k.bytes)}</td><td class="num muted">${k.objects.toLocaleString()}</td>
+<td class="muted num" ${k.clock === "key" ? 'title="From the dates in the file names"' : 'title="When each was last written"'}>${esc(span(k))}</td></tr>${k.hosts.map((h) => `<tr class="host" data-host-row="${esc(h.host)}"><td>${esc(hostName(h))}</td><td class="num">${size(h.bytes)}</td><td class="num">${h.objects.toLocaleString()}</td><td></td></tr>`).join("")}`).join("")}</tbody></table></details>`).join("")}`;
+	}
+
+	biggestHtml(b) {
+		const dev = (r) => esc(r.host_name || `device ${String(r.host).slice(0, 8)}`);
+		const folders = b.folders.map((f) => `<tr><td class="path">${esc(f.project)} · ${dev(f)} · ${f.folder ? esc(f.folder) : '<span class="muted">(top level)</span>'}</td><td class="num">${size(f.bytes)}</td><td class="num muted">${size(f.old_bytes)}</td></tr>`).join("");
+		const files = b.files.map((f) => `<tr><td class="path"><button class="link" data-host="${esc(f.host)}" data-path="${esc(f.path)}" title="Version history of ${esc(f.path)}">${esc(f.path)}</button><small class="muted"> ${esc(f.project)} · ${dev(f)}</small></td><td class="num">${size(f.bytes)}</td><td class="num muted">${f.copies ? `${f.copies} old · ${size(f.old_bytes)}` : "none"}</td></tr>`).join("");
+		return `<div class="sec">Biggest</div>
+<details class="more" data-biggest="folders"><summary>Folders <small>· ${b.folders.length}, three levels deep at most</small></summary><table><thead><tr><th>Folder</th><th>Size</th><th>Old copies</th></tr></thead><tbody>${folders}</tbody></table></details>
+<details class="more" data-biggest="files"><summary>Files <small>· ${b.files.length}, with their old copies</small></summary><table><thead><tr><th>File</th><th>Size</th><th>Old copies</th></tr></thead><tbody>${files}</tbody></table></details>`;
+	}
+
 	// Restore: the version a restore replaces is always kept first; a machine's file waits for that machine
 
 	async restore(items) {
@@ -813,6 +896,7 @@ ${files.map((f) => `<tr><td><input type="checkbox" data-pick="${esc(keyOf(f.host
 			case "copy-log": return this.copy(this.logText(), t);
 			case "older": return this.loadOlder().catch((err) => { this.root.getElementById("log").insertAdjacentHTML("beforeend", this.errorHtml(err)); });
 			case "pick-file": this.file = null; return this.renderBody();
+			case "storage-refresh": return this.renderBody();
 			case "copy-version": return this.shownText !== null && this.copy(this.shownText, t);
 			case "restore-version": return this.restore([{ host: this.file.host, path: this.file.path, version: this.selected }]);
 			case "restore-picked": return this.restore(this.deletedFiles.files.filter((f) => this.picked.has(keyOf(f.host, f.path))).map((f) => ({ host: f.host, path: f.path, version: f.version })));
