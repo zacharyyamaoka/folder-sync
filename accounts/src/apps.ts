@@ -12,8 +12,13 @@ export interface App {
 	id: string;
 	name: string;
 	origins: string[];
+	/** Local channels that may be handed this app's sign-in (PEP 0003 §3.10). Never origins: nothing counts them as the app. */
+	loopback: string[];
 	project: string | null;
 }
+
+/** Exactly http://127.0.0.1:<port> or http://localhost:<port>. */
+const LOOPBACK = /^http:\/\/(127\.0\.0\.1|localhost):[0-9]{1,5}$/;
 
 export const OWN_APP = "folder-sync";
 
@@ -21,14 +26,15 @@ export function apps(publicUrl: string | undefined, raw: Record<string, unknown>
 	const out = new Map<string, App>();
 	for (const [id, value] of Object.entries(raw)) {
 		if (!value || typeof value !== "object") continue;
-		const entry = value as { name?: unknown; origins?: unknown; project?: unknown };
+		const entry = value as { name?: unknown; origins?: unknown; loopback?: unknown; project?: unknown };
 		// WHY https only outside dev: apps.json lists an app's local demo origins (http://127.0.0.1:<port>) beside its
 		// real ones; in production a page on someone's loopback port must never count as that app (sign-in, cookie
 		// routes, CORS). PUBLIC_URL's own origin, below, is the operator's and always counts.
 		const origins = Array.isArray(entry.origins)
 			? entry.origins.filter((o): o is string => typeof o === "string" && (dev || o.startsWith("https://")))
 			: [];
-		out.set(id, { id, name: typeof entry.name === "string" ? entry.name : id, origins, project: typeof entry.project === "string" ? entry.project : null });
+		const loopback = Array.isArray(entry.loopback) ? entry.loopback.filter((o): o is string => typeof o === "string" && LOOPBACK.test(o)) : [];
+		out.set(id, { id, name: typeof entry.name === "string" ? entry.name : id, origins, loopback, project: typeof entry.project === "string" ? entry.project : null });
 	}
 	let own: string | null = null;
 	try {
@@ -37,7 +43,7 @@ export function apps(publicUrl: string | undefined, raw: Record<string, unknown>
 		own = null;
 	}
 	if (own) {
-		const self = out.get(OWN_APP) ?? { id: OWN_APP, name: "folder-sync", origins: [], project: null };
+		const self = out.get(OWN_APP) ?? { id: OWN_APP, name: "folder-sync", origins: [], loopback: [], project: null };
 		if (!self.origins.includes(own)) self.origins = [...self.origins, own];
 		out.set(OWN_APP, self);
 	}

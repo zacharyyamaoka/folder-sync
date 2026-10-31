@@ -83,6 +83,7 @@ is refused, `409 wrong_user`, and the page reloads (review r1 #2).
 | `/fs/api/auth/*` | anyone | Better Auth: Google, and 6-digit codes by email (`emailOTP`): in dev to `/fs/dev/mailbox`, in production through **Resend** once `RESEND_API_KEY` (secret) and `EMAIL_FROM` (var) are both set (review r3 #8; `src/email.ts`). WHY Resend: one HTTPS call from a Worker; Cloudflare's `send_email` binding reaches only addresses verified in Email Routing, never a stranger signing up |
 | `GET /fs/signin?return=<same-origin path>` | browser | the sign-in page (Google button; dev: email + code); back to `return` signed in. With no `return` (or `return=/`) on the accounts Worker's own host, where `/` is no page, back to `/fs/account` (Zach's first sign-in, 2026-10-28); on an app's origin, `/` |
 | `GET /fs/device` | browser | approve a machine's code (RFC 8628 verification page) |
+| `GET /fs/handoff?to=<url>`, `GET /fs/handoff/redeem?token=&return=<path>` | an app's listed local channels (§3.10) | sign in on the app, then the session's cookie on the channel |
 | `GET /fs/dev/mailbox?email=` | loopback + dev only | `{ email, code }`, the last sign-in code |
 | `GET /fs/v1/me` | session | `{ user: {id,email,name,image}, root: "users/<id>/", app: {id, project} \| null }` |
 | `GET /fs/v1/usage` | session | `{ owner, used: {bytes, objects}, quota: {bytes, objects}, over: "<reason>" \| null, partial }`: what a page needs to offer the ways back under quota (§3.7) |
@@ -241,6 +242,32 @@ into anyone else's:
 5. **One writer per host is a convention, not a fence** (PEP 0002 §6, review r2 #10). A machine's keys are scoped to
    its person's root, so a buggy or hostile client on one of their machines can overwrite that person's own other hosts,
    the web host included; never another person's root.
+
+### 3.10 A local channel's sign-in (robotparts' Stable and Preview, 2026-10-31)
+
+Zach, on Preview (`http://127.0.0.1:4470`): *"I'm not able to log into my account."* An app's local channels are served
+by the Stable / Preview runtime, which forwards `/fs/*` here (its CONTRACT §10.15) and sends the channel's own `Origin` up
+as the app's, so this Worker sees an ordinary request on `https://robotparts.dev`, and the browser keeps the answer's
+cookie on `127.0.0.1` (measured in Chrome 156: `__Secure-…; Secure` is kept on http loopback). Sessions, folders and
+writes all work through that. Google does not: its callback is the app's own URL, so its session lands on the app's
+domain, and `sign-in/social` refuses a `callbackURL` on the channel (403 `INVALID_CALLBACK_URL`).
+
+- **`apps.json` `loopback`:** the channels an app names, each exactly `http://127.0.0.1:<port>` or
+  `http://localhost:<port>`. They are not `origins`: nothing here counts one as the app, no CORS, no route of its own.
+- **`GET /fs/handoff?to=<url>`** on the app's own origin: `to` on a listed channel, else 400. Signed out, 303 to
+  `/fs/signin?return=` this same URL. Signed in by cookie, a one-time token (Better Auth's `oneTimeToken`: one minute,
+  one use, stored hashed, minted only here) and 303 to `<channel>/fs/handoff/redeem?token=&return=<path>`.
+- **`GET /fs/handoff/redeem`,** reached through the channel's proxy: the token's session as `Set-Cookie`, 303 to the
+  path. A used, forged or expired token, or a session that has ended, is 400.
+- **The sign-in page** carries `<meta name="fs-origin">`, the app's origin as this Worker saw it. `signin.js` compares
+  it with `location.origin`: when they differ, the page came through a proxy, and the Google button goes to the app's
+  `/fs/handoff?to=<this channel's URL>` instead of starting Google here.
+- **Disclosed:** the channel holds the same session as the app, so signing out on either signs out both. `to` needs no
+  confirmation: the token goes only to a listed port on the visitor's own machine, and whatever listens there already
+  runs as them. A redeem is a GET, so a link could sign a channel in as whoever minted it, within that minute.
+- **WHY not Better Auth's `oAuthProxy`,** the stock part for preview deployments: it needs its own instance per preview
+  origin, and here the proxy deliberately hides that origin from this Worker. WHY not email codes (§3.8) alone: they
+  would work through the proxy, but they need Resend set up, and the Google button would still fail on a channel.
 
 ## 4. Vibe Tracks, to switch (not done here)
 

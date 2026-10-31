@@ -4,6 +4,7 @@
 
      Google (production)   POST /fs/api/auth/sign-in/social {provider: "google", callbackURL} -> {url}; the tab goes there
      email code (dev only) POST /fs/api/auth/email-otp/send-verification-otp, then POST /fs/api/auth/sign-in/email-otp
+     a local channel       Google's callback is the app's own, so the tab signs in there and is handed back (§3.10)
 
    /fs/signin?return=<path> sends the tab back to <path> (a same-origin path the Worker already checked) once signed in. */
 (function () {
@@ -64,6 +65,10 @@
     if (google) {
       google.onclick = async () => {
         google.disabled = true;
+        // WHY: fs-origin is the app's own origin as the Worker saw it, so a page that disagrees came through a local
+        // channel's proxy (PEP 0003 §3.10), and Google can only return to the app's own domain
+        const home = meta('fs-origin');
+        if (home && home !== location.origin) { location.assign(`${home}/fs/handoff?to=${encodeURIComponent(back)}`); return; }
         try {
           const answer = await post(`${AUTH}/sign-in/social`, { provider: 'google', callbackURL: back, errorCallbackURL: refusedURL(back) });
           if (answer && answer.url) location.assign(answer.url); else throw new Error('Google sign-in did not start');

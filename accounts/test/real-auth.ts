@@ -87,7 +87,7 @@ function cookiesOf(answer: Response, jar = new Map<string, string>()): Map<strin
 	return jar;
 }
 
-export async function realStack(extra: Partial<Env> = {}) {
+export async function realStack(extra: Partial<Env> = {}, origin = OWN) {
 	const db = new DatabaseSync(":memory:");
 	for (const file of readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort()) db.exec(readFileSync(new URL(file, MIGRATIONS), "utf8"));
 	const d1 = d1Of(db);
@@ -108,7 +108,7 @@ export async function realStack(extra: Partial<Env> = {}) {
 	// the folder queue in this isolate (no Durable Object binding here), over the real D1 store
 	const deps: Deps = { ...liveDeps(env)!, s3: s3.fetch, now: () => clock.now, webHost: undefined };
 	const call = (path: string, init: RequestInit & { headers?: Record<string, string> } = {}) =>
-		handle(new Request(`${OWN}${path}`, { redirect: "manual", ...init, headers: { Origin: OWN, ...(init.headers || {}) } }), env, deps);
+		handle(new Request(`${origin}${path}`, { redirect: "manual", ...init, headers: { Origin: origin, ...(init.headers || {}) } }), env, deps);
 	const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
 		call(path, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json", ...headers } });
 
