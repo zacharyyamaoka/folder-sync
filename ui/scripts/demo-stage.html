@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>laptop</title>
+<!-- The laptop half of the README demo video (ui/scripts/record-demo.mjs). Nothing here is staged output: the terminal shows the
+     real commands the recorder ran on this machine's folder and the real log of `folder-sync sync --watch`, and "On this disk"
+     is the real folder read back from the file system every 120 ms. The other half of the video is the real Files page. -->
+<style>
+	:root { --ink: #eef1ec; --muted: #929891; --paper: #0c0e0c; --paper-2: #131613; --line: rgba(238, 241, 236, 0.14); --accent: #6cc495; --amber: #e0b35a;
+		--mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, monospace; }
+	* { box-sizing: border-box; }
+	html, body { margin: 0; height: 100%; background: var(--paper); color: var(--ink); font: 13px/1.5 var(--mono); overflow: hidden; }
+	main { display: grid; grid-template-rows: auto 1fr auto auto; height: 100%; }
+	header { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+	header .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+	header b { font-size: 14px; }
+	header span { color: var(--muted); }
+	h2 { margin: 0; padding: 10px 18px 6px; font: 600 11px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+	#term { padding: 0 18px 10px; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 36px); mask-image: linear-gradient(to bottom, transparent 0, #000 36px); display: flex; flex-direction: column; justify-content: flex-end; min-height: 0; }
+	#term div { white-space: pre-wrap; overflow-wrap: anywhere; }
+	#term .p { color: var(--accent); user-select: none; }
+	#term .out { color: var(--muted); }
+	#term .watch { color: #bfc7bd; }
+	#cursor { display: inline-block; width: 7px; height: 14px; background: var(--ink); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
+	@keyframes blink { 50% { opacity: 0; } }
+	#disk { border-top: 1px solid var(--line); background: var(--paper-2); padding-bottom: 8px; min-height: 190px; }
+	.file { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; padding: 6px 18px; border-left: 3px solid transparent; }
+	.file.fresh { border-left-color: var(--accent); background: rgba(108, 196, 149, 0.10); }
+	.file .name { overflow-wrap: anywhere; }
+	.file .size { color: var(--muted); }
+	.file .preview { grid-column: 1 / -1; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 3em; overflow: hidden; }
+	.empty { padding: 6px 18px; color: var(--muted); }
+	#caption { padding: 14px 18px; border-top: 1px solid var(--line); min-height: 64px; font: 600 15px/1.35 var(--mono); color: var(--accent); display: flex; align-items: center; }
+	#caption.idle { color: var(--muted); font-weight: 400; }
+</style>
+</head>
+<body>
+<main>
+	<header><span class="dot"></span><b>laptop</b><span id="where">~/notes</span></header>
+	<div style="display:grid;grid-template-rows:auto 1fr;min-height:0"><h2>Terminal</h2><div id="term"><div><span class="p">$ </span><span id="typing"></span><span id="cursor"></span></div></div></div>
+	<div id="disk"><h2>On this disk</h2><div id="files"><div class="empty">(empty)</div></div></div>
+	<div id="caption" class="idle">A folder of plain files on your computer.</div>
+</main>
+<script>
+	const term = document.getElementById("term");
+	const typing = document.getElementById("typing");
+	const cursorLine = typing.parentElement;
+	const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+	const addLine = (cls, text) => {
+		const line = document.createElement("div");
+		if (cls) line.className = cls;
+		line.textContent = text;
+		term.insertBefore(line, cursorLine);
+		while (term.children.length > 14) term.removeChild(term.firstChild);
+	};
+	let shownWatch = 0;
+	let known = new Map();
+
+	// The recorder calls this: types the command, runs it on the machine through the recorder's allowlist, prints the real output.
+	window.stage = {
+		async run(id, { speed = 38 } = {}) {
+			const spec = await (await fetch(`/api/command?id=${encodeURIComponent(id)}`)).json();
+			for (const ch of spec.line) { typing.textContent += ch; await wait(speed); }
+			await wait(250);
+			const shown = typing.textContent;
+			typing.textContent = "";
+			const line = document.createElement("div");
+			line.innerHTML = '<span class="p">$ </span>';
+			line.append(document.createTextNode(shown));
+			term.insertBefore(line, cursorLine);
+			const startedAt = Date.now(); // the recorder times "in the browser after the save" from here, not from the first typed key
+			const answer = await (await fetch(`/api/run?id=${encodeURIComponent(id)}`, { method: "POST" })).json();
+			answer.startedAt = startedAt;
+			for (const out of answer.output.split("\n").filter(Boolean)) addLine("out", out);
+			return answer;
+		},
+	};
+
+	// a row is marked "fresh" for 2.5 s after its bytes (or its first appearance) change
+	const freshUntil = new Map();
+	function paintFiles(files) {
+		const box = document.getElementById("files");
+		box.replaceChildren();
+		if (!files.length) { box.innerHTML = '<div class="empty">(empty)</div>'; return; }
+		const next = new Map();
+		for (const f of files) {
+			const key = `${f.size}|${f.preview}`;
+			next.set(f.path, key);
+			if (known.get(f.path) !== key) freshUntil.set(f.path, Date.now() + 2500);
+			const row = document.createElement("div");
+			row.className = "file" + ((freshUntil.get(f.path) ?? 0) > Date.now() ? " fresh" : "");
+			row.innerHTML = '<span class="name"></span><span class="size"></span><span class="preview"></span>';
+			row.querySelector(".name").textContent = f.path;
+			row.querySelector(".size").textContent = `${f.size} B`;
+			row.querySelector(".preview").textContent = f.preview;
+			box.append(row);
+		}
+		known = next;
+	}
+
+	async function tick() {
+		try {
+			const s = await (await fetch("/api/state", { cache: "no-store" })).json();
+			while (shownWatch < s.watch.length) addLine("watch", s.watch[shownWatch++]);
+			paintFiles(s.files);
+			const caption = document.getElementById("caption");
+			caption.textContent = s.caption || "";
+			caption.className = s.captionKind === "idle" ? "idle" : "";
+		} catch { /* the recorder is stopping */ }
+	}
+	setInterval(tick, 120);
+	tick();
+</script>
+</body>
+</html>

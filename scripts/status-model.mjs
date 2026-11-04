@@ -215,7 +215,9 @@ function buildSeries(points, metric, now) {
 // One cell of the at-a-glance card: the env's headline (worst or best latest value over its slices) and a 30-day line of
 // that same aggregate, carried forward from slice to slice so the line ends on the headline.
 function buildCell(metric, env, points, series, now) {
-	const mine = series.filter((s) => s.env === env);
+	// WHY no `tool` slices: a competitor (or an old folder-sync variant) measured on the same rig is a comparison row of the series
+	// table, never the headline. Counting lsyncd's 15 s as folder-sync's "Fast" made the objective read 15 s when it is 0.3 s.
+	const mine = series.filter((s) => s.env === env && s.slice.tool === undefined);
 	let chosen = mine;
 	if (metric.prefer) {
 		const preferred = mine.filter((s) => metric.prefer.re.test(String(s.slice[metric.prefer.key] ?? "")));

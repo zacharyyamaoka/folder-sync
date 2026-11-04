@@ -1,0 +1,116 @@
+{
+ "schema": "folder-sync-gates/1",
+ "run_at": "2026-11-04T20:56:30.779Z",
+ "code_sha": "bb601e26e59f1170321566cfa9f7f5a619340130",
+ "branch": "track/wave2",
+ "gates": [
+  {
+   "id": "G1",
+   "name": "Nothing lost",
+   "status": "pass",
+   "summary": "77 passed",
+   "tests": [],
+   "evidence": [],
+   "target": "t"
+  },
+  {
+   "id": "G2",
+   "name": "Version history",
+   "status": "pass",
+   "summary": "33 passed",
+   "tests": [],
+   "evidence": [],
+   "target": "t"
+  },
+  {
+   "id": "G3",
+   "name": "Private",
+   "status": "pass",
+   "summary": "8 passed",
+   "tests": [],
+   "evidence": [],
+   "target": "t"
+  },
+  {
+   "id": "G4",
+   "name": "Cross-platform",
+   "status": "not_built",
+   "summary": "4 passed, 1 skipped, 1 proof not built. Missing: installer smoke (desktop-smoke.yml) (GitHub has no workflow named desktop-smoke.yml yet)",
+   "tests": [],
+   "evidence": [],
+   "target": "t"
+  },
+  {
+   "id": "G5",
+   "name": "Three surfaces",
+   "status": "pass",
+   "summary": "3 passed",
+   "tests": [],
+   "evidence": [],
+   "target": "t"
+  },
+  {
+   "id": "G6",
+   "name": "Headless",
+   "status": "fail",
+   "summary": "1 failed: fresh machine did not sync",
+   "tests": [],
+   "evidence": [],
+   "target": "t"
+  },
+  {
+   "id": "G7",
+   "name": "Storage provider swappable",
+   "status": "pass",
+   "summary": "25 passed",
+   "tests": [],
+   "evidence": [],
+   "target": "t"
+  },
+  {
+   "id": "G8",
+   "name": "Drop-in",
+   "status": "skipped",
+   "summary": "left out of this run",
+   "tests": [],
+   "evidence": [],
+   "target": "t"
+  },
+  {
+   "id": "G9",
+   "name": "Ignore rules",
+   "status": "pass",
+   "summary": "9 passed",
+   "tests": [],
+   "evidence": [],
+   "target": "t"
+  },
+  {
+   "id": "G10",
+   "name": "Accounts",
+   "status": "pass",
+   "summary": "69 passed <b>",
+   "tests": [],
+   "evidence": [],
+   "target": "t"
+  },
+  {
+   "id": "G11",
+   "name": "Easy to start",
+   "status": "not_built",
+   "summary": "2 passed, 4 proofs not built. Missing: first sync on macOS",
+   "tests": [],
+   "evidence": [],
+   "target": "t"
+  },
+  {
+   "id": "G12",
+   "name": "Trusted restore",
+   "status": "pass",
+   "summary": "1 passed",
+   "tests": [],
+   "evidence": [],
+   "target": "t"
+  }
+ ]
+}

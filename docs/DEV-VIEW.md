@@ -19,6 +19,7 @@ That regenerates the page from the real KPI series and gate results and serves i
 | `scripts/status-render.mjs` | the object in, the page out |
 | `scripts/status-test` | the tests below |
 | `scripts/dev-view` | regenerate and serve |
+| `scripts/readme-status` | the same model, written as the "Objectives & Gates" block of `README.md` (and, with `--landing`, of the GitHub Pages `index.html`) between `<!-- status:begin -->` and `<!-- status:end -->`; `--check` fails when a block is stale. Tests: `node --test tests/readme-status/readme-status.test.mjs` |
 
 ## What it reads
 
