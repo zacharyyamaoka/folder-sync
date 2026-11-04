@@ -213,6 +213,11 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		result.Events = append(result.Events, p.holdEvent("unmounted", len(prev.Files)))
 		return &EmptyFolderError{Folder: p.Folder, Had: len(prev.Files)}
 	}
+	// a shared folder (PEP 0010 §7): this host publishes only the private files; the rest is the shared tree's
+	okPaths, sharedSet, err := p.splitShared(ctx, okPaths, byPath)
+	if err != nil {
+		return err
+	}
 	prevIndex := prev.Index()
 	now := manifest.FormatTime(p.Now())
 
@@ -255,11 +260,22 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		// upload's body must be exactly those
 		next = append(next, manifest.Entry{Path: path, Size: read.Size, MTime: mtime, SHA256: read.SHA256, WrittenAt: now})
 	}
-	var deleted []string
+	var deleted, moved []string
 	for _, old := range prev.Files {
-		if !present[old.Path] {
-			deleted = append(deleted, old.Path)
+		if present[old.Path] {
+			continue
 		}
+		if sharedSet[old.Path] {
+			// WHY a move, not a delete (PEP 0010 §7): the shared tree holds it now, so max_delete does not count it and its
+			// versions stay in this host's history; a path the tree does not hold yet stays published until it does
+			if _, held := p.sharedStateRef().Held[old.Path]; held {
+				moved = append(moved, old.Path)
+			} else {
+				next = append(next, old)
+			}
+			continue
+		}
+		deleted = append(deleted, old.Path)
 	}
 	if len(deleted) > p.Config.MaxDelete {
 		p.say("holding %d deletes: more than max_delete = %d in one round; they stay in the bucket until you raise max_delete or restore the files", len(deleted), p.Config.MaxDelete)
@@ -270,6 +286,8 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		}
 		deleted = nil
 	}
+	deleted = append(deleted, moved...)
+	isMoved := setOf(moved)
 
 	if p.Creds.ReadOnly {
 		return p.pushReadOnly(ctx, prev, changed, deleted, result)
@@ -356,7 +374,7 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 			return err
 		}
 		deletedAt = p.Now()
-		result.Deleted = append(result.Deleted, deleted...)
+		result.Deleted = append(result.Deleted, withoutPaths(deleted, isMoved)...)
 	}
 	needManifest := len(changed) > 0 || len(deleted) > 0 || metadataOnly > 0 || p.manifestMissing()
 	if !needManifest {
@@ -400,7 +418,7 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 	p.pruneShadows(m.Files)
 	result.ManifestWritten = true
 	// 3. the change record, PUT with the round's other records once the manifest is out (FlushRecords)
-	events := p.pushEvents(m, items, changed, deleted, byPath, uploadedAt, deletedAt, published)
+	events := p.pushEvents(m, items, changed, withoutPaths(deleted, isMoved), byPath, uploadedAt, deletedAt, published)
 	result.Events = append(result.Events, events...)
 	if err := p.queueChanges(m, events); err != nil {
 		p.say("the change record for seq %d: %v", m.Seq, err)
@@ -854,6 +872,7 @@ func (p *Project) Discover(ctx context.Context) error {
 			p.say("found peer %s", dir.Path)
 			peers.Known = append(peers.Known, dir.Path)
 			known[dir.Path] = true
+			p.noteShared(dir.Path) // a folder that was shared while this machine was away learns it here, before its push
 		}
 	}
 	return p.savePeers(peers)
@@ -909,6 +928,10 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 	}
 	if m.HostID != peerID || m.Project != p.Config.Project {
 		return PeerResult{}, fmt.Errorf("manifest under hosts/%s claims host %s, project %s", peerID, m.HostID, m.Project)
+	}
+	// the shared tree is not a peer's read-only copy: its files are the folder itself (PEP 0010)
+	if m.Shared != nil {
+		return p.pullShared(ctx, peerID, m, got.ETag, cached, peers, result)
 	}
 	pr := PeerResult{ID: peerID, Name: m.HostName, Files: len(m.Files), Seq: m.Seq}
 	online, _ := time.Parse(time.RFC3339Nano, m.GeneratedAt)

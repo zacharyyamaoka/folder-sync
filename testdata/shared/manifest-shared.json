@@ -1,0 +1,24 @@
+{
+  "schema": "folder-sync-manifest/1",
+  "project": "notes",
+  "host_id": "5d0f6c8e-2b1a-4e7d-9c3f-8a6b5e4d3c2b",
+  "host_name": "shared",
+  "seq": 7,
+  "generated_at": "2026-11-04T09:08:30.117Z",
+  "files": [
+    {
+      "path": "notes/todo.md",
+      "size": 13,
+      "mtime": "2026-11-04T09:08:30.117Z",
+      "sha256": "41036896212f571599cd6f64e836dc309d8c45b8f3929e31bdecc51507229a4d",
+      "written_at": "2026-11-04T09:08:30.117Z",
+      "object_etag": "0cc175b9c0f1b6a831c399e269772661"
+    }
+  ],
+  "shared": {
+    "private": [
+      "events/",
+      "*.sqlite"
+    ]
+  }
+}

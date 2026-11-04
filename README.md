@@ -72,6 +72,14 @@ folder-sync login --key              v0's stored bucket key instead (credentials
 
 The server is `--server`, else `FOLDER_SYNC_SERVER`, else the accounts Worker's own host; an app prints its own (`folder-sync login --server https://robotparts.dev`) so the approving browser is usually signed in already. The session is kept in `~/.folder-sync/account.json` (`folder-sync-account/1`, mode 0600). Once it exists, and neither `FOLDER_SYNC_CREDENTIAL_PROCESS` nor a key is set in the environment, folder-sync runs its own `credentials` as the credential process, so the short-lived keys, their cache and their exit codes are PEP 0002's, unchanged; a key in the environment still wins, and a signed-in machine no longer uses a stored `credentials.json`.
 
+### A shared folder: every machine and the web edit the same files
+
+```text
+folder-sync share [--private PATTERN]...   one tree for the folder: every machine, agent and page edits it (needs login)
+```
+
+By default each machine publishes its own files and receives the others' read-only. `share` makes the folder one tree ([`docs/peps/0010`](docs/peps/0010-shared-tree.md)): the files are the folder itself on every machine, the folder's object on the accounts Worker puts every change in order, two edits to different lines of a note merge, and a collision becomes `name (Conflicted copy <machine> <YYYYMMDDHHMM>).ext` beside it (Obsidian's name), never markers inside a file. Patterns named with `--private` (gitignore syntax) stay on each machine's own host; nothing is private unless named. Every other machine joins at its next sync. Sharing cannot be undone or re-ruled in this version, and it needs the accounts server.
+
 Run the Worker locally (rclone serve s3, the R2 stand-in, `wrangler dev` with a local D1 and generated test keys): `npm install --prefix accounts`, then `node accounts/scripts/dev.mjs up` (`down` stops exactly what it started). Its tests: `node --test accounts/test/worker.test.ts` and the end-to-end proof `node accounts/test/proof.mjs` (ports 4930-4932).
 
 ### Try it with no cloud account
@@ -122,6 +130,7 @@ node bench/latency/bench.mjs install-timer
 |---|---|
 | `init`, `login`, `sync --once`, `sync --watch`, `status`, `publish` | Built, tested end to end against a local S3 stand-in |
 | Accounts: `login` (device grant), `credentials`, `whoami`, `logout`, `publish --public/--private`, the `accounts/` Worker and its web host | Built; tested end to end locally (`accounts/test/proof.mjs`: `wrangler dev`, local D1, the R2 stand-in). **Not deployed**: the D1 database, the secrets and Google's OAuth client are Zach's |
+| `share`, the shared tree: the folder's Durable Object as the one writer, three-way merge, conflict copies (PEP 0010) | Built; tested end to end locally with the real Worker, three machines and a page (`e2e/shared_test.go`, `e2e/shared_soak_test.go`). **Not deployed**: the D1 migration `0013_shared_tree.sql` and the Worker are Zach's |
 | Push from the manifest diff, pull by conditional GET, `_trash/` on overwrite and delete, `max_delete`, empty-folder guard | Built and tested |
 | Ignore rules (gitignore syntax → rclone filters) | Built; tested against `git` itself as the oracle |
 | Windows paths, reserved names, case twins, nothing in AppData | Unit-tested on Linux; the Windows binary cross-compiles. **Not yet run on Windows** |

@@ -465,6 +465,7 @@ export async function restore(request: Request, env: Env, deps: Deps, app: App |
 	if (hosts instanceof Response) return hosts;
 	const manifests = new Map(hosts.map((h) => [h.id, h.manifest]));
 	const web = await deps.store.webHost(ownerId, project);
+	const shared = await deps.store.sharedTree(ownerId, project);
 	const byHost = new Map<string, { path: string; version: string }[]>();
 	for (const { host, path, version } of items as { host: string; path: string; version: string }[]) byHost.set(host, [...(byHost.get(host) ?? []), { path, version }]);
 	const applied: { host: string; path: string; version: string; seq: number }[] = [];
@@ -472,8 +473,9 @@ export async function restore(request: Request, env: Env, deps: Deps, app: App |
 	const failed: Failed[] = [];
 	const via = browserOf(request, who.via);
 	for (const [host, list] of byHost) {
-		if (host === web) {
-			const answer = await webHostOf(env, deps)({ method: "RESTORE", owner: ownerId, project, hostId: host, path: "", items: list, sessionId: who.person.sessionId, via });
+		// WHY the shared tree too (PEP 0010): its writer is the folder's object, so no machine could answer a request
+		if (host === web || host === shared) {
+			const answer = await webHostOf(env, deps)({ method: host === shared ? "SHARED_RESTORE" : "RESTORE", owner: ownerId, project, hostId: host, path: "", items: list, sessionId: who.person.sessionId, via });
 			if (answer.status !== 200) {
 				if (answer.status === 401 || answer.status === 503) return json(answer.status, answer.body, answer.headers ?? {});
 				for (const { path, version } of list) failed.push({ host, path, version, error: "failed" });
@@ -532,7 +534,7 @@ export async function purge(request: Request, env: Env, deps: Deps, app: App | n
 	if (!one && !older) return fail(400, "bad_request", "Purge one version ({ host, path, version }) or what is older than older_than_days (0 to 30).");
 	const ownerId = who.person.userId;
 	if (!(await stillSignedIn(deps, who.person))) return fail(401, "signed_out", "This device was signed out before its purge could start.");
-	const web = await deps.store.webHost(ownerId, project);
+	const web = (await deps.store.webHost(ownerId, project)) ?? (await deps.store.sharedTree(ownerId, project));
 	const answer = await webHostOf(env, deps)({
 		method: "PURGE_HISTORY", owner: ownerId, project, hostId: web ?? "", path: "", sessionId: who.person.sessionId,
 		purge: one ? { host: host as string, path: path as string, version: version as string } : { olderThanDays: days as number, host: host as string | undefined, path: path as string | undefined },

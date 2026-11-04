@@ -1,0 +1,235 @@
+{
+ "_why": "PEP 0010 §6.2: the merge of one path. base is null when both sides added the path. The Worker's accounts/test/shared-merge.test.ts runs every case; the result is the exact bytes written.",
+ "cases": [
+  {
+   "name": "different lines of one note merge, both edits kept",
+   "path": "notes/plan.md",
+   "base": "# Plan\n\n- one\n- two\n- three\n- four\n",
+   "ours": "# Plan\n\n- ONE\n- two\n- three\n- four\n",
+   "theirs": "# Plan\n\n- one\n- two\n- three\n- FOUR\n",
+   "expect": {
+    "kind": "merged",
+    "result": "# Plan\n\n- ONE\n- two\n- three\n- FOUR\n"
+   }
+  },
+  {
+   "name": "the same line edited on both sides is a collision",
+   "path": "notes/plan.md",
+   "base": "# Plan\n\n- one\n- two\n- three\n",
+   "ours": "# Plan\n\n- one\n- two (mine)\n- three\n",
+   "theirs": "# Plan\n\n- one\n- two (theirs)\n- three\n",
+   "expect": {
+    "kind": "conflict",
+    "why": "overlap"
+   }
+  },
+  {
+   "name": "a change both sides made is taken once",
+   "path": "notes/plan.md",
+   "base": "a\nb\nc\n",
+   "ours": "a\nB\nc\n",
+   "theirs": "a\nB\nc\n",
+   "expect": {
+    "kind": "merged",
+    "result": "a\nB\nc\n"
+   }
+  },
+  {
+   "name": "two appends to a JSONL log: theirs, then our tail",
+   "path": "logs/events.jsonl",
+   "base": "{\"n\":1}\n{\"n\":2}\n",
+   "ours": "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n",
+   "theirs": "{\"n\":1}\n{\"n\":2}\n{\"n\":4}\n",
+   "expect": {
+    "kind": "tails",
+    "result": "{\"n\":1}\n{\"n\":2}\n{\"n\":4}\n{\"n\":3}\n"
+   }
+  },
+  {
+   "name": "two appends to a text file with no final newline are not whole lines: git's collision",
+   "path": "notes/todo.txt",
+   "base": "a\nb",
+   "ours": "a\nb\nc\n",
+   "theirs": "a\nb\nd\n",
+   "expect": {
+    "kind": "conflict",
+    "why": "overlap"
+   }
+  },
+  {
+   "name": "two appends to an empty file take the tails rule",
+   "path": "notes/empty.md",
+   "base": "",
+   "ours": "from me\n",
+   "theirs": "from them\n",
+   "expect": {
+    "kind": "tails",
+    "result": "from them\nfrom me\n"
+   }
+  },
+  {
+   "name": "two new files at one path have no base: different text collides",
+   "path": "notes/new.md",
+   "base": null,
+   "ours": "one\n",
+   "theirs": "two\n",
+   "expect": {
+    "kind": "conflict",
+    "why": "overlap"
+   }
+  },
+  {
+   "name": "two new files at one path, one of them empty: the text stands",
+   "path": "notes/new.md",
+   "base": null,
+   "ours": "",
+   "theirs": "x\n",
+   "expect": {
+    "kind": "merged",
+    "result": "x\n"
+   }
+  },
+  {
+   "name": "ours is unchanged since the base: theirs stands",
+   "path": "notes/plan.md",
+   "base": "a\nb\n",
+   "ours": "a\nb\n",
+   "theirs": "a\nb\nc\n",
+   "expect": {
+    "kind": "unchanged"
+   }
+  },
+  {
+   "name": "different rows of a CSV merge",
+   "path": "data/table.csv",
+   "base": "id,v\n1,a\n2,b\n3,c\n4,d\n",
+   "ours": "id,v\n1,A\n2,b\n3,c\n4,d\n",
+   "theirs": "id,v\n1,a\n2,b\n3,c\n4,D\n",
+   "expect": {
+    "kind": "merged",
+    "result": "id,v\n1,A\n2,b\n3,c\n4,D\n"
+   }
+  },
+  {
+   "name": "CRLF endings survive a merge exactly",
+   "path": "notes/win.md",
+   "base": "a\r\nb\r\nc\r\nd\r\n",
+   "ours": "A\r\nb\r\nc\r\nd\r\n",
+   "theirs": "a\r\nb\r\nc\r\nD\r\n",
+   "expect": {
+    "kind": "merged",
+    "result": "A\r\nb\r\nc\r\nD\r\n"
+   }
+  },
+  {
+   "name": "TOML: a clean line merge that defines a key twice no longer parses",
+   "path": "config/app.toml",
+   "base": "a = 1\n\nb = 2\n\nc = 3\n",
+   "ours": "a = 1\nd = 4\n\nb = 2\n\nc = 3\n",
+   "theirs": "a = 1\n\nb = 2\n\nc = 3\nd = 5\n",
+   "expect": {
+    "kind": "conflict",
+    "why": "parse"
+   }
+  },
+  {
+   "name": "YAML: a clean line merge that defines a key twice no longer parses",
+   "path": "config/app.yaml",
+   "base": "a: 1\n\nb: 2\n\nc: 3\n",
+   "ours": "a: 1\nd: 4\n\nb: 2\n\nc: 3\n",
+   "theirs": "a: 1\n\nb: 2\n\nc: 3\nd: 5\n",
+   "expect": {
+    "kind": "conflict",
+    "why": "parse"
+   }
+  },
+  {
+   "name": "YAML: different keys merge and still parse",
+   "path": "config/app.yml",
+   "base": "a: 1\n\nb: 2\n\nc: 3\n",
+   "ours": "a: 10\n\nb: 2\n\nc: 3\n",
+   "theirs": "a: 1\n\nb: 2\n\nc: 30\n",
+   "expect": {
+    "kind": "merged",
+    "result": "a: 10\n\nb: 2\n\nc: 30\n"
+   }
+  },
+  {
+   "name": "JSON: two appended objects make a file that no longer parses",
+   "path": "data/state.json",
+   "base": "{\n  \"a\": 1\n}\n",
+   "ours": "{\n  \"a\": 1\n}\n{\n  \"b\": 2\n}\n",
+   "theirs": "{\n  \"a\": 1\n}\n{\n  \"c\": 3\n}\n",
+   "expect": {
+    "kind": "conflict",
+    "why": "parse"
+   }
+  },
+  {
+   "name": "JSON: separate keys merge and still parse",
+   "path": "data/state.json",
+   "base": "{\n  \"a\": 1,\n  \"m\": 0,\n  \"b\": 2\n}\n",
+   "ours": "{\n  \"a\": 10,\n  \"m\": 0,\n  \"b\": 2\n}\n",
+   "theirs": "{\n  \"a\": 1,\n  \"m\": 0,\n  \"b\": 20\n}\n",
+   "expect": {
+    "kind": "merged",
+    "result": "{\n  \"a\": 10,\n  \"m\": 0,\n  \"b\": 20\n}\n"
+   }
+  },
+  {
+   "name": "a canvas file merges like JSON",
+   "path": "maps/ideas.canvas",
+   "base": "{\n  \"nodes\": [],\n  \"x\": 0,\n  \"y\": 0,\n  \"edges\": []\n}\n",
+   "ours": "{\n  \"nodes\": [],\n  \"x\": 5,\n  \"y\": 0,\n  \"edges\": []\n}\n",
+   "theirs": "{\n  \"nodes\": [],\n  \"x\": 0,\n  \"y\": 0,\n  \"edges\": [1]\n}\n",
+   "expect": {
+    "kind": "merged",
+    "result": "{\n  \"nodes\": [],\n  \"x\": 5,\n  \"y\": 0,\n  \"edges\": [1]\n}\n"
+   }
+  },
+  {
+   "name": "a JSONL log that already held a bad line is not made worse by the check",
+   "path": "logs/odd.jsonl",
+   "base": "{\"n\":1}\nnot json\n",
+   "ours": "{\"n\":1}\nnot json\n{\"n\":3}\n",
+   "theirs": "{\"n\":1}\nnot json\n{\"n\":4}\n",
+   "expect": {
+    "kind": "tails",
+    "result": "{\"n\":1}\nnot json\n{\"n\":4}\n{\"n\":3}\n"
+   }
+  },
+  {
+   "name": "a PNG is never merged",
+   "path": "img/photo.png",
+   "base": "x",
+   "ours": "y",
+   "theirs": "z",
+   "expect": {
+    "kind": "conflict",
+    "why": "not_mergeable"
+   }
+  },
+  {
+   "name": "a .log file is not on the list",
+   "path": "logs/run.log",
+   "base": "a\n",
+   "ours": "a\nb\n",
+   "theirs": "a\nc\n",
+   "expect": {
+    "kind": "conflict",
+    "why": "not_mergeable"
+   }
+  },
+  {
+   "name": "the suffix is matched without regard to case",
+   "path": "Notes/PLAN.MD",
+   "base": "1\n2\n3\n4\n",
+   "ours": "X\n2\n3\n4\n",
+   "theirs": "1\n2\n3\nY\n",
+   "expect": {
+    "kind": "merged",
+    "result": "X\n2\n3\nY\n"
+   }
+  }
+ ]
+}

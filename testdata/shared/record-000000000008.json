@@ -1,0 +1,35 @@
+{
+  "schema": "folder-sync-changes/1",
+  "project": "notes",
+  "host_id": "5d0f6c8e-2b1a-4e7d-9c3f-8a6b5e4d3c2b",
+  "host_name": "shared",
+  "seq": 8,
+  "at": "2026-11-04T09:10:00.200Z",
+  "by": "shared",
+  "via": "Chrome on Linux",
+  "events": [
+    {
+      "schema": "folder-sync-event/1",
+      "level": "info",
+      "project": "notes",
+      "host": "5d0f6c8e-2b1a-4e7d-9c3f-8a6b5e4d3c2b",
+      "host_name": "shared",
+      "seq": 8,
+      "event": "upload",
+      "at": "2026-11-04T09:10:00.200Z",
+      "path": "notes/plan.md",
+      "size": 11,
+      "sha256": "f7b5c3366601532364ee2ef684b46bdf129dd966f82e356c9a22b2306f53d51d",
+      "op": "edit",
+      "was": {
+        "sha256": "24730f944d9e1d87b774b184fa633cefbf1bb86a7e35c8d88e1937e2128d8cb4",
+        "size": 12,
+        "written_at": "2026-11-04T09:08:30.117Z",
+        "kept": null,
+        "why": "burst"
+      },
+      "up_ms": 94,
+      "by_name": "Chrome on Linux"
+    }
+  ]
+}

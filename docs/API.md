@@ -154,6 +154,28 @@ Every non-2xx JSON answer is `{ "error": "<code>", "why": "<sentence>" }` (PEP 0
 | 503 | `recovering` | the web host is settling a cut-off change (PEP 0003) | Worker |
 | 503 | `unavailable` | a route that reads the bucket (`history`, `files`, `deleted`) could not reach it: no network, or sync's credentials did not open the folder | serve |
 
+## The shared tree
+
+One tree that every device, agent and page of a folder edits ([`docs/peps/0010`](peps/0010-shared-tree.md); the layout, the merge rules and the conflict-copy name are in [`docs/CONTRACT.md`](CONTRACT.md) "The shared tree"). The Worker only; owner only (a reader can read the tree, never write it). A cookie write needs `X-Folder-Sync: 1` and `X-Folder-Sync-User`, a machine's bearer needs neither.
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /fs/v1/folders/:project/share` | `{private?: [pattern, …]}`, up to 200 gitignore patterns | `{host, name: "shared", private, seq, created}`. Mints the tree's id once and writes its empty manifest (seq 1); asking again returns it. A different `private` than the first is `409 already_shared` |
+| `POST /fs/v1/folders/:project/shared` | `{device, host?, max_delete?, changes: [{path, base, sha256, size, body \| staged \| delete: true, at_local}]}` | `{host, name, seq, changed, results: [{path, outcome, version, sha256, size, merge?, kept_as?, why?, conflict_path?, conflict_version?}]}`, in the order sent |
+| `PUT /fs/v1/folders/:project/shared/<path>` | the file's bytes (up to 32 MiB); `X-Folder-Sync-Base: <version id>` (absent for a new file); `X-Folder-Sync-Merge: never` makes a mismatch a `412` | `{host, seq, path, outcome, version, …}`, one result as above |
+| `DELETE /fs/v1/folders/:project/shared/<path>` | `X-Folder-Sync-Base` is required | one result: `accepted` (gone) or `edit_won` |
+
+The commit:
+
+- `base` is `null` for a path the device never knew, else `{version, sha256?}`: the version id of the bytes its file last held in step with the tree (`<written_at>_<sha16>`, [`docs/CONTRACT.md`](CONTRACT.md)), and their sha256.
+- `body` is base64, up to 1 MiB a file and 8 MiB a request; a bigger file is uploaded by the machine to `_incoming/<project>/<host>/<uuid>` with its own key and named by `staged` (the uuid; `host` says whose). Up to 100 paths a request. `sha256` is checked against the bytes (`400 bad_body`).
+- `max_delete` is the device's own (default 50): a commit with more deletes is refused whole (`409 max_delete`).
+- `at_local` is the device's local time, for the name of a conflict copy.
+- `outcome` is one of: `accepted` (the tree now holds the bytes, or the delete went; `version` is the path's new version); `merged` (the file is the merge; `merge` is `lines` or `tails`, and `kept_as` is the version id under which the device's own bytes are kept, absent for `tails`); `conflict` (the path keeps the first change, `conflict_path` holds the device's bytes, `why` is `not_mergeable`, `too_big`, `overlap` or `parse`); `edit_won` (the device's delete was not applied: another device changed the file; `version` is the winner, which the device pulls back).
+- Refusals: `409 not_shared` (run `folder-sync share`), `409 private_path`, `409 max_delete`, `403 over_quota` (a commit that adds bytes; a commit that only deletes still goes), `400 bad_path | bad_body | bad_change | bad_staged | staged_missing`, `413 too_large`, `412 precondition_failed` (`X-Folder-Sync-Merge: never`), `503 busy | recovering`.
+
+The shared tree is one more host to every other route: `GET …/folders/:project` lists it, `GET …/files/:host/<path>` opens its files, `…/history/:host/<path>` lists and opens its versions, `POST …/restore` writes a kept version back as a new version (by the folder's object, not by a machine's request), and `POST …/history/purge` purges them.
+
 ## The element: `<folder-sync-status>`
 
 Every app embeds the same element with two lines, on its own origin:

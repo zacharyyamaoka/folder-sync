@@ -1,0 +1,89 @@
+{
+  "schema": "folder-sync-changes/1",
+  "project": "notes",
+  "host_id": "5d0f6c8e-2b1a-4e7d-9c3f-8a6b5e4d3c2b",
+  "host_name": "shared",
+  "seq": 7,
+  "at": "2026-11-04T09:08:30.117Z",
+  "by": "shared",
+  "events": [
+    {
+      "schema": "folder-sync-event/1",
+      "level": "info",
+      "project": "notes",
+      "host": "5d0f6c8e-2b1a-4e7d-9c3f-8a6b5e4d3c2b",
+      "host_name": "shared",
+      "seq": 7,
+      "event": "upload",
+      "at": "2026-11-04T09:08:30.117Z",
+      "path": "notes/plan (Conflicted copy bam-Air 202611040907).md",
+      "size": 11,
+      "sha256": "2f0134c66ea80c069f1b6733fa8546648b40beaa83fb0cdce12df47a5d8afc0b",
+      "op": "add",
+      "by_host": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "by_name": "bam-Air"
+    },
+    {
+      "schema": "folder-sync-event/1",
+      "level": "warn",
+      "project": "notes",
+      "host": "5d0f6c8e-2b1a-4e7d-9c3f-8a6b5e4d3c2b",
+      "host_name": "shared",
+      "seq": 7,
+      "event": "conflict",
+      "at": "2026-11-04T09:08:30.117Z",
+      "path": "notes/plan.md",
+      "kept_at": "notes/plan (Conflicted copy bam-Air 202611040907).md",
+      "peer": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "peer_name": "bam-Air",
+      "by_host": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "by_name": "bam-Air"
+    },
+    {
+      "schema": "folder-sync-event/1",
+      "level": "info",
+      "project": "notes",
+      "host": "5d0f6c8e-2b1a-4e7d-9c3f-8a6b5e4d3c2b",
+      "host_name": "shared",
+      "seq": 7,
+      "event": "upload",
+      "at": "2026-11-04T09:08:30.117Z",
+      "path": "notes/todo.md",
+      "size": 13,
+      "sha256": "41036896212f571599cd6f64e836dc309d8c45b8f3929e31bdecc51507229a4d",
+      "op": "edit",
+      "was": {
+        "sha256": "d23b493eece04021c1e8554bd61181eeaafc2139b08c448c90b9b1c8e60ea3ed",
+        "size": 13,
+        "written_at": "2026-11-04T09:00:00.000Z",
+        "kept": "2026-11-04T09:00:00.000Z_d23b493eece04021"
+      },
+      "merge": {
+        "base": "2026-11-04T08:30:00.000Z_8bbdfbae7eef71b2",
+        "yours": "2026-11-04T09:08:30.117Z_c3668e317330d13d",
+        "result": "2026-11-04T09:08:30.117Z_41036896212f5715"
+      },
+      "by_host": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "by_name": "bam-Air"
+    },
+    {
+      "schema": "folder-sync-event/1",
+      "level": "info",
+      "project": "notes",
+      "host": "5d0f6c8e-2b1a-4e7d-9c3f-8a6b5e4d3c2b",
+      "host_name": "shared",
+      "seq": 7,
+      "event": "delete",
+      "at": "2026-11-04T09:08:30.117Z",
+      "path": "old.md",
+      "was": {
+        "sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee",
+        "size": 4,
+        "written_at": "2026-11-04T08:00:00.000Z",
+        "kept": "2026-11-04T08:00:00.000Z_01d09d19c2139a46"
+      },
+      "by_host": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "by_name": "bam-Air"
+    }
+  ]
+}

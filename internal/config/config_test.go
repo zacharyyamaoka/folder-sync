@@ -30,7 +30,7 @@ func TestRenderLoadRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSharedModeIsRefusedInV0(t *testing.T) {
+func TestSharedModeInModesPointsAtShare(t *testing.T) {
 	dir := t.TempDir()
 	c := New("demo", "folder-sync")
 	c.Modes = map[string]string{"shared": ModeShared}
@@ -38,11 +38,11 @@ func TestSharedModeIsRefusedInV0(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := Load(dir)
-	var refusal ErrSharedIsV1
+	var refusal ErrUseShare
 	if !errors.As(err, &refusal) || refusal.Subfolder != "shared" {
-		t.Fatalf("want ErrSharedIsV1, got %v", err)
+		t.Fatalf("want ErrUseShare, got %v", err)
 	}
-	for _, phrase := range []string{"not available in v0", "_leases/", "bisync", "v1"} {
+	for _, phrase := range []string{"not a setting", "folder-sync share", "--private"} {
 		if !strings.Contains(err.Error(), phrase) {
 			t.Errorf("refusal does not say %q: %v", phrase, err)
 		}

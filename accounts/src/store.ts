@@ -28,6 +28,10 @@ export interface Store {
 	webHost(owner: string, project: string): Promise<string | null>;
 	/** The folder's web host id: `candidate` if this call made the row, else the one already there. */
 	ensureWebHost(owner: string, project: string, candidate: string, now: string): Promise<string>;
+	/** The folder's shared tree host id (PEP 0010), or null while the folder is not shared. */
+	sharedTree(owner: string, project: string): Promise<string | null>;
+	/** The folder's shared tree id: `candidate` if this call made the row, else the one already there. */
+	ensureSharedTree(owner: string, project: string, candidate: string, now: string): Promise<string>;
 	/** The person's storage as last measured (quota.ts), or null before the first measurement. `history` is the share of
 	 *  it under _history/, _changes/, _requests/ and legacy _trash/ (PEP 0007 §3.5). */
 	usage(owner: string): Promise<{ bytes: number; objects: number; measured_at: string; partial?: boolean; stale?: boolean; history?: { bytes: number; objects: number } } | null>;
@@ -134,6 +138,16 @@ export function d1Store(db: D1Like): Store {
 			await run('INSERT INTO "web_host" (owner_id, project, host_id, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (owner_id, project) DO NOTHING', owner, project, candidate, now);
 			const id = await store.webHost(owner, project);
 			if (!id) throw new Error("the web host row did not stick");
+			return id;
+		},
+		async sharedTree(owner, project) {
+			return (await one<{ host_id: string }>('SELECT host_id FROM "shared_tree" WHERE owner_id = ? AND project = ?', owner, project))?.host_id ?? null;
+		},
+		async ensureSharedTree(owner, project, candidate, now) {
+			// WHY insert-then-read, as the web host: two shares at once both try; the primary key keeps exactly one tree
+			await run('INSERT INTO "shared_tree" (owner_id, project, host_id, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (owner_id, project) DO NOTHING', owner, project, candidate, now);
+			const id = await store.sharedTree(owner, project);
+			if (!id) throw new Error("the shared tree row did not stick");
 			return id;
 		},
 		async usage(owner) {

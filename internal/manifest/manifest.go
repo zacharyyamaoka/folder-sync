@@ -44,6 +44,14 @@ type Manifest struct {
 	Seq         int64   `json:"seq"`          // +1 on every rewrite
 	GeneratedAt string  `json:"generated_at"` // RFC 3339 UTC
 	Files       []Entry `json:"files"`        // sorted by path
+	// Shared is present on the shared tree's host only (docs/peps/0010): its writer is the folder's Durable Object, and
+	// Private is the one rule per folder for the files that stay on each machine's own host.
+	Shared *Shared `json:"shared,omitempty"`
+}
+
+// Shared is a shared tree's rule: gitignore patterns of the files that are not shared.
+type Shared struct {
+	Private []string `json:"private"`
 }
 
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)

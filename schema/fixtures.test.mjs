@@ -144,6 +144,50 @@ function downTime(ev) {
 	return [`down_ms ${ev.down_ms}, want ${Date.parse(ev.at) - Date.parse(peer.at)}`];
 }
 
+/** testdata/shared/ (PEP 0010): the shared tree's manifests and change records validate like any host's, with the shared field;
+ *  merge.json and conflict-names.json are the rulers the Worker's tests run (accounts/test/shared-merge.test.ts). */
+function sharedFixture(path) {
+	const name = path.split("/").pop();
+	if (name.startsWith("manifest-")) {
+		const m = json(path);
+		return [...valid(m, "manifest.schema.json"), ...(m.shared ? [] : ["a shared tree's manifest has a shared field"]), ...(m.host_name === "shared" ? [] : ["its host_name is shared"])];
+	}
+	if (name.startsWith("record-")) {
+		const doc = json(path);
+		const errors = valid(doc, "changes.schema.json");
+		const seq = name.match(/(\d{12})\.json$/);
+		if (!seq || Number(seq[1]) !== doc.seq) errors.push(`the file name must end in the record's seq as 12 digits (${doc.seq})`);
+		if (doc.by !== "shared" || doc.host_name !== "shared") errors.push("a shared tree's record is by shared, from host_name shared");
+		for (const [i, ev] of (doc.events ?? []).entries()) {
+			if (ev.project !== doc.project || ev.host !== doc.host_id || ev.host_name !== doc.host_name) errors.push(`events[${i}]: project, host and host_name must be the record's`);
+			errors.push(...keptNames(ev, `events[${i}]`));
+		}
+		const paths = (doc.events ?? []).map((e) => e.path);
+		if (JSON.stringify(paths) !== JSON.stringify([...paths].sort())) errors.push("events must be in path order");
+		return errors;
+	}
+	const doc = json(path);
+	const errors = [];
+	if (name === "merge.json") {
+		const kinds = new Set(["merged", "tails", "conflict", "unchanged"]);
+		const whys = new Set(["not_mergeable", "too_big", "overlap", "parse"]);
+		for (const [i, c] of (doc.cases ?? []).entries()) {
+			if (typeof c.name !== "string" || typeof c.path !== "string" || typeof c.ours !== "string" || typeof c.theirs !== "string" || !(c.base === null || typeof c.base === "string")) errors.push(`cases[${i}]: name, path, base (or null), ours and theirs`);
+			if (!kinds.has(c.expect?.kind)) errors.push(`cases[${i}]: expect.kind is one of ${[...kinds]}`);
+			if (c.expect?.kind === "conflict" && !whys.has(c.expect.why)) errors.push(`cases[${i}]: a conflict says why (${[...whys]})`);
+			if (["merged", "tails"].includes(c.expect?.kind) && typeof c.expect.result !== "string") errors.push(`cases[${i}]: a merge says its result`);
+		}
+		if (new Set((doc.cases ?? []).map((c) => c.name)).size !== (doc.cases ?? []).length) errors.push("case names are unique");
+	} else if (name === "conflict-names.json") {
+		for (const [i, c] of (doc.cases ?? []).entries()) {
+			if (typeof c.path !== "string" || typeof c.device !== "string" || !Array.isArray(c.taken) || typeof c.expect !== "string") errors.push(`cases[${i}]: path, device, taken and expect`);
+			if (/[<>:"|?*\\\u0000-\u001f]/.test(c.expect?.slice(c.expect.lastIndexOf("/") + 1) ?? "")) errors.push(`cases[${i}]: the expected name is not valid on Windows`);
+			if (c.at_local && !c.now && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(c.at_local)) errors.push(`cases[${i}]: at_local`);
+		}
+	} else errors.push(`no rule for testdata/shared/${name}`);
+	return errors;
+}
+
 // Which schema each fixture file answers to. A file under testdata/ that no rule claims fails the test.
 const rules = [
 	{ dir: "events", ext: ".jsonl", run: (path) => lines(path).flatMap((ev, i) => [...valid(ev, "event.schema.json"), ...keptNames(ev, `line ${i + 1}`), ...downTime(ev)].map((e) => `line ${i + 1}: ${e}`)) },
@@ -272,6 +316,7 @@ const rules = [
 		},
 	},
 	{ dir: "serve", ext: ".json", run: (path) => valid(json(path), "view-api.schema.json#/$defs/serve_json") },
+	{ dir: "shared", ext: ".json", run: sharedFixture },
 ];
 
 const all = files(testdata).map((path) => relative(testdata, path));

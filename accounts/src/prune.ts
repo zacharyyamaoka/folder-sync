@@ -123,6 +123,11 @@ export async function pruneFolder(bucket: PruneBucket, root: string, project: st
 		for await (const object of listed(bucket, requestsPrefix(root, project), budget)) {
 			if (object.lastModified < cutoff) await doom(object.key, object.size);
 		}
+		// _incoming/<project>/<host>/<id>: a machine's staged upload for a shared-tree commit (PEP 0010 §5), deleted by the
+		// commit that took it; one a crash left (the commit never came) goes after a day
+		for await (const object of listed(bucket, `${root}_incoming/${project}/`, budget)) {
+			if (object.lastModified < now - DAY_MS) await doom(object.key, object.size);
+		}
 		// legacy _trash/<project>/<host>/<UTC-stamp>/<path>: 30 days after its stamp
 		for await (const object of listed(bucket, `${root}_trash/${project}/`, budget)) {
 			const stamp = object.key.slice(`${root}_trash/${project}/`.length).split("/")[1] ?? "";

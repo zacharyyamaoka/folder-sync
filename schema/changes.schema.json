@@ -22,22 +22,22 @@
       "format": "date-time"
     },
     "by": {
-      "description": "machine: a round on that machine; web: the folder's web host (a browser write, delete or restore); server: the accounts Worker's over-quota delete job (PEP 0003 §3.7), which builds that manifest itself.",
-      "enum": ["machine", "web", "server"]
+      "description": "machine: a round on that machine; web: the folder's web host (a browser write, delete or restore); server: the accounts Worker's over-quota delete job (PEP 0003 §3.7), which builds that manifest itself; shared: the folder's shared tree (PEP 0010), where the folder's object writes a device's or a page's commit, naming the committer in each event's by_host and by_name.",
+      "enum": ["machine", "web", "server", "shared"]
     },
     "via": {
-      "description": "For by=web: the browser, as /fs/v1/devices names it (\"Chrome on Linux\").",
+      "description": "For by=web and by=shared: the browser, as /fs/v1/devices names it (\"Chrome on Linux\"), when a page committed.",
       "type": "string"
     },
     "events": {
-      "description": "In path order. Only upload, delete and restore events, each a full folder-sync-event/1 line with project, host and host_name equal to this record's.",
+      "description": "In path order. Only upload, delete, restore and (for the shared tree) conflict events, each a full folder-sync-event/1 line with project, host and host_name equal to this record's.",
       "type": "array",
       "items": {
         "allOf": [
           { "$ref": "event.schema.json" },
           {
             "required": ["project", "host", "host_name"],
-            "properties": { "event": { "enum": ["upload", "delete", "restore"] } }
+            "properties": { "event": { "enum": ["upload", "delete", "restore", "conflict"] } }
           }
         ]
       }

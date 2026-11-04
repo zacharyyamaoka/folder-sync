@@ -109,6 +109,8 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 	last.RoundStarted = started.UTC().Format(time.RFC3339Nano)
 	p.reportedSkips = map[string]bool{}
 	p.behind = false
+	// WHY read again each round: `folder-sync share` (another process) may have shared the folder since the last one
+	p.shared, p.sharedDirty = nil, false
 	for _, s := range last.Skipped {
 		p.reportedSkips[s.Path] = true
 	}
@@ -166,11 +168,19 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 		var readOnly *ReadOnlyError
 		var copyFailed *CopyError // a history copy that failed held its path: the others went, and the round pulls
 		step = time.Now()
-		if err := p.Push(ctx, stamp, &result); errors.As(err, &empty) || errors.As(err, &readOnly) || errors.As(err, &copyFailed) {
+		// a shared folder commits to the shared tree first (PEP 0010): the files that leave this machine's own host leave
+		// only once the tree holds them
+		var sharedDown *SharedUnavailableError
+		if err := p.pushShared(ctx, &result); errors.As(err, &empty) || errors.As(err, &sharedDown) {
 			refused = fmt.Errorf("push: %w", err)
 		} else if err != nil {
 			return fmt.Errorf("push: %w", err)
-		} else {
+		}
+		if err := p.Push(ctx, stamp, &result); errors.As(err, &empty) || errors.As(err, &readOnly) || errors.As(err, &copyFailed) {
+			refused = errors.Join(refused, fmt.Errorf("push: %w", err))
+		} else if err != nil {
+			return fmt.Errorf("push: %w", err)
+		} else if refused == nil {
 			last.LastPush = p.Now().UTC().Format(time.RFC3339Nano)
 		}
 		p.Trace.Since("step", step, map[string]any{"name": "push", "uploaded": len(result.Uploaded), "deleted": len(result.Deleted), "manifest": result.ManifestWritten})
@@ -224,6 +234,9 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
+	if err := p.saveShared(); err != nil && runErr == nil {
+		runErr = err
+	}
 	finished := p.Now()
 	p.Trace.Event("round", map[string]any{"start": started.UnixMilli(), "ms": finished.Sub(started).Milliseconds(), "ok": runErr == nil})
 	last.RoundFinished = finished.UTC().Format(time.RFC3339Nano)

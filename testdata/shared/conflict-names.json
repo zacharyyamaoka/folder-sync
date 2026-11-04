@@ -1,0 +1,140 @@
+{
+ "_why": "PEP 0010 §6.3: the conflict copy's name, Obsidian's own form. now is the server's clock, used only when at_local is missing.",
+ "cases": [
+  {
+   "name": "the exact form, before the extension",
+   "path": "notes/plan.md",
+   "device": "bam-GPU",
+   "at_local": "2026-11-04T12:30:15-08:00",
+   "taken": [],
+   "expect": "notes/plan (Conflicted copy bam-GPU 202611041230).md"
+  },
+  {
+   "name": "the committer's local time, not UTC",
+   "path": "a.md",
+   "device": "d",
+   "at_local": "2026-11-04T23:59:59+09:00",
+   "taken": [],
+   "expect": "a (Conflicted copy d 202611042359).md"
+  },
+  {
+   "name": "a device name Windows could not hold is made valid",
+   "path": "plan.md",
+   "device": "bam:laptop/2",
+   "at_local": "2026-11-04T12:30:00Z",
+   "taken": [],
+   "expect": "plan (Conflicted copy bam-laptop-2 202611041230).md"
+  },
+  {
+   "name": "every character Windows reserves becomes a dash",
+   "path": "plan.md",
+   "device": "a<b>c:d\"e/f\\g|h?i*j",
+   "at_local": "2026-11-04T12:30:00Z",
+   "taken": [],
+   "expect": "plan (Conflicted copy a-b-c-d-e-f-g-h-i-j 202611041230).md"
+  },
+  {
+   "name": "letters of any script, digits, spaces, dots, underscores and dashes stay",
+   "path": "plan.md",
+   "device": "Zoë's Mac_mini 2.local",
+   "at_local": "2026-11-04T12:30:00Z",
+   "taken": [],
+   "expect": "plan (Conflicted copy Zoë-s Mac_mini 2.local 202611041230).md"
+  },
+  {
+   "name": "a name that is taken gets 2, then 3",
+   "path": "plan.md",
+   "device": "d",
+   "at_local": "2026-11-04T12:30:00Z",
+   "taken": [
+    "plan (Conflicted copy d 202611041230).md"
+   ],
+   "expect": "plan (Conflicted copy d 202611041230) 2.md"
+  },
+  {
+   "name": "and 3",
+   "path": "plan.md",
+   "device": "d",
+   "at_local": "2026-11-04T12:30:00Z",
+   "taken": [
+    "plan (Conflicted copy d 202611041230).md",
+    "plan (Conflicted copy d 202611041230) 2.md"
+   ],
+   "expect": "plan (Conflicted copy d 202611041230) 3.md"
+  },
+  {
+   "name": "no extension",
+   "path": "docs/README",
+   "device": "d",
+   "at_local": "2026-11-04T12:30:00Z",
+   "taken": [],
+   "expect": "docs/README (Conflicted copy d 202611041230)"
+  },
+  {
+   "name": "a dotfile has no extension",
+   "path": ".env.example",
+   "device": "d",
+   "at_local": "2026-11-04T12:30:00Z",
+   "taken": [],
+   "expect": ".env (Conflicted copy d 202611041230).example"
+  },
+  {
+   "name": "the last dot starts the extension",
+   "path": "backup/site.tar.gz",
+   "device": "d",
+   "at_local": "2026-11-04T12:30:00Z",
+   "taken": [],
+   "expect": "backup/site.tar (Conflicted copy d 202611041230).gz"
+  },
+  {
+   "name": "a leading-dot name with no other dot",
+   "path": ".gitignore",
+   "device": "d",
+   "at_local": "2026-11-04T12:30:00Z",
+   "taken": [],
+   "expect": ".gitignore (Conflicted copy d 202611041230)"
+  },
+  {
+   "name": "no device name",
+   "path": "plan.md",
+   "device": "",
+   "at_local": "2026-11-04T12:30:00Z",
+   "taken": [],
+   "expect": "plan (Conflicted copy device 202611041230).md"
+  },
+  {
+   "name": "a device name of only reserved characters",
+   "path": "plan.md",
+   "device": "///",
+   "at_local": "2026-11-04T12:30:00Z",
+   "taken": [],
+   "expect": "plan (Conflicted copy --- 202611041230).md"
+  },
+  {
+   "name": "a long device name is cut at 40 characters",
+   "path": "plan.md",
+   "device": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "at_local": "2026-11-04T12:30:00Z",
+   "taken": [],
+   "expect": "plan (Conflicted copy xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx 202611041230).md"
+  },
+  {
+   "name": "no usable local time falls back to the server's UTC time",
+   "path": "plan.md",
+   "device": "d",
+   "at_local": null,
+   "taken": [],
+   "expect": "plan (Conflicted copy d 202611041200).md",
+   "now": "2026-11-04T12:00:00.000Z"
+  },
+  {
+   "name": "a local time that is not a time falls back too",
+   "path": "plan.md",
+   "device": "d",
+   "at_local": "yesterday",
+   "taken": [],
+   "expect": "plan (Conflicted copy d 202611041200).md",
+   "now": "2026-11-04T12:00:00.000Z"
+  }
+ ]
+}

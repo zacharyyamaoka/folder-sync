@@ -1,10 +1,11 @@
 # 0010 · A shared tree: every device edits every file; the folder's object orders changes and merges the rare collision
 
 - **Date:** 2026-11-04
-- **Status:** Accepted, 2026-11-04 (Zach, relayed: "go with the recommendations"), with every §13 default: the tree
-  lives at `<project>/hosts/<shared-id>/` (L2); shared folders need the accounts server in v1; conflict copies are
-  named `(Conflicted copy <device> <YYYYMMDDHHMM>)`; nothing is private unless named at `share` time. Not built yet;
-  the build is Wave 2. Until it lands, the contract's "two-way folders are v1" stands.
+- **Status:** Accepted-Implemented, 2026-11-04. Accepted that day (Zach, relayed: "go with the recommendations"), with every §13
+  default: the tree lives at `<project>/hosts/<shared-id>/` (L2); shared folders need the accounts server in v1; conflict copies
+  are named `(Conflicted copy <device> <YYYYMMDDHHMM>)`; nothing is private unless named at `share` time. Built the same day on
+  `lane/shared-tree-0010`; "As built" (§16) says what the build did and did not do. The contract's "two-way folders are v1" is
+  gone: `docs/CONTRACT.md` "The shared tree" is the rule now.
 - **Source:** Zach, 2026-11-04, in `PROJECT - Folder Sync`, on the `C - Single Writer Principle` bullet:
   1. "I am not sure if this is the design we want to take here though? Are there other options? I think the goal is
      to have something more like obsidian sync, github..."
@@ -447,6 +448,50 @@ copies.
 - **Workers get a stock zstd encoder:** compressed keyframes in the shared tree.
 - **Two people want to type into one document at once:** that is a CRDT inside that app's editor, saved as a plain
   file, not in folder-sync.
+
+## 16. As built
+
+Built on `lane/shared-tree-0010` by one lane, which took the Worker lane's and the engine lane's write sets and the §11 tests
+(§10 had split them). Not built here: `lane/shared-view` (the element still shows the shared host as a device named "shared")
+and `lane/shared-bench` (the bench's `shared` direction and the hour-long H run). The barriers §10 lists were already met on
+the base: PEP 0009 is built, and `pullPeer`'s save-storm race is not reachable from the shared tree (§9: a base is a hash of
+bytes this machine wrote or sent). §10 had the contract (B0) land alone before any lane; this one did it in the same branch as
+the build (the schemas and fixtures with the Worker, `CONTRACT.md` and `API.md` last). Deploys and the D1 migration stay Zach's: `0013_shared_tree.sql` only adds a table.
+
+**Where it is.**
+
+| Part | What | Where |
+|---|---|---|
+| Worker | `share`, the commit, a page's `PUT`/`DELETE`, restore of a shared file; the merge; the journal for a batch | `accounts/src/shared.ts`, `shared-merge.ts`, `webhost.ts` (`Pending.more`, `Refusal`, `SHARE`/`SHARED_COMMIT`/`SHARED_RESTORE`), `app.ts`, `view.ts`, `store.ts`, `migrations/0013_shared_tree.sql` |
+| Vendored | node-diff3 3.2.1 (MIT), smol-toml 1.4.2 (BSD-3), yaml 2.8.1 (ISC): `parse` only, for the parse check | `accounts/src/vendor/` |
+| Engine | the shared push and pull, the state, the migration, `share` | `internal/syncer/shared.go`, `round.go` (`Push` splits the host, `pullPeer` hands the shared host on), `run.go`, `cmd/folder-sync/share.go`, `internal/account` (`Share`, `SharedCommit`), `internal/ignore` (`CompileOnly`) |
+| Contract | the manifest's `shared`, `by: shared`, the `conflict` event in a record, `by_host`/`by_name`/`merge` | `schema/`, `testdata/shared/`, `docs/CONTRACT.md`, `docs/API.md` |
+| Proofs | the merge and the Worker; the engine's bookkeeping; the real Worker with the real binary; the soak | `accounts/test/shared*.test.ts`, `internal/syncer/shared_test.go`, `e2e/shared_test.go`, `e2e/shared_soak_test.go` |
+
+**How the choices above came out.**
+
+- **§13.** Every default as accepted. Conflict copies: ` 2`, ` 3` go after the closing parenthesis, before the extension.
+- **A commit is one manifest version** for however many paths it holds (up to 100 a request, 1 MiB a file inline, 8 MiB a request),
+  where §5 wrote "exactly a web-host write" per path: a first sharing of a thousand notes would otherwise rewrite the manifest a
+  thousand times. The web host's journal grew a batch (`Pending.more`): each path is settled on its own, and the manifest takes all
+  of them or none.
+- **`[modes]` still refuses `shared`** (§7), with a message that points at `folder-sync share`; the type is `config.ErrUseShare`.
+  Whether a folder is shared is read from the shared host's manifest, which a machine meets at its first discover.
+- **Files over 64 MiB stay on the machine's own host** in v1: the object holds a file in memory to hash and merge it (128 MB per isolate).
+- **The pointer** is written after the manifest, from the whole copy that is the commit's undo (so a cut-off commit never has a
+  pointer to undo); the pin (PEP 0009 §4.3) is remembered per path in the object's storage.
+- **Two fixes the real stack found.** The Worker signed `plan (Conflicted copy …).md` escaped and sent it with literal parentheses,
+  and a prefix with `+` for a space; a store that checks the path and query as sent refused both (`s3-bucket.ts`
+  `encodeKey`, `wire`). R2 itself may have accepted them; the conflict copy's name always has both, so the Worker now sends what it signs.
+- **`_incoming/`** objects are deleted by the commit that took them, and by the folder's prune after a day if no commit came.
+
+**What stays open.**
+
+- *Unverified:* node-diff3 on a 4 MiB input inside a Durable Object (a merge is refused as `too_big` above 200,000 lines); R2's own
+  answer to the conditional GET and PUT the shared tree uses (the dev stack's stand-in ignores conditionals, §14).
+- *Not in v1:* changing `private` after the share; turning sharing off; `folder-sync history`, `restore` and `deleted` for a
+  shared path from the command line (the Files page's Restore does it, by the object); keyframes in the shared tree; a bucket-key
+  folder (§15 names the way in).
 
 ## Sources
 

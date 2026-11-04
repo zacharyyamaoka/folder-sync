@@ -155,6 +155,49 @@
       "description": "download / remove_copy: the peer manifest version this applied.",
       "type": "integer",
       "minimum": 1
+    },
+    "by_host": {
+      "description": "upload / delete / restore / conflict in a shared-tree change record (PEP 0010): the committing machine's host id. Absent when a page committed.",
+      "$ref": "#/$defs/host_id"
+    },
+    "by_name": {
+      "description": "The same event: who committed, a machine's host_name or a page's browser (\"Chrome on Linux\").",
+      "type": "string"
+    },
+    "merge": {
+      "description": "upload in a shared-tree change record when the commit was merged (PEP 0010 §6): the version the device made its change from (null when both sides added the path), the version id under which the device's own bytes are kept in history (null for a merge that appended whole lines), and the merged result's version id.",
+      "type": "object",
+      "required": [
+        "base",
+        "yours",
+        "result"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "base": {
+          "anyOf": [
+            {
+              "$ref": "history.schema.json#/$defs/version_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "yours": {
+          "anyOf": [
+            {
+              "$ref": "history.schema.json#/$defs/version_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result": {
+          "$ref": "history.schema.json#/$defs/version_id"
+        }
+      }
     }
   },
   "allOf": [
