@@ -31,7 +31,7 @@ const address = (name) => `${name}-${RUN}@example.com`;
 const sha = (data) => createHash("sha256").update(data).digest("hex");
 const el = (page, css) => page.locator(`folder-sync-status ${css}`);
 const row = (page, path) => el(page, `.frow[title="${path}"]`);
-const box = (locator) => locator.evaluate((e) => { const r = e.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, width: r.width }; });
+const box = (locator) => locator.evaluate((e) => { const r = e.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, width: r.width, height: r.height }; });
 const shot = async (page, name) => {
 	if (!SHOTS) return;
 	mkdirSync(SHOTS, { recursive: true });
@@ -116,6 +116,9 @@ test("the whole journey on the real Worker: sign in, browse, preview every kind,
 	await expect(row(page, "notes/plan.md").locator(".fmeta")).toContainText(`${PLAN.length} B`);
 	await expect(row(page, "notes/plan.md").locator(".fmeta")).toContainText("bam-GPU");
 	await expect(page).toHaveTitle("Files · folder-sync");
+	// the panel fills the window under the header (a regression: it once stopped at its 360px minimum)
+	const panel = await box(el(page, ".panel"));
+	expect(Math.abs(panel.height - (await page.evaluate(() => innerHeight - 72)))).toBeLessThanOrEqual(1);
 	await shot(page, "1-browse");
 
 	// open each kind with the browser's own preview, through the real file route and the page's real policy
@@ -219,6 +222,9 @@ test("the whole journey on the real Worker: sign in, browse, preview every kind,
 	await open(page, "notes/plan.md");
 	await expect(el(page, "#side")).toBeHidden();
 	expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0);
+	expect((await box(el(page, ".panel"))).height).toBeGreaterThan(600);
+	await expect(el(page, "pre[data-preview=text]")).toHaveText(PLAN.trimEnd());
+	expect((await box(el(page, "pre[data-preview=text]"))).right).toBeLessThanOrEqual(375);
 	await shot(page, "9-phone");
 	await page.setViewportSize({ width: 1280, height: 800 });
 	await page.emulateMedia({ colorScheme: "dark" });
