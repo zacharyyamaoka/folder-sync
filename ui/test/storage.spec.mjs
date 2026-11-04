@@ -159,6 +159,8 @@ test("Refresh asks again", async ({ page }) => {
 
 test("the tab is reachable by keyboard like the others", async ({ page }) => {
 	await load(page);
+	// WHY wait: opening Storage from the menu focuses its tab once the view has rendered, which can land after load() returns
+	await expect(el(page, "#tab-storage")).toBeFocused();
 	await el(page, "#tab-deleted").focus();
 	await page.keyboard.press("ArrowRight");
 	await expect(el(page, ".body")).toHaveAttribute("data-view", "storage");

@@ -13,9 +13,12 @@ const repo = path.resolve(import.meta.dirname, "..");
 
 test("the install step is the README's install command, for this checkout", () => {
 	const readme = fs.readFileSync(path.join(repo, "README.md"), "utf8");
-	const section = readme.slice(readme.indexOf("## Install (v0: from source)"));
-	const fence = /```bash\n([^\n]+)\n```/.exec(section)[1];
-	assert.match(fence, /go build -o ~\/\.folder-sync\/bin\/folder-sync \.\/cmd\/folder-sync$/);
+	// WHY the Quick start's step 1: the Nov 4 README rewrite moved the install command there, in an indented fence.
+	const start = readme.indexOf("## Quick start");
+	assert.ok(start >= 0, "README has a Quick start");
+	const step1 = readme.slice(start, readme.indexOf("2. **", start));
+	const fence = /```bash\n\s*([^\n]+)\n\s*```/.exec(step1)?.[1];
+	assert.match(fence ?? "", /^go build -o ~\/\.folder-sync\/bin\/folder-sync \.\/cmd\/folder-sync$/);
 	const [go, build, flag, out, pkg] = timer.installArgv("/h", "go", "linux");
 	assert.deepEqual([go, build, flag, pkg], ["go", "build", "-o", "./cmd/folder-sync"]);
 	assert.equal(out, path.join("/h", ".folder-sync", "bin", "folder-sync"), "~ is the clean HOME, nowhere else");

@@ -41,7 +41,7 @@ function osName(platform = process.platform) {
   return platform === 'win32' ? 'windows' : platform;
 }
 
-// installArgv: README.md "Install (v0: from source)", with `~` and the go binary resolved for this machine.
+// installArgv: README.md Quick start step 1, with `~` and the go binary resolved for this machine.
 function installArgv(home, go = 'go', platform = process.platform) {
   const exe = platform === 'win32' ? 'folder-sync.exe' : 'folder-sync';
   return [go, 'build', '-o', path.join(home, '.folder-sync', 'bin', exe), './cmd/folder-sync'];

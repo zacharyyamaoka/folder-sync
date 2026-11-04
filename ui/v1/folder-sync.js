@@ -1338,6 +1338,8 @@ ${b.partial ? `<p class="note info" data-partial>This account holds more than on
 		if (t.getAttribute && t.getAttribute("role") === "tab" && (e.key === "ArrowRight" || e.key === "ArrowLeft")) {
 			const views = Object.keys(VIEWS).filter((v) => { const tab = this.root.getElementById(`tab-${v}`); return tab && !tab.hidden; }), i = views.indexOf(t.dataset.open);
 			const v = views[(i + (e.key === "ArrowRight" ? 1 : -1) + views.length) % views.length];
+			// WHY focus first: open() awaits the view's fetch, and a second arrow pressed meanwhile must start from the new tab
+			this.root.getElementById(`tab-${v}`).focus();
 			this.open(v).then(() => this.root.getElementById(`tab-${v}`).focus());
 			return e.preventDefault();
 		}
