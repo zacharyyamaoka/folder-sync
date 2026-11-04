@@ -98,13 +98,21 @@ function chart(group, metric, nowMs) {
 
 // --- at a glance ------------------------------------------------------------------------------------------------------
 
+// The cost cells' second line: the cheapest provider's price, whichever provider the folder is on (cost points only).
+function cheapestHtml(metric, c) {
+	return c.cheapest ? `<span class="cap" data-cheapest>cheapest provider: ${esc(c.cheapest.provider)} ${esc(fmt(metric.unit, c.cheapest.value))}</span>` : "";
+}
+
 function cellHtml(metric, env, nowMs) {
 	const c = metric.env[env];
 	const attrs = `class="cell env-${env}" data-cell="${esc(metric.kpi)}:${env}" data-status="${c.status}"`;
 	if (c.value === null) {
+		// WHY not the cheapest as the headline: a folder on a MinIO, a NAS or a directory has no price, and a price for a store it is not on would be wrong
+		if (c.unpriced) return `<div ${attrs}><span class="val none">no price for this store</span>${cheapestHtml(metric, c)}</div>`;
 		return `<div ${attrs}><span class="val none">${c.lastRunFailed ? `<span class="dot" data-status="red"></span>last run failed` : "not measured yet"}</span></div>`;
 	}
 	const bits = [];
+	if (c.provider) bits.push(`on ${esc(c.provider)}`);
 	if (metric.target !== undefined) bits.push(`${STATUS_WORD[c.status]} ${esc(targetText(metric))}`);
 	else if (metric.note) bits.push(esc(metric.note));
 	bits.push(c.stale ? `last measured ${esc(ago(c.t, nowMs))}` : esc(ago(c.t, nowMs)));
@@ -112,6 +120,7 @@ function cellHtml(metric, env, nowMs) {
 		<span class="val"><span class="dot" data-status="${c.status}"></span>${esc(fmt(metric.unit, c.value))}</span>
 		${spark(c, nowMs)}
 		<span class="cap">${bits.join(" · ")}</span>
+		${cheapestHtml(metric, c)}
 		${c.lastRunFailed ? `<span class="cap bad">✗ last run failed</span>` : ""}
 	</div>`;
 }
@@ -149,7 +158,7 @@ function metricDetail(m, nowMs) {
 	}
 	const charts = [...groups.values()].map((g) => `<figure class="chart"><figcaption>${esc(g[0].label)}</figcaption>${chart(g, m, nowMs)}</figure>`).join("");
 	const rows = m.series.map((s) => `<tr>
-		<td data-label="Slice">${esc(s.label)}</td>
+		<td data-label="Slice">${esc(s.label)}${s.onStore ? ` <small>${esc(s.folders.length ? `holds ${s.folders.join(", ")}` : "holds a folder")}</small>` : ""}</td>
 		<td data-label="Env"><span class="envtag env-${esc(s.env)}">${esc(s.env)}</span></td>
 		<td data-label="Latest"><span class="dot" data-status="${s.status}"></span>${esc(fmt(m.unit, s.latest))}${s.lastRunFailed ? ` <span class="bad">✗ last run failed</span>` : ""}</td>
 		<td data-label="Status">${esc(STATUS_WORD[s.status] || "–")}</td>
@@ -358,7 +367,7 @@ export function renderPage(model) {
 	<details class="notes"><summary>Sources and data notes${model.warnings.length ? ` (${model.warnings.length})` : ""}</summary><ul>
 		<li>KPI series: <code>${esc(model.inputs.kpi.path ?? "none")}</code> (${model.inputs.kpi.found ? `${model.inputs.kpi.lines} lines, ${model.inputs.kpi.points} points used` : "not found"})</li>
 		<li>Gate results: <code>${esc(model.inputs.gates.path ?? "none")}</code> (${model.inputs.gates.found ? "read" : "not found"})</li>
-		<li>Headline of an env = the worst latest value over its slices (cheapest for cost); sparklines cover the last ${model.window_days} days. A value that meets its target has a green dot; within 2× the target is amber; beyond that red.</li>
+		<li>Headline of an env = the worst latest value over its slices (for cost: the provider each folder is on, the dearer one when folders are on two, with the cheapest provider beside it); sparklines cover the last ${model.window_days} days. A value that meets its target has a green dot; within 2× the target is amber; beyond that red.</li>
 		${model.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}
 	</ul></details>
 </main>

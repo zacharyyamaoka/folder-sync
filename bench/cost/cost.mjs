@@ -8,8 +8,10 @@
 //   node bench/cost/cost.mjs table      the markdown table docs/PRICES.md quotes
 //   node bench/cost/cost.mjs points     the points (not written)
 //   node bench/cost/cost.mjs store URL  what a folder on that store URL costs (r2://, s3://, gs://, file://): the provider is read from the URL
-// The store a folder is on is FOLDER_SYNC_STORE (its .folder-sync.toml's store URL; absent = r2://). Every provider still
-// gets its point, so the dev view can compare; the point of the folder's own provider carries labels.is_store_provider.
+// The stores the points are for are the folders' own: every folder registered on this machine names its store in its
+// .folder-sync.toml (bench/cost/store.mjs registeredStores); FOLDER_SYNC_STORE overrides them with one URL; none = r2://.
+// Every provider still gets its point, so the dev view can compare; the point of each provider that holds a folder carries
+// labels.is_store_provider and labels.folders.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -17,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { makePoint, sourceOf, stampOf, readSeries, DEFAULT_OUT, codeSha } from "../kpi/lib.mjs";
 import { loadCounters } from "../kpi/ops.mjs";
 import { costSummary, PROFILES } from "./model.mjs";
-import { providerOfStore, storeCostLine, storeLabel } from "./store.mjs";
+import { providerOfStore, storeCostLine, storeLabel, storesToCost } from "./store.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const PROVIDERS = ["r2", "s3", "gcs", "b2", "wasabi"];
@@ -63,10 +65,26 @@ export function latestH(series, slice) {
 	return mine[0] ? { h: mine[0].value, t: mine[0].t } : null;
 }
 
-export function costPoints({ prices = loadPrices(), counters, series, usage = null, folders = null, logs = null, at = new Date(), code = codeSha(), store = process.env.FOLDER_SYNC_STORE ?? "" }) {
+/** The provider a store URL is priced at; null for one nobody prices, or one the parser refuses (a broken config must not stop the KPI run). */
+function providerOrNull(url) {
+	try {
+		return providerOfStore(url);
+	} catch {
+		return null;
+	}
+}
+
+export function costPoints({ prices = loadPrices(), counters, series, usage = null, folders = null, logs = null, at = new Date(), code = codeSha(), store, stores }) {
 	const t = stampOf(at);
-	const storeProvider = providerOfStore(store);
-	const ofStore = (provider) => ({ store: storeLabel(store), is_store_provider: provider === storeProvider, ...(storeProvider ? {} : { store_unpriced: true }) });
+	// `store` (one URL) is the older argument; `stores` is [{folder, store}], one per folder
+	const targets = (stores ?? (store !== undefined ? [{ folder: null, store }] : storesToCost())).map((s) => ({ ...s, provider: providerOrNull(s.store) }));
+	const storeLabels = [...new Set(targets.map((s) => storeLabel(s.store)))].join(", ");
+	const unpriced = targets.some((s) => !s.provider);
+	const ofStore = (provider) => {
+		const here = targets.filter((s) => s.provider === provider);
+		const names = here.map((s) => s.folder).filter(Boolean).sort();
+		return { store: storeLabels, is_store_provider: here.length > 0, ...(names.length ? { folders: names } : {}), ...(unpriced ? { store_unpriced: true } : {}) };
+	};
 	const hour = at.toISOString().slice(0, 13).replace(/[-:]/g, "");
 	const out = [];
 	if (!counters) {
