@@ -52,7 +52,7 @@ func (s *Server) file(w http.ResponseWriter, r *http.Request, f folder, rest []s
 	}
 	tmp.Close()
 	defer os.Remove(tmp.Name())
-	if err := p.S3.GetToFile(p.Config.Bucket, p.HostPrefix(host)+"/"+filePath, tmp.Name()); errors.Is(err, s3.ErrNotFound) {
+	if err := p.Objects().GetToFile(p.Config.Bucket, p.HostPrefix(host)+"/"+filePath, tmp.Name()); errors.Is(err, s3.ErrNotFound) {
 		writeError(w, errChanged)
 		return
 	} else if err != nil {

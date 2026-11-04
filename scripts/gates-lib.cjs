@@ -84,10 +84,12 @@ function definitions(ctx) {
     },
     {
       id: 'G7', name: 'Storage provider swappable',
-      target: 'The core e2e passes against R2, another S3 store and a file:// folder.',
+      target: 'The same sync journey (add, edit, rename, delete, history restore) passes against R2, another S3 store (MinIO) and a file:// folder.',
       proofs: [
-        { kind: 'missing', name: 'the core e2e against a second S3 store (MinIO or Backblaze B2)', reason: 'the e2e runs only on rclone serve s3 and the R2 stand-in; no second store is wired (wave 2, the storage-agnostic lane)' },
-        { kind: 'missing', name: 'the core e2e on a file:// folder', reason: 'storage is S3-only today (internal/creds, internal/rclone build an s3 remote); a file:// hub is the storage-agnostic lane' },
+        // MinIO is built from a pinned, hash-checked source tree (scripts/fetch-minio; dl.min.io no longer serves binaries). REQUIRE=1 and E2E_MINIO=1: a missing tool is a failure here, never a skipped journey that still reads as a pass.
+        { kind: 'cmd', name: 'scripts/fetch-minio: the pinned MinIO is in .tools/', argv: ['bash', 'scripts/fetch-minio'] },
+        { kind: 'go', pkg: './e2e', tests: ['TestStorageJourneyR2StandIn', 'TestStorageJourneyMinIO', 'TestStorageJourneyMinIOWithTheFallbacks', 'TestStorageJourneyFileDirectory'], env: { FOLDER_SYNC_E2E_REQUIRE: '1', FOLDER_SYNC_E2E_MINIO: '1' } },
+        { kind: 'go', pkg: './internal/store', all: true },
       ],
     },
     {

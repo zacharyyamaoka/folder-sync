@@ -26,7 +26,7 @@ var ErrPreconditionFailed = errors.New("precondition failed (412)")
 // ErrNotFound matches (errors.Is) a 404 from a call that needs the object (a copy's source, a GET into a file).
 var ErrNotFound = errors.New("no such object (404)")
 
-// retryWaits are the pauses before a call answered 5xx or 429 is sent again. WHY retry these calls and not the
+// retryWaits are the pauses before a call answered 5xx (501 Not Implemented is no busy moment: it is not retried) or 429 is sent again. WHY retry these calls and not the
 // manifest GET: a history copy that fails holds its path's upload for a round, and stores answer a busy moment with a
 // 500 or 503 that the next try gets through (the stand-in does, now and then, under eight copies at once).
 var retryWaits = []time.Duration{100 * time.Millisecond, 400 * time.Millisecond}
@@ -43,7 +43,7 @@ func (c *Client) do(req *http.Request, payloadHash string) (*http.Response, erro
 		}
 		SignWithToken(try, c.AccessKeyID, c.SecretAccessKey, c.SessionToken, c.Region, c.now(), payloadHash)
 		resp, err := c.httpClient().Do(try)
-		if attempt == len(retryWaits) || (err == nil && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests) {
+		if attempt == len(retryWaits) || (err == nil && (resp.StatusCode < 500 || resp.StatusCode == http.StatusNotImplemented) && resp.StatusCode != http.StatusTooManyRequests) {
 			return resp, err
 		}
 		if err == nil {

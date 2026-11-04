@@ -24,6 +24,7 @@ import (
 
 	"folder-sync/internal/creds"
 	"folder-sync/internal/layout"
+	"folder-sync/internal/store"
 	"folder-sync/internal/trace"
 )
 
@@ -38,9 +39,12 @@ type Runner struct {
 	Bin    string
 	Layout layout.Layout
 	Creds  creds.Creds
-	Log    io.Writer     // rclone's stderr, scrubbed of the key
-	Debug  bool          // -vv instead of NOTICE-level logging
-	Trace  *trace.Writer // per-process timing (FOLDER_SYNC_TRACE); nil = off
+	// Store is the folder's store; the zero value is an s3 remote built from Creds (R2 and every S3-compatible endpoint).
+	// A file:// store is rclone's local backend.
+	Store store.Spec
+	Log   io.Writer     // rclone's stderr, scrubbed of the key
+	Debug bool          // -vv instead of NOTICE-level logging
+	Trace *trace.Writer // per-process timing (FOLDER_SYNC_TRACE); nil = off
 	// FailFast trims rclone's own retries (`sync --watch`): a call against a storage server that is down then fails
 	// in seconds instead of minutes. WHY only for --watch: its loop runs the next round anyway, and a person (the
 	// desktop app's tray) must see "offline" while it is true, not "syncing" for minutes; a one-off `sync --once`
@@ -82,6 +86,10 @@ func (r Runner) Env(base []string) []string {
 		}
 	}
 	prefix := "RCLONE_CONFIG_" + strings.ToUpper(Remote) + "_"
+	if r.Store.Kind == store.File {
+		// WHY nothing else: the local backend takes no key, endpoint or bucket flags, and Path puts the directory where the bucket goes
+		return append(env, prefix+"TYPE=local")
+	}
 	if r.Creds.SessionToken != "" {
 		env = append(env, prefix+"SESSION_TOKEN="+r.Creds.SessionToken)
 	}
@@ -94,8 +102,12 @@ func (r Runner) Env(base []string) []string {
 		prefix+"REGION="+r.Creds.Region,
 		// A bucket-scoped R2 token cannot create buckets; never try.
 		prefix+"NO_CHECK_BUCKET=true",
-		prefix+"ACL=private",
 	)
+	// WHY only R2: x-amz-acl: private is R2's habit; a bucket with ACLs disabled (AWS's default for new buckets) refuses a
+	// request that carries one, and every store is private unless its owner made it public
+	if r.Creds.Provider == "Cloudflare" {
+		env = append(env, prefix+"ACL=private")
+	}
 	return env
 }
 
@@ -134,6 +146,16 @@ func (r Runner) Run(ctx context.Context, args ...string) ([]byte, error) {
 		return stdout.Bytes(), fmt.Errorf("rclone %s failed: %v: %s", args[0], err, tail)
 	}
 	return stdout.Bytes(), nil
+}
+
+// Listing turns the answer of a `lsjson` call into the listing: a directory that is not there is an empty listing, not
+// an error. WHY it drops the output too: the local backend prints the opening "[" before it finds the directory missing
+// (an S3 remote prints nothing), and half a JSON array is not an empty one.
+func Listing(out []byte, err error) ([]byte, error) {
+	if err != nil && strings.Contains(err.Error(), "directory not found") {
+		return nil, nil
+	}
+	return out, err
 }
 
 // Version returns the first line of `rclone version`, or an error that says

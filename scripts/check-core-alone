@@ -7,6 +7,9 @@
 # FOLDER_SYNC_E2E_REQUIRE=1 (CI sets it) turns a skipped e2e into a failure; GO and NODE override the tools.
 # WHY a copy without the directories and not a grep: a grep misses a path built at run time, and a stub would still let
 # a test start the Worker. A directory that is not there cannot be imported or started.
+# It also runs with no Cloudflare credentials in the environment (the tests then hold no key that could reach R2 or the
+# Worker), and the file:// journey of e2e/storage_test.go is part of the suite it runs: a folder on a directory syncs
+# between two machines with no server, no R2 and no key (PARTS.md "Cloudflare-specific and storage-agnostic").
 # WHY ui/ stays: the core embeds ui/v1 (the one sync view, `folder-sync serve`) at build time, the one edge from core to
 # another part (PARTS.md "Which part may import which").
 set -euo pipefail
@@ -37,5 +40,7 @@ git init -q
 git add .
 "$go" build ./...
 "$go" vet ./...
-FOLDER_SYNC_QUARANTINE="${FOLDER_SYNC_QUARANTINE:-}" "$go" test -count=1 ./...
+# WHY env -u: a developer's own Cloudflare token must not let a test pass by reaching Cloudflare
+no_cloudflare=(env -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_ACCOUNT_ID -u CLOUDFLARE_API_KEY -u CLOUDFLARE_EMAIL -u CF_API_TOKEN -u CF_ACCOUNT_ID -u WRANGLER_API_TOKEN -u FOLDER_SYNC_ACCOUNT_ID -u FOLDER_SYNC_SERVER)
+FOLDER_SYNC_QUARANTINE="${FOLDER_SYNC_QUARANTINE:-}" "${no_cloudflare[@]}" "$go" test -count=1 ./...
 node --test schema/fixtures.test.mjs

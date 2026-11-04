@@ -191,7 +191,7 @@ func (p *Project) keepVersion(ctx context.Context, it *leaving) error {
 		}
 		// WHY created once: a round that kept this version and lost its answer writes it again, and the name says what
 		// the bytes are, so the object that is there is the object wanted.
-		if _, err := p.S3.Put(p.Config.Bucket, key, body, contentType, "*", ""); err != nil && !errors.Is(err, s3.ErrPreconditionFailed) {
+		if _, err := p.Objects().Put(p.Config.Bucket, key, body, contentType, "*", ""); err != nil && !errors.Is(err, s3.ErrPreconditionFailed) {
 			return err
 		}
 		it.Kept, it.Form = id, form
@@ -206,18 +206,18 @@ func (p *Project) keepVersion(ctx context.Context, it *leaving) error {
 		it.Kept, it.Form = id, history.KindFull
 		return nil
 	}
-	err = p.S3.Copy(p.Config.Bucket, src, key, it.Old.ObjectETag)
+	err = p.Objects().Copy(p.Config.Bucket, src, key, it.Old.ObjectETag)
 	switch {
 	case err == nil:
 		it.Kept, it.Form = id, history.KindFull
 		return nil
 	case errors.Is(err, s3.ErrPreconditionFailed):
-		stat, err := p.S3.HeadObject(p.Config.Bucket, src)
+		stat, err := p.Objects().HeadObject(p.Config.Bucket, src)
 		if err != nil {
 			return err
 		}
 		unlisted := history.UnlistedID(stat.LastModified)
-		if err := p.S3.Copy(p.Config.Bucket, src, history.Key(p.Root, p.Config.Project, p.Host.ID, it.Path, unlisted), ""); err != nil {
+		if err := p.Objects().Copy(p.Config.Bucket, src, history.Key(p.Root, p.Config.Project, p.Host.ID, it.Path, unlisted), ""); err != nil {
 			return err
 		}
 		p.say("history: %s in the bucket was not the version the manifest listed; kept as %s", it.Path, unlisted)
@@ -274,7 +274,7 @@ func parallel(n int, fn func(i int)) {
 // deleteObjects deletes this host's live objects for paths, eight at once.
 func (p *Project) deleteObjects(paths []string) error {
 	errs := make([]error, len(paths))
-	parallel(len(paths), func(i int) { errs[i] = p.S3.Delete(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+paths[i]) })
+	parallel(len(paths), func(i int) { errs[i] = p.Objects().Delete(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+paths[i]) })
 	return errors.Join(errs...)
 }
 
@@ -434,7 +434,7 @@ func (p *Project) FlushRecords() error {
 			os.Remove(path)
 			continue
 		}
-		if _, err := p.S3.Put(p.Config.Bucket, key, data, "application/json", "*", ""); err != nil && !errors.Is(err, s3.ErrPreconditionFailed) {
+		if _, err := p.Objects().Put(p.Config.Bucket, key, data, "application/json", "*", ""); err != nil && !errors.Is(err, s3.ErrPreconditionFailed) {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -513,7 +513,7 @@ type answeredState struct {
 // bucketRequests lists this host's requests in the bucket (one listing; it runs with peer discovery) and reads the
 // ones not yet answered.
 func (p *Project) bucketRequests() ([]pendingRequest, error) {
-	listed, err := p.S3.List(p.Config.Bucket, history.RequestsPrefix(p.Root, p.Config.Project, p.Host.ID), "")
+	listed, err := p.Objects().List(p.Config.Bucket, history.RequestsPrefix(p.Root, p.Config.Project, p.Host.ID), "")
 	if err != nil {
 		return nil, err
 	}
@@ -532,7 +532,7 @@ func (p *Project) bucketRequests() ([]pendingRequest, error) {
 			still[obj.Key] = etag
 			continue
 		}
-		got, err := p.S3.GetIfNoneMatch(p.Config.Bucket, obj.Key, "")
+		got, err := p.Objects().GetIfNoneMatch(p.Config.Bucket, obj.Key, "")
 		if err != nil || got.NotFound {
 			continue
 		}
@@ -581,7 +581,7 @@ func (p *Project) answer(pr pendingRequest, outcome history.Outcome) error {
 		}
 		return os.Rename(tmp, pr.local)
 	}
-	etag, err := p.S3.Put(p.Config.Bucket, pr.key, body, "application/json", "", pr.etag)
+	etag, err := p.Objects().Put(p.Config.Bucket, pr.key, body, "application/json", "", pr.etag)
 	if err != nil {
 		return err
 	}
@@ -784,7 +784,7 @@ func (p *Project) AllVersions(host string) ([]history.Version, error) {
 
 // allObjects lists every object under host's history, in every form.
 func (p *Project) allObjects(host string) ([]history.Version, error) {
-	listed, err := p.S3.List(p.Config.Bucket, history.Prefix(p.Root, p.Config.Project, host), "")
+	listed, err := p.Objects().List(p.Config.Bucket, history.Prefix(p.Root, p.Config.Project, host), "")
 	if err != nil {
 		return nil, err
 	}
@@ -877,7 +877,7 @@ func (p *Project) AskRestore(req history.Request) error {
 	if err != nil {
 		return err
 	}
-	_, err = p.S3.Put(p.Config.Bucket, history.RequestKey(p.Root, p.Config.Project, req.Host, req.ID), body, "application/json", "*", "")
+	_, err = p.Objects().Put(p.Config.Bucket, history.RequestKey(p.Root, p.Config.Project, req.Host, req.ID), body, "application/json", "*", "")
 	return err
 }
 
@@ -937,7 +937,7 @@ func (p *Project) Prune(result *Result) (int, error) {
 		}
 	}
 	changes := history.ChangesPrefix(p.Root, p.Config.Project, p.Host.ID)
-	listed, err := p.S3.List(p.Config.Bucket, changes, "")
+	listed, err := p.Objects().List(p.Config.Bucket, changes, "")
 	if err != nil {
 		return 0, err
 	}
@@ -955,7 +955,7 @@ func (p *Project) Prune(result *Result) (int, error) {
 			drop = append(drop, obj.Key)
 		}
 	}
-	listed, err = p.S3.List(p.Config.Bucket, history.RequestsPrefix(p.Root, p.Config.Project, p.Host.ID), "")
+	listed, err = p.Objects().List(p.Config.Bucket, history.RequestsPrefix(p.Root, p.Config.Project, p.Host.ID), "")
 	if err != nil {
 		return 0, err
 	}
@@ -965,7 +965,7 @@ func (p *Project) Prune(result *Result) (int, error) {
 		}
 	}
 	trash := history.TrashPrefix(p.Root, p.Config.Project, p.Host.ID)
-	listed, err = p.S3.List(p.Config.Bucket, trash, "")
+	listed, err = p.Objects().List(p.Config.Bucket, trash, "")
 	if err != nil {
 		return 0, err
 	}
@@ -979,7 +979,7 @@ func (p *Project) Prune(result *Result) (int, error) {
 	deleted := len(pointers) + len(drop)
 	for _, batch := range [][]string{pointers, drop} {
 		errs := make([]error, len(batch))
-		parallel(len(batch), func(i int) { errs[i] = p.S3.Delete(p.Config.Bucket, batch[i]) })
+		parallel(len(batch), func(i int) { errs[i] = p.Objects().Delete(p.Config.Bucket, batch[i]) })
 		if err := errors.Join(errs...); err != nil {
 			return 0, err
 		}

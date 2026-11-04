@@ -17,9 +17,11 @@ import (
 	"time"
 
 	"folder-sync/internal/account"
+	"folder-sync/internal/config"
 	"folder-sync/internal/creds"
 	"folder-sync/internal/host"
 	"folder-sync/internal/layout"
+	"folder-sync/internal/store"
 )
 
 // credentialEnv is getenv, except that when this machine is signed in (account.json) and neither a credential
@@ -55,6 +57,26 @@ func credentialEnv(l layout.Layout, getenv func(string) string, executable func(
 		}
 		return getenv(name)
 	}
+}
+
+// credentialEnvFor is credentialEnv for a folder's store. Only an R2 folder can use this machine's sign-in: its keys
+// are the accounts Worker's R2 keys, and handing them to an S3 or Google endpoint would send them to the wrong party.
+// WHY the signature takes getenv and executable: tests stand a script in for this binary.
+func credentialEnvFor(l layout.Layout, spec store.Spec, getenv func(string) string, executable func() (string, error)) func(string) string {
+	switch spec.Kind {
+	case store.S3, store.GS, store.File:
+		return getenv
+	}
+	return credentialEnv(l, getenv, executable)
+}
+
+// folderStore is the store a folder's config names (r2 when it has none or cannot be read).
+func folderStore(folder string) store.Spec {
+	cfg, err := config.Load(folder)
+	if err != nil {
+		return store.R2Default(config.DefaultBucket)
+	}
+	return cfg.StoreSpec()
 }
 
 // userAgent is "folder-sync/<version> (<host name>; <os>)", the host name from host.json when there is one.

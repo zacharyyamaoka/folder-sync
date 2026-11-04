@@ -19,6 +19,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"folder-sync/internal/ignore"
+	"folder-sync/internal/store"
 )
 
 // FileName is the project config's name, at the root of the synced folder.
@@ -39,8 +40,11 @@ type Viewer struct {
 
 // Config is .folder-sync.toml.
 type Config struct {
-	Project   string            `toml:"project"`
-	Bucket    string            `toml:"bucket"`
+	Project string `toml:"project"`
+	Bucket  string `toml:"bucket"`
+	// Store is where the folder's bytes live, as a URL: r2://bucket, s3://bucket/prefix, gs://bucket/prefix or
+	// file:///dir (docs/STORAGE.md). Empty means r2://<bucket>, today's behaviour. When set, Validate fills Bucket from it.
+	Store     string            `toml:"store"`
 	PeersDir  string            `toml:"peers_dir"`
 	Interval  string            `toml:"interval"`
 	MaxDelete int               `toml:"max_delete"`
@@ -133,7 +137,17 @@ func (c *Config) Validate() error {
 	if err := ValidateProject(c.Project); err != nil {
 		return err
 	}
-	if err := ValidateBucket(c.Bucket); err != nil {
+	if c.Store != "" {
+		spec, err := store.Parse(c.Store)
+		if err != nil {
+			return err
+		}
+		// WHY refused: two answers to "which bucket" would let a folder sync to the one the other line does not name
+		if c.Bucket != "" && c.Bucket != spec.Bucket {
+			return fmt.Errorf("bucket %q and store %q name different buckets: set store only", c.Bucket, c.Store)
+		}
+		c.Bucket = spec.Bucket
+	} else if err := ValidateBucket(c.Bucket); err != nil {
 		return err
 	}
 	if c.PeersDir == "" {
@@ -185,6 +199,16 @@ func (e ErrSharedIsV1) Error() string {
 	return fmt.Sprintf("modes.%q = \"shared\" is not available in v0: two-way folders need the lease in "+
 		"_leases/<project>.json and rclone bisync (docs/peps/0001 §6), which ship in v1. "+
 		"In v0 every machine publishes only its own files under hosts/<host-id>/; remove the line to continue", e.Subfolder)
+}
+
+// StoreSpec is the parsed store: the store URL, else r2://<bucket> (Validate must have passed).
+func (c Config) StoreSpec() store.Spec {
+	if c.Store != "" {
+		if spec, err := store.Parse(c.Store); err == nil {
+			return spec
+		}
+	}
+	return store.R2Default(c.Bucket)
 }
 
 // HistoryEveryDuration is the parsed history_every (Validate must have passed).
@@ -255,7 +279,12 @@ func Render(c Config) string {
 	var b bytes.Buffer
 	b.WriteString("# folder-sync project config (docs/peps/0001). Safe to commit: it holds no key and no host id.\n")
 	fmt.Fprintf(&b, "project = %q\n", c.Project)
-	fmt.Fprintf(&b, "bucket = %q\n", c.Bucket)
+	if c.Store != "" {
+		b.WriteString("# Where the bytes live: r2://bucket, s3://bucket/prefix, gs://bucket/prefix or file:///dir (docs/STORAGE.md).\n")
+		fmt.Fprintf(&b, "store = %q\n", c.Store)
+	} else {
+		fmt.Fprintf(&b, "bucket = %q\n", c.Bucket)
+	}
 	b.WriteString("# Peers' files land read-only in <this folder>/<peers_dir>/<host-id>/, the same path as in the bucket.\n")
 	fmt.Fprintf(&b, "peers_dir = %q\n", c.PeersDir)
 	b.WriteString("# How often `sync --watch` runs a round.\n")

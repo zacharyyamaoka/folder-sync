@@ -24,6 +24,7 @@ import (
 	"unicode"
 
 	"folder-sync/internal/config"
+	"folder-sync/internal/store"
 )
 
 // EnvCredentialProcess is a JSON array of strings: the argv of the program, argv[0] absolute.
@@ -122,6 +123,8 @@ type Resolver struct {
 	Getenv          func(string) string
 	Now             func() time.Time // injectable for tests; default time.Now
 	Timeout         time.Duration    // injectable for tests; default ProcessTimeout
+	// Store is the folder's store (its config's store URL). The zero value is r2://, the rules before stores existed.
+	Store store.Spec
 }
 
 // NewResolver builds a Resolver over the process environment's lookup function.
@@ -148,9 +151,19 @@ func (r *Resolver) UsesProcess() bool { return r.Getenv(EnvCredentialProcess) !=
 
 // Current returns the credentials to use now, refreshing them when they are due.
 func (r *Resolver) Current() (Creds, error) {
+	if r.Store.Kind == store.File {
+		return Creds{Schema: Schema, Source: "file"}, nil // a directory needs no key, and no key reaches it
+	}
 	raw := r.Getenv(EnvCredentialProcess)
 	if raw == "" {
-		return Load(r.CredentialsPath, r.Getenv)
+		if r.usesOtherStore() {
+			return r.currentForStore()
+		}
+		c, err := Load(r.CredentialsPath, r.Getenv)
+		if err == nil {
+			r.applyStore(&c) // r2://bucket/prefix: the prefix only
+		}
+		return c, err
 	}
 	if r.Getenv(EnvAccessKeyID) != "" || r.Getenv(EnvSecretAccessKey) != "" {
 		return Creds{}, fmt.Errorf("set either %s or %s/%s, not both", EnvCredentialProcess, EnvAccessKeyID, EnvSecretAccessKey)
@@ -232,7 +245,7 @@ func (r *Resolver) build(out processOutput) (Creds, error) {
 	if c.Endpoint == "" {
 		c.Endpoint = r.Getenv(EnvEndpoint)
 	}
-	if c.Endpoint == "" {
+	if c.Endpoint == "" && !r.usesOtherStore() { // an s3:// or gs:// store has its own default (applyStore)
 		account := r.Getenv(EnvAccountID)
 		if account == "" {
 			return Creds{}, fmt.Errorf("no Endpoint in the output: set %s (or %s for an S3-compatible stand-in)", EnvAccountID, EnvEndpoint)
@@ -245,6 +258,7 @@ func (r *Resolver) build(out processOutput) (Creds, error) {
 	if c.Region == "" {
 		c.Region = r.Getenv(EnvRegion)
 	}
+	r.applyStore(&c)
 	c.fillDefaults()
 	return c, nil
 }

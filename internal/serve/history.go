@@ -225,7 +225,7 @@ func (s *Server) deleted(r *http.Request, f folder) (deletedBody, error) {
 	}
 	defer p.Close()
 	prefix := p.Root + "_history/" + p.Config.Project + "/"
-	listed, err := p.S3.List(p.Config.Bucket, prefix, "/")
+	listed, err := p.Objects().List(p.Config.Bucket, prefix, "/")
 	if err != nil {
 		return deletedBody{}, offline(p, err)
 	}
