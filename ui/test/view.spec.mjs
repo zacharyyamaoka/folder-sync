@@ -152,9 +152,9 @@ test.describe("the pill and the menu", () => {
 		await pill(page).focus();
 		await page.keyboard.press("Enter");
 		await expect(menu(page)).toBeVisible();
-		await expect.poll(() => active(page)).toBe("activity");
+		await expect.poll(() => active(page)).toBe("files");
 		await page.keyboard.press("ArrowDown");
-		expect(await active(page)).toBe("history");
+		expect(await active(page)).toBe("activity");
 		await page.keyboard.press("ArrowUp");
 		await page.keyboard.press("ArrowUp");
 		expect(await active(page)).toBe("Devices and sharing");

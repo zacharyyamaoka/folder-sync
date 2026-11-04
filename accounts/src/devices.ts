@@ -355,6 +355,7 @@ ${notice(env, done === "signed-out" ? done : null)}<p>You're not signed in here.
 ${notice(env, done)}<p class="fs-who">Signed in as <strong>${escapeAttr(person.email)}</strong>${person.name ? `<br><span class="fs-small">${escapeAttr(person.name)}</span>` : ""}</p>
 <h2>Storage</h2>
 ${await usageLine(env, deps, person.userId)}
+<p class="fs-small"><a href="/fs/files" data-testid="fs-files-link">Browse your files</a></p>
 ${list.some((d) => d.device.current && d.legacy) ? `<p class="fs-notice" role="status" data-testid="fs-sign-in-again">${escapeAttr(SIGN_IN_AGAIN)}</p>\n` : ""}<h2>Devices</h2>
 <p class="fs-small">Revoking a device signs it out: this server refuses whatever it asks after that, and it gets no new storage keys. A change this server had already started for it may still finish. Storage keys a machine already holds stop working within ${lifetime(ttlOf(env))}, when they expire.</p>
 ${devices}${grantList(await deps.grants?.(person.userId), person.userId)}

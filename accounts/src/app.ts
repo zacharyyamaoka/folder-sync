@@ -11,6 +11,7 @@
 //   GET  /fs/v1/usage/breakdown                   what is in it: by project, kind and device, the biggest, what to free (storage.ts)
 //   GET  /fs/v1/devices, POST …/devices/revoke    the person's sessions (machines, browsers); revoke one (devices.ts)
 //   GET  /fs/account, POST …/revoke | …/sign-out  the account page, no script (devices.ts)
+//   GET  /fs/files[?project=]                     the Files page: browse, open, upload, rename and delete (files-page.ts)
 //   POST /fs/v1/sign-out                          ends this session
 //   GET  /fs/v1/folders                           my folders and the ones I may read
 //   GET  /fs/v1/folders/:project[?owner=]         the union view of a folder's hosts
@@ -53,6 +54,7 @@ import { servedFile } from "./ranges.ts";
 import type { CloseOrder } from "./hub.ts";
 import { activityRoute, browserOf, deleted, history, purge, restore, status, ui } from "./view.ts";
 import { storageBreakdown } from "./storage.ts";
+import { filesPage } from "./files-page.ts";
 
 export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
 	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
@@ -159,9 +161,21 @@ export const TYPES: Record<string, string> = {
 	".m4v": "video/mp4",
 	".webm": "video/webm",
 	".mov": "video/quicktime",
+	// WHY these (the Files page's preview): an <audio> or <img> on the page's own origin plays what the type says it is
+	".mp3": "audio/mpeg",
+	".wav": "audio/wav",
+	".ogg": "audio/ogg",
+	".oga": "audio/ogg",
+	".opus": "audio/ogg",
+	".m4a": "audio/mp4",
+	".flac": "audio/flac",
+	".aac": "audio/aac",
+	".avif": "image/avif",
+	".bmp": "image/bmp",
+	".ico": "image/x-icon",
 };
 export const ACTIVE = new Set([".html", ".htm", ".svg"]);
-const SITE_FILES: Record<string, string> = { "signin.js": "text/javascript; charset=utf-8", "device.js": "text/javascript; charset=utf-8", "account.css": "text/css; charset=utf-8" };
+const SITE_FILES: Record<string, string> = { "signin.js": "text/javascript; charset=utf-8", "device.js": "text/javascript; charset=utf-8", "account.css": "text/css; charset=utf-8", "files.js": "text/javascript; charset=utf-8", "files.css": "text/css; charset=utf-8" };
 
 // ------------------------------------------------------------------------------------------------ answers
 
@@ -975,6 +989,11 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 	}
 	if (first === "handoff") return handoffRoute(request, deps, app, rest, method);
 	if (first === "account") return accountRoute(request, env, deps, app, rest, method);
+	if (first === "files" && rest.length === 0) {
+		if (!read) return fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+		if (!app) return fail(404, "unknown_origin", "this origin is not a registered app: no files page here");
+		return filesPage(request, deps, app, head);
+	}
 	// public, no session: the desktop installers (PEP 0006), on every app's /fs/ and this Worker's own host
 	if (first === "download") return downloadRoute(request, env, app, rest, method);
 	if (first !== "v1") return fail(404, "not_found", "no such route");

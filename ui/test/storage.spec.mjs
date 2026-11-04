@@ -163,7 +163,7 @@ test("the tab is reachable by keyboard like the others", async ({ page }) => {
 	await page.keyboard.press("ArrowRight");
 	await expect(el(page, ".body")).toHaveAttribute("data-view", "storage");
 	await page.keyboard.press("ArrowRight");
-	await expect(el(page, ".body")).toHaveAttribute("data-view", "activity");
+	await expect(el(page, ".body")).toHaveAttribute("data-view", "files");
 });
 
 test("on a machine and for a reader it explains, and asks nothing", async ({ page }) => {

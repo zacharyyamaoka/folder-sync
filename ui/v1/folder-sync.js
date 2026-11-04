@@ -4,8 +4,9 @@
 //   <folder-sync-status project="notes"></folder-sync-status>
 //
 // Obsidian Sync's model: a pill with the folder's state; clicking it opens a menu (the native `popover`) with the
-// status, an amber warning only when the person must act, the devices, Activity log, Version history, Deleted files,
-// Storage (what is in the account, online), the storage line and a link to /fs/account. Each opens a panel in a native <dialog> (or inline, with `view`).
+// status, an amber warning only when the person must act, the devices, Files (browse, open, upload, rename and delete,
+// online), Activity log, Version history, Deleted files, Storage (what is in the account, online), the storage line and
+// a link to /fs/account. Each opens a panel in a native <dialog> (or inline, with `view`).
 // Everything is in Shadow DOM, so an app's CSS cannot reach in and ours cannot reach out; the app themes it with
 // --fs-* custom properties and ::part(pill | menu | panel). Data comes only from this page's own origin, from the
 // accounts Worker online or `folder-sync serve` on the machine, which answer the same routes (docs/API.md "Routes").
@@ -16,7 +17,21 @@ const HUB_PING_MS = 30_000;
 const FREE_UP_DAYS = 7;
 const TEXT_LIMIT = 1_048_576;
 const SPLIT_KEY = "folder-sync-status/history-split";
-const VIEWS = { activity: "Activity log", history: "Version history", deleted: "Deleted files", storage: "Storage" };
+// WHY its own key: the Files list and the Version history list are different panes; each remembers its own width
+const FILES_SPLIT_KEY = "folder-sync-status/files-split";
+// accounts/src/app.ts WEB_FILE_MAX: the largest file the web host takes in one PUT
+const UPLOAD_MAX = 32 * 1024 * 1024;
+const VIEWS = { files: "Files", activity: "Activity log", history: "Version history", deleted: "Deleted files", storage: "Storage" };
+// What the browser can show by itself, by file suffix (Files tab). Anything not listed here gets Download, no sniffing.
+const PREVIEW = {
+	image: "png jpg jpeg gif webp svg avif bmp ico",
+	pdf: "pdf",
+	video: "mp4 m4v webm mov",
+	audio: "mp3 wav ogg oga m4a flac aac opus",
+	text: "txt md markdown json jsonl csv tsv yaml yml toml log ini cfg conf xml html htm css js mjs ts py sh rs go c h cpp java sql tex rst srt",
+};
+const TEXT_NAMES = new Set([".gitignore", ".gitattributes", "readme", "license", "makefile", "dockerfile"]);
+const SORTS = { name: "Name", modified: "Modified", size: "Size" };
 // the Storage tab's kinds (accounts/src/storage.ts): what each is called, and in what colour its slice of the bar
 const KIND_LABELS = { live: "Files", history: "Version history", trash: "Trash", changes: "Change records", requests: "Restore requests", other: "Other" };
 const KIND_PHRASES = { live: "your files", history: "version history", trash: "old copies in trash", changes: "change records", requests: "restore requests", other: "other files" };
@@ -131,6 +146,35 @@ details.proj > summary { cursor: pointer; padding: 7px 4px; display: flex; gap: 
 details.proj > summary .grow { flex: 1; } details.proj > table { margin: 0 0 8px 18px; width: calc(100% - 18px); }
 tr.host td { color: var(--_muted); } tr.host td:first-child { padding-left: 24px; }
 tr.kind td:first-child { white-space: nowrap; } td.path { overflow-wrap: anywhere; }
+.body[data-view="files"] { overflow: hidden; }
+.fview { display: grid; grid-template-rows: auto auto minmax(0, 1fr); height: 100%; min-height: 0; position: relative; }
+.fview .tools select { padding: 3px 6px; border: 1px solid var(--_line); border-radius: calc(var(--_radius) - 2px); background: var(--_bg); }
+.fview .tools .where { font-weight: 600; }
+.fview.dropping::after { content: "Drop to add to Web"; position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; pointer-events: none;
+  border: 2px dashed var(--_accent); border-radius: var(--_radius); background: color-mix(in srgb, var(--_accent) 9%, var(--_bg)); color: var(--_accent); font-weight: 600; }
+.fgroup h3 { margin: 12px 0 4px; padding: 0 8px; font-size: 12px; font-weight: 600; color: var(--_muted); }
+.fgroup:first-child h3 { margin-top: 0; }
+.flist { list-style: none; margin: 0; padding: 0; }
+.frow { display: block; width: 100%; text-align: left; border: 0; padding: 6px 8px; }
+.frow[aria-current="true"] { background: var(--_soft); }
+.fname { display: block; overflow-wrap: anywhere; } .fname .fdir { color: var(--_muted); }
+.fmeta { display: block; color: var(--_muted); font-size: 12px; }
+.fhead { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: flex-start; margin-bottom: 8px; }
+.fhead .ftitle { flex: 1; min-width: 160px; overflow-wrap: anywhere; } .fhead .ftitle b { display: block; font-size: 15px; font-weight: 600; }
+.fhead .factions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.fhead .back { display: none; }
+.rename { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+.rename input { flex: 1; min-width: 160px; padding: 4px 8px; border: 1px solid var(--_line); border-radius: calc(var(--_radius) - 2px); background: var(--_bg); }
+.fbody { flex: 1; min-height: 0; overflow: auto; }
+.fbody img { display: block; max-width: 100%; max-height: 100%; margin: 0 auto; object-fit: contain; }
+.fbody video, .fbody audio { display: block; width: 100%; max-height: 100%; }
+.fbody iframe { display: block; width: 100%; height: 100%; min-height: 320px; border: 1px solid var(--_line); border-radius: calc(var(--_radius) - 2px); background: var(--_bg); }
+@media (max-width: 700px) {
+  .fview .split { grid-template-columns: minmax(0, 1fr); } .fview .handle { display: none; }
+  .fview .split[data-open] > .side, .fview .split:not([data-open]) > .main { display: none; }
+  .fview .split > .main { padding-left: 0; } .fview .split > .side { padding-right: 0; }
+  .fhead .back { display: inline-block; }
+}
 details.more { margin-top: 6px; } details.more > summary { cursor: pointer; padding: 6px 0; font-weight: 600; }
 details.more > summary small { font-weight: 400; color: var(--_muted); }
 `;
@@ -220,12 +264,19 @@ class FolderSyncStatus extends HTMLElement {
 		this.showChanges = true;
 		this.picked = new Set();
 		this.deletedFiles = null;
+		this.filesData = null;
+		this.projects = null;
+		this.fileSel = null;
+		this.fileSort = "name";
+		this.fileQuery = "";
+		this.fileRows = [];
 		this.lastStatusJson = "";
 		this.root.addEventListener("click", (e) => this.onClick(e));
 		this.root.addEventListener("input", (e) => this.onInput(e));
 		this.root.addEventListener("change", (e) => this.onChange(e));
 		this.root.addEventListener("keydown", (e) => this.onKey(e));
 		this.root.addEventListener("pointerdown", (e) => { if (e.target.id === "handle" && e.button === 0) this.startDrag(e); });
+		for (const type of ["dragenter", "dragover", "dragleave", "drop"]) this.root.addEventListener(type, (e) => this.onDrag(e));
 		this.onVisible = () => { if (!document.hidden) this.refresh(); };
 	}
 
@@ -260,8 +311,13 @@ class FolderSyncStatus extends HTMLElement {
 		this.events = null;
 		this.deletedFiles = null;
 		this.file = null;
+		this.filesData = null;
+		this.fileSel = null;
+		this.projects = null;
 		this.lastStatusJson = "";
 		this.closeHub();
+		// WHY not rebuilt when the Files tab's folder picker did it: the open panel stays where it is, on the other folder
+		if (this.switching) { this.refresh(); return; }
 		this.build();
 		this.refresh();
 		if (this.inline) this.open(this.inline);
@@ -358,6 +414,8 @@ class FolderSyncStatus extends HTMLElement {
 		if (this.status && !this.statusError && !this.onMachine) this.openHub();
 		const where = this.root.getElementById("where");
 		if (where) where.textContent = `${this.project} · ${this.headline().text}`;
+		const filesTab = this.root.getElementById("tab-files");
+		if (filesTab) filesTab.hidden = this.onMachine;
 	}
 
 	/** One headline: the status's, or what a failed status read means (offline is never red). */
@@ -412,7 +470,8 @@ ${h.why ? `<p class="note ${h.state === "error" ? "error" : h.state === "attenti
 		for (const w of s.warnings || []) html += `<p class="note ${w.level === "error" ? "error" : "warn"}" data-warning="${esc(w.kind)}">${esc(w.text)}</p>`;
 		html += `<ul class="devices" aria-label="Devices">${devices.map(device).join("")}</ul>`;
 		if (this.isOwner) {
-			html += `<div class="sep"></div>${Object.entries(VIEWS).map(([v, label]) => `<button class="item" role="menuitem" data-open="${v}">${label}</button>`).join("")}`;
+			// WHY no Files on a machine: serve answers no folder listing, so the tab would only say "browse online"
+			html += `<div class="sep"></div>${Object.entries(VIEWS).filter(([v]) => v !== "files" || !this.onMachine).map(([v, label]) => `<button class="item" role="menuitem" data-open="${v}">${label}</button>`).join("")}`;
 			if (s.storage) html += `<div class="sep"></div>${this.storageMenuHtml(s.storage)}`;
 			if (!this.onMachine) html += `<a class="item" role="menuitem" href="${esc(`${this.base}/account`)}">Devices and sharing</a>`;
 		}
@@ -501,6 +560,7 @@ ${h.why ? `<p class="note ${h.state === "error" ? "error" : h.state === "attenti
 			await this.refresh();
 			if (this.isPanelOpen() && this.view === "activity") { this.events = null; this.renderBody(); }
 			if (this.isPanelOpen() && this.view === "deleted") { this.deletedFiles = null; this.renderBody(); }
+			if (this.isPanelOpen() && this.view === "files") this.reloadFiles();
 		}, 150);
 	}
 
@@ -508,11 +568,13 @@ ${h.why ? `<p class="note ${h.state === "error" ? "error" : h.state === "attenti
 
 	isPanelOpen() { return !!(this.panel && (this.inline || this.panel.open)); }
 
-	/** Opens a panel: `activity`, `history` (with { host, path }, that file's versions), `deleted` or `storage`. */
+	/** Opens a panel: `files` (with { host, path }, that file open), `activity`, `history` (with { host, path }, that
+	 *  file's versions), `deleted` or `storage`. */
 	async open(view, target) {
-		if (!VIEWS[view]) throw new TypeError(`folder-sync-status: no view "${view}" (activity, history, deleted or storage)`);
+		if (!VIEWS[view]) throw new TypeError(`folder-sync-status: no view "${view}" (files, activity, history, deleted or storage)`);
 		if (!this.built) this.build();
 		this.view = view;
+		if (view === "files" && target && target.host && target.path) this.fileSel = { host: target.host, path: target.path };
 		if (view === "history") {
 			if (target && target.host && target.path) {
 				if (!this.file || this.file.host !== target.host || this.file.path !== target.path) this.selected = null;
@@ -521,7 +583,8 @@ ${h.why ? `<p class="note ${h.state === "error" ? "error" : h.state === "attenti
 		}
 		const menu = this.root.getElementById("menu");
 		if (menu && menu.matches(":popover-open")) menu.hidePopover();
-		if (!this.inline && !this.panel.open) this.panel.showModal();
+		const opening = !this.inline && !this.panel.open;
+		if (opening) this.panel.showModal();
 		for (const tab of this.root.querySelectorAll('[role="tab"]')) {
 			const on = tab.dataset.open === view;
 			tab.setAttribute("aria-selected", String(on));
@@ -530,7 +593,8 @@ ${h.why ? `<p class="note ${h.state === "error" ? "error" : h.state === "attenti
 		const where = this.root.getElementById("where");
 		if (where) where.textContent = `${this.project} · ${this.headline().text}`;
 		await this.renderBody();
-		if (!this.inline && !this.panel.contains(this.root.activeElement)) this.root.getElementById(`tab-${view}`).focus();
+		// WHY also when it just opened: showModal() focuses the dialog's first tab, which is Files, not the one asked for
+		if (!this.inline && (opening || !this.panel.contains(this.root.activeElement))) this.root.getElementById(`tab-${view}`).focus();
 	}
 
 	close() {
@@ -551,6 +615,7 @@ ${h.why ? `<p class="note ${h.state === "error" ? "error" : h.state === "attenti
 		this.body.innerHTML = html;
 		this.body.dataset.view = view;
 		if (view === "history") this.afterHistory();
+		if (view === "files") this.afterFiles();
 	}
 
 	errorHtml(err) {
@@ -716,8 +781,9 @@ ${h.why ? `<p class="note ${h.state === "error" ? "error" : h.state === "attenti
 	}
 
 	splitWidth() {
-		let w = 260;
-		try { w = Number(localStorage.getItem(SPLIT_KEY)) || 260; } catch { /* storage blocked: the default */ }
+		const fallback = this.view === "files" ? 320 : 260;
+		let w = fallback;
+		try { w = Number(localStorage.getItem(this.view === "files" ? FILES_SPLIT_KEY : SPLIT_KEY)) || fallback; } catch { /* storage blocked: the default */ }
 		return Math.round(Math.min(Math.max(w, 160), 640));
 	}
 
@@ -729,7 +795,7 @@ ${h.why ? `<p class="note ${h.state === "error" ? "error" : h.state === "attenti
 		split.style.setProperty("--fs-split-w", `${w}px`);
 		this.root.getElementById("handle").setAttribute("aria-valuenow", String(w));
 		// WHY remembered: every split pane keeps the width the person dragged it to (standing rule)
-		if (save) try { localStorage.setItem(SPLIT_KEY, String(w)); } catch { /* storage blocked: not remembered */ }
+		if (save) try { localStorage.setItem(this.view === "files" ? FILES_SPLIT_KEY : SPLIT_KEY, String(w)); } catch { /* storage blocked: not remembered */ }
 	}
 
 	startDrag(e) {
@@ -764,6 +830,297 @@ ${files.map((f) => `<tr><td><input type="checkbox" data-pick="${esc(keyOf(f.host
 <td><button class="link" data-host="${esc(f.host)}" data-path="${esc(f.path)}" title="Version history of ${esc(f.path)}">${esc(f.path)}</button></td><td class="muted">${esc(f.host_name)}</td>
 <td class="muted num" title="${esc(when(f.deleted_at))}">${esc(ago(f.deleted_at))}</td><td class="muted num">${bytes(f.size)}</td><td><button data-restore-one="${esc(keyOf(f.host, f.path))}">Restore</button></td></tr>`).join("")}
 </tbody></table>`;
+	}
+
+	// Files: every device's files in this folder, opened with the browser's own preview (docs/API.md "The Files tab").
+	// WHY the web host's files are the only ones changed here: a machine's files are written by that machine alone
+	// (CONTRACT "Who writes"); a shared, editable tree is PEP 0010, not this tab
+
+	filesUrl() { return `${this.base}/v1/folders/${encodeURIComponent(this.project)}${this.scope()}`; }
+	fileUrl(f) { return `${this.base}/v1/folders/${encodeURIComponent(this.project)}/files/${encodeURIComponent(f.host)}/${encPath(f.path)}${this.scope()}`; }
+	/** A public folder's file, readable by anyone who has the link (the owner's id names whose folder it is). */
+	fileLink(f) { return `${location.origin}${this.base}/v1/folders/${encodeURIComponent(this.project)}/files/${encodeURIComponent(f.host)}/${encPath(f.path)}?owner=${encodeURIComponent(this.filesData.owner)}`; }
+	webUrl(path) { return `${this.base}/v1/folders/${encodeURIComponent(this.project)}/web/${encPath(path)}`; }
+
+	async filesHtml() {
+		// WHY status first: a machine's page must not ask for a listing it cannot get, and the role comes from status
+		if (!this.status && !this.statusError) await this.refresh();
+		if (this.onMachine) return `<p class="note info" data-files-note="online">Files are browsed online: open this folder in the app's own page to see and add files.</p>`;
+		this.filesData = await this.call(this.filesUrl());
+		await this.loadProjects();
+		const write = this.isOwner;
+		const projects = this.projects && this.projects.length > 1
+			? `<select id="fproject" aria-label="Folder">${this.projects.map((p) => `<option value="${esc(p)}" ${p === this.project ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>`
+			: `<span class="where">${esc(this.project)}</span>`;
+		return `<div class="fview" id="fview"><div class="tools">${projects}
+<input type="search" id="fquery" placeholder="Filter by name" aria-label="Filter files by name" value="${esc(this.fileQuery)}">
+<select id="fsort" aria-label="Sort by">${Object.entries(SORTS).map(([k, label]) => `<option value="${k}" ${k === this.fileSort ? "selected" : ""}>${label}</option>`).join("")}</select>
+<span class="grow"></span>${write ? `<button class="primary" data-act="upload">Upload</button><input type="file" id="upload-input" multiple hidden>` : ""}</div>
+<div id="fnote" role="status"></div>
+<div class="split" id="split" style="--fs-split-w:${this.splitWidth()}px" ${this.fileSel ? "data-open" : ""}>
+<div class="side" id="side"><div id="flist"></div></div>
+<div class="handle" id="handle" role="separator" aria-orientation="vertical" aria-label="Resize the file list" tabindex="0" aria-valuenow="${this.splitWidth()}"></div>
+<div class="main" id="fmain"></div></div></div>`;
+	}
+
+	/** The owner's folders, for the picker (a reader or a shared folder has no picker). */
+	async loadProjects() {
+		if (this.projects || !this.isOwner || this.owner) return;
+		try {
+			const r = await this.call(`${this.base}/v1/folders`);
+			this.projects = r.folders.map((f) => f.project).sort();
+		} catch { this.projects = []; }
+		if (!this.projects.includes(this.project)) this.projects.unshift(this.project);
+	}
+
+	/** The listing, grouped by the device that wrote each file (the web host first), filtered and sorted. */
+	filesGroups() {
+		const d = this.filesData, q = this.fileQuery.trim().toLowerCase();
+		const groups = new Map(d.hosts.map((h) => [h.id, { host: h.id, name: h.web ? "Web" : h.name, web: !!h.web, files: [] }]));
+		for (const f of d.files) {
+			const g = groups.get(f.host);
+			if (g && (!q || f.path.toLowerCase().includes(q))) g.files.push({ ...f, device: g.name, web: g.web, modified: f.mtime || f.writtenAt });
+		}
+		const by = {
+			name: (a, b) => a.path.toLowerCase().localeCompare(b.path.toLowerCase()) || (a.path < b.path ? -1 : 1),
+			modified: (a, b) => Date.parse(b.modified) - Date.parse(a.modified),
+			size: (a, b) => b.size - a.size,
+		}[this.fileSort];
+		for (const g of groups.values()) g.files.sort(by);
+		return [...groups.values()].sort((a, b) => (b.web ? 1 : 0) - (a.web ? 1 : 0) || a.name.localeCompare(b.name));
+	}
+
+	renderFilesList() {
+		const list = this.root.getElementById("flist");
+		if (!list || !this.filesData) return;
+		const groups = this.filesGroups().filter((g) => g.files.length);
+		this.fileRows = groups.flatMap((g) => g.files);
+		if (!this.fileRows.length) {
+			list.innerHTML = `<p class="empty" data-files-empty>${this.fileQuery.trim() ? "No file matches." : this.isOwner ? "No files here yet. Drop files anywhere on this page, or press Upload, to add them to Web." : "No files here yet."}</p>`;
+			return;
+		}
+		let i = 0;
+		list.innerHTML = groups.map((g) => `<section class="fgroup" data-device="${esc(g.host)}"><h3>${esc(g.name)} <span class="muted">· ${g.web ? (this.isOwner ? "you can change these here" : "web") : "synced from a device"}</span></h3>
+<ul class="flist">${g.files.map((f) => {
+			const cut = f.path.lastIndexOf("/") + 1, sel = this.isSelected(f);
+			return `<li><button class="frow" data-file="${i++}" aria-current="${sel}" title="${esc(f.path)}"><span class="fname"><span class="fdir">${esc(f.path.slice(0, cut))}</span><b>${esc(f.path.slice(cut))}</b></span>
+<span class="fmeta">${size(f.size)} · <time datetime="${esc(f.modified)}" title="${esc(when(f.modified))}">${esc(ago(f.modified))}</time> · ${esc(f.device)}</span></button></li>`;
+		}).join("")}</ul></section>`).join("");
+	}
+
+	isSelected(f) { return !!this.fileSel && this.fileSel.host === f.host && this.fileSel.path === f.path; }
+
+	/** The open file, as the listing now has it (null when it is gone). */
+	openFile() {
+		if (!this.fileSel || !this.filesData) return null;
+		const f = this.filesData.files.find((x) => x.host === this.fileSel.host && x.path === this.fileSel.path);
+		const h = f && this.filesData.hosts.find((x) => x.id === f.host);
+		return f ? { ...f, device: h && h.web ? "Web" : h ? h.name : f.host, web: !!(h && h.web), modified: f.mtime || f.writtenAt } : null;
+	}
+
+	afterFiles() {
+		this.renderFilesList();
+		this.showFile();
+	}
+
+	/** Re-reads the listing (a hub `changed`) without redrawing the toolbar or losing the open file. */
+	async reloadFiles() {
+		if (!this.root.getElementById("flist")) return;
+		const ticket = this.bodyTicket;
+		try { this.filesData = await this.call(this.filesUrl()); } catch { return; }
+		if (ticket !== this.bodyTicket || this.view !== "files") return;
+		const was = this.fileSig;
+		this.renderFilesList();
+		// WHY only when its bytes changed: a preview that restarts on every unrelated change would stop a playing video
+		const f = this.openFile();
+		if (!f) { this.fileSel = null; this.showFile(); } else if (was !== `${f.sha256}${f.path}${f.host}`) this.showFile();
+	}
+
+	selectFile(f) {
+		this.fileSel = { host: f.host, path: f.path };
+		for (const b of this.root.querySelectorAll("[data-file]")) b.setAttribute("aria-current", String(this.isSelected(this.fileRows[Number(b.dataset.file)])));
+		this.showFile();
+	}
+
+	kindOf(path) {
+		const name = path.slice(path.lastIndexOf("/") + 1).toLowerCase(), dot = name.lastIndexOf(".");
+		if (dot <= 0) return TEXT_NAMES.has(name) ? "text" : "other";
+		const ext = name.slice(dot + 1);
+		return Object.keys(PREVIEW).find((k) => PREVIEW[k].split(" ").includes(ext)) || "other";
+	}
+
+	/** The right-hand side: the open file's header and actions, and its preview. */
+	showFile() {
+		const main = this.root.getElementById("fmain"), split = this.root.getElementById("split");
+		if (!main) return;
+		const f = this.openFile();
+		const ticket = (this.previewTicket = (this.previewTicket || 0) + 1);
+		this.fileSig = f ? `${f.sha256}${f.path}${f.host}` : "";
+		if (split) split.toggleAttribute("data-open", !!f);
+		if (!f) {
+			main.innerHTML = `<p class="empty" data-files-placeholder>${this.filesData && this.filesData.files.length ? "Select a file to open it." : ""}</p>`;
+			return;
+		}
+		const cut = f.path.lastIndexOf("/") + 1, name = f.path.slice(cut), write = this.isOwner && f.web;
+		const url = this.fileUrl(f), canLink = this.filesData.visibility === "public";
+		const actions = [`<a class="button" id="fdownload" href="${esc(url)}" download="${esc(name)}">Download</a>`,
+			this.isOwner ? `<button data-act="file-history">Version history</button>` : "",
+			canLink ? `<button data-act="file-link">Copy link</button>` : "",
+			write ? `<button data-act="file-rename">Rename</button><button data-act="file-delete">Delete</button>` : ""].join("");
+		main.innerHTML = `<div class="fhead"><button class="back" data-act="files-back">← Files</button>
+<div class="ftitle" id="ftitle"><b>${esc(name)}</b><span class="muted">${esc(f.path.slice(0, cut) || "top level")} · ${size(f.size)} · modified ${esc(when(f.modified))} · ${esc(f.device)}</span></div>
+<div class="factions">${actions}</div></div>
+${!f.web && this.isOwner ? `<p class="note info" data-readonly>Written by ${esc(f.device)}; edit it there. Changes made on that device show up here.</p>` : ""}
+<div id="fresult" role="status"></div><div class="fbody" id="fpreview" data-kind="${this.kindOf(f.path)}"></div>`;
+		this.previewFile(f, url, ticket);
+	}
+
+	async previewFile(f, url, ticket) {
+		const box = this.root.getElementById("fpreview"), kind = this.kindOf(f.path), name = esc(f.path.split("/").pop());
+		const gone = (why) => `<p class="empty" data-nopreview>${why} <a href="${esc(url)}" download="${name}">Download ${name}</a> to open it.</p>`;
+		let html;
+		try {
+			if (kind === "image") html = `<img src="${esc(url)}" alt="${name}" data-preview="image">`;
+			else if (kind === "pdf") html = `<iframe src="${esc(url)}" title="${name}" data-preview="pdf"></iframe>`;
+			else if (kind === "video") html = `<video src="${esc(url)}" controls preload="metadata" data-preview="video"></video>`;
+			else if (kind === "audio") html = `<audio src="${esc(url)}" controls preload="metadata" data-preview="audio"></audio>`;
+			else if (kind === "text") {
+				if (f.size > TEXT_LIMIT) html = gone(`${name} is ${size(f.size)}, too big to show here.`);
+				else {
+					const res = await fetch(url, { credentials: "same-origin" });
+					if (!res.ok) { const data = await res.json().catch(() => null); throw new ViewError(res.status, data && data.error, (data && data.why) || `The server answered HTTP ${res.status}.`); }
+					let text = null;
+					try { text = new TextDecoder("utf-8", { fatal: true }).decode(await res.arrayBuffer()); } catch { text = null; }
+					html = text === null || text.includes("\u0000") ? gone(`${name} is not text.`) : `<pre class="text" data-preview="text">${esc(text) || '<span class="muted">(empty)</span>'}</pre>`;
+				}
+			} else html = gone("This browser has no preview for this kind of file.");
+		} catch (err) { html = this.errorHtml(err); }
+		if (ticket !== this.previewTicket || !box.isConnected) return;
+		box.innerHTML = html;
+		const media = box.querySelector("img, video, audio");
+		if (media) media.addEventListener("error", () => { if (ticket === this.previewTicket) box.innerHTML = gone("This browser could not show it."); }, { once: true });
+	}
+
+	/** A message under the toolbar (uploads) or the open file (rename, delete); `tone` is info, warn or error. */
+	say(where, html, tone = "info") {
+		const box = this.root.getElementById(where);
+		if (box) box.innerHTML = html ? `<p class="note ${tone}" data-note="${tone}">${html}</p>` : "";
+	}
+
+	/** A write to the web host: PUT or DELETE on <base>/v1/folders/<project>/web/<path> (docs/API.md "Files"). */
+	async webWrite(method, path, body) {
+		const headers = { "X-Folder-Sync": "1" };
+		if (this.status && this.status.owner) headers["X-Folder-Sync-User"] = this.status.owner.id;
+		if (body !== undefined) headers["Content-Type"] = "application/octet-stream";
+		const res = await fetch(this.webUrl(path), { method, headers, body, credentials: "same-origin" });
+		const data = await res.json().catch(() => null);
+		if (!res.ok) throw new ViewError(res.status, data && data.error, (data && data.why) || `The server answered HTTP ${res.status}.`);
+		return data;
+	}
+
+	async upload(list) {
+		if (!this.isOwner || this.view !== "files") return;
+		const files = [...list].filter((f) => f && typeof f.name === "string");
+		if (!files.length) return;
+		const added = [], failed = [];
+		for (const [n, file] of files.entries()) {
+			this.say("fnote", `Uploading ${n + 1} of ${files.length}: ${esc(file.name)}…`);
+			if (file.size > UPLOAD_MAX) { failed.push(`${esc(file.name)}: the web folder takes files up to ${size(UPLOAD_MAX)}`); continue; }
+			try {
+				await this.webWrite("PUT", file.name, file);
+				added.push(file.name);
+			} catch (err) { failed.push(`${esc(file.name)}: ${esc(err.message)}`); }
+		}
+		await this.reloadFilesNow();
+		const web = this.filesData && this.filesData.hosts.find((h) => h.web);
+		if (added.length && web) { this.fileSel = { host: web.id, path: added[added.length - 1] }; this.afterFiles(); }
+		const lines = added.length ? [`Added ${added.length === 1 ? esc(added[0]) : `${added.length} files`} to Web.`] : [];
+		this.say("fnote", [...lines, ...failed].join("<br>"), failed.length ? "error" : "info");
+		this.refresh();
+	}
+
+	/** Re-reads the listing and redraws the list now (after our own write). */
+	async reloadFilesNow() {
+		try { this.filesData = await this.call(this.filesUrl()); } catch (err) { this.say("fnote", esc(err.message), "error"); return; }
+		this.renderFilesList();
+	}
+
+	renameForm() {
+		const f = this.openFile();
+		if (!f) return;
+		this.say("fresult", "");
+		this.root.getElementById("ftitle").innerHTML = `<div class="rename"><input id="rename-input" aria-label="New name" value="${esc(f.path)}" spellcheck="false"><button class="primary" data-act="rename-save">Rename</button><button data-act="rename-cancel">Cancel</button></div>`;
+		const input = this.root.getElementById("rename-input"), start = f.path.lastIndexOf("/") + 1, dot = f.path.lastIndexOf(".");
+		input.focus();
+		input.setSelectionRange(start, dot > start ? dot : f.path.length);
+	}
+
+	/** Rename = write the bytes at the new path, then delete the old one. WHY not a route: the web host has PUT and DELETE
+	 *  and nothing else, and a rename that fails halfway leaves the file twice, never zero times. */
+	async renameFile() {
+		const f = this.openFile(), input = this.root.getElementById("rename-input");
+		if (!f || !input) return;
+		const to = input.value.trim();
+		if (!to || to === f.path) return this.showFile();
+		if (this.filesData.files.some((x) => x.host === f.host && x.path === to)) return this.say("fresult", `${esc(to)} already exists here. Pick another name, or delete it first.`, "warn");
+		this.say("fresult", "Renaming…");
+		try {
+			const res = await fetch(this.fileUrl(f), { credentials: "same-origin" });
+			if (!res.ok) throw new ViewError(res.status, null, `Could not read ${f.path} (HTTP ${res.status}).`);
+			await this.webWrite("PUT", to, await res.blob());
+			this.fileSel = { host: f.host, path: to };
+			let left = "";
+			try { await this.webWrite("DELETE", f.path); } catch (err) { left = `The copy at ${esc(to)} is made, but the old ${esc(f.path)} could not be removed: ${esc(err.message)}`; }
+			await this.reloadFilesNow();
+			this.afterFiles();
+			this.say("fresult", left || `Renamed to ${esc(to)}.`, left ? "warn" : "info");
+			this.refresh();
+		} catch (err) { this.say("fresult", esc(err.message), "error"); }
+	}
+
+	askDelete() {
+		const f = this.openFile();
+		if (f) this.say("fresult", `<span>Delete ${esc(f.path)}? It stays in Deleted files for 30 days.</span> <button class="primary" data-act="delete-confirm">Delete</button> <button data-act="delete-cancel">Cancel</button>`, "warn");
+	}
+
+	async deleteFile() {
+		const f = this.openFile();
+		if (!f) return;
+		this.say("fresult", "Deleting…");
+		try {
+			await this.webWrite("DELETE", f.path);
+			this.fileSel = null;
+			this.deletedFiles = null;
+			this.events = null;
+			await this.reloadFilesNow();
+			this.showFile();
+			this.say("fnote", `Deleted ${esc(f.path)}. It stays in Deleted files for 30 days.`);
+			this.refresh();
+		} catch (err) { this.say("fresult", esc(err.message), "error"); }
+	}
+
+	/** Dragging files over the Files tab (the owner's): the whole tab is the drop target. */
+	onDrag(e) {
+		if (this.view !== "files" || !this.isOwner || !this.isPanelOpen()) return;
+		const view = this.root.getElementById("fview");
+		if (!view || ![...(e.dataTransfer ? e.dataTransfer.types : [])].includes("Files")) return;
+		e.preventDefault();
+		if (e.type === "dragenter" || e.type === "dragover") view.classList.add("dropping");
+		else if (e.type === "dragleave") { if (!e.relatedTarget || !view.contains(e.relatedTarget)) view.classList.remove("dropping"); }
+		else { view.classList.remove("dropping"); this.upload(e.dataTransfer.files); }
+	}
+
+	/** Switches the folder the tab shows: the element's `project` attribute, so every tab follows. */
+	switchProject(project) {
+		this.switching = true;
+		this.setAttribute("project", project);
+		this.switching = false;
+		this.events = null;
+		this.deletedFiles = null;
+		this.picked.clear();
+		this.fileQuery = "";
+		this.dispatchEvent(new CustomEvent("folder-sync:project", { detail: { project }, bubbles: true, composed: true }));
+		this.renderBody();
 	}
 
 	// Storage: what is in this account (accounts/src/storage.ts, GET <base>/v1/usage/breakdown). One calm answer, the bar,
@@ -873,6 +1230,7 @@ ${b.partial ? `<p class="note info" data-partial>This account holds more than on
 		if (!t || !this.root.contains(t)) return;
 		const d = t.dataset;
 		if (d.open) return this.open(d.open);
+		if (d.file !== undefined) return this.selectFile(this.fileRows[Number(d.file)]);
 		if (d.host && d.path) return this.open("history", { host: d.host, path: d.path });
 		if (d.filter) {
 			this.filter = d.filter;
@@ -896,6 +1254,16 @@ ${b.partial ? `<p class="note info" data-partial>This account holds more than on
 			case "copy-log": return this.copy(this.logText(), t);
 			case "older": return this.loadOlder().catch((err) => { this.root.getElementById("log").insertAdjacentHTML("beforeend", this.errorHtml(err)); });
 			case "pick-file": this.file = null; return this.renderBody();
+			case "upload": return this.root.getElementById("upload-input").click();
+			case "files-back": this.fileSel = null; return this.showFile();
+			case "file-history": return this.open("history", { host: this.fileSel.host, path: this.fileSel.path });
+			case "file-link": return this.copy(this.fileLink(this.fileSel), t);
+			case "file-rename": return this.renameForm();
+			case "rename-save": return this.renameFile();
+			case "rename-cancel": return this.showFile();
+			case "file-delete": return this.askDelete();
+			case "delete-cancel": return this.say("fresult", "");
+			case "delete-confirm": return this.deleteFile();
 			case "storage-refresh": return this.renderBody();
 			case "copy-version": return this.shownText !== null && this.copy(this.shownText, t);
 			case "restore-version": return this.restore([{ host: this.file.host, path: this.file.path, version: this.selected }]);
@@ -907,6 +1275,10 @@ ${b.partial ? `<p class="note info" data-partial>This account holds more than on
 	}
 
 	onInput(e) {
+		if (e.target.id === "fquery") {
+			this.fileQuery = e.target.value;
+			return this.renderFilesList();
+		}
 		if (e.target.id !== "search") return;
 		this.query = e.target.value;
 		this.root.getElementById("log").innerHTML = this.logHtml();
@@ -914,6 +1286,9 @@ ${b.partial ? `<p class="note info" data-partial>This account holds more than on
 
 	onChange(e) {
 		const t = e.target;
+		if (t.id === "fsort") { this.fileSort = t.value; return this.renderFilesList(); }
+		if (t.id === "fproject") return this.switchProject(t.value);
+		if (t.id === "upload-input") { const picked = [...t.files]; t.value = ""; return this.upload(picked); }
 		if (t.id === "changes") { this.showChanges = t.checked; this.bodyTicket++; return this.afterHistory(); }
 		if (t.id === "pick-all") {
 			for (const f of this.deletedFiles.files) t.checked ? this.picked.add(keyOf(f.host, f.path)) : this.picked.delete(keyOf(f.host, f.path));
@@ -950,8 +1325,18 @@ ${b.partial ? `<p class="note info" data-partial>This account holds more than on
 			items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length].focus();
 			return e.preventDefault();
 		}
+		if (t.id === "rename-input" && (e.key === "Enter" || e.key === "Escape")) {
+			e.key === "Enter" ? this.renameFile() : this.showFile();
+			return e.preventDefault();
+		}
+		// the file list: arrows move between files, like the menu's
+		if (t.classList && t.classList.contains("frow") && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+			const rows = [...this.root.querySelectorAll(".frow")], i = rows.indexOf(t), next = rows[i + (e.key === "ArrowDown" ? 1 : -1)];
+			if (next) next.focus();
+			return e.preventDefault();
+		}
 		if (t.getAttribute && t.getAttribute("role") === "tab" && (e.key === "ArrowRight" || e.key === "ArrowLeft")) {
-			const views = Object.keys(VIEWS), i = views.indexOf(t.dataset.open);
+			const views = Object.keys(VIEWS).filter((v) => { const tab = this.root.getElementById(`tab-${v}`); return tab && !tab.hidden; }), i = views.indexOf(t.dataset.open);
 			const v = views[(i + (e.key === "ArrowRight" ? 1 : -1) + views.length) % views.length];
 			this.open(v).then(() => this.root.getElementById(`tab-${v}`).focus());
 			return e.preventDefault();
