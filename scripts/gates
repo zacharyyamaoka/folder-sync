@@ -10,6 +10,11 @@
 //   scripts/gates --publish            also write /home/bam/folder-sync/reports/status/gates.json (the dev view reads that one)
 //   scripts/gates --collect <dir>      first-sync times the CI matrix jobs uploaded (g11-<os>.json)
 //   scripts/gates --needs <file.json>  the workflow's `toJSON(needs)`, so G4 reads this very run
+//   scripts/gates --os-results <dir>   the gates-<os>.json files the three OS jobs uploaded (a downloaded artifact directory):
+//                                      G4 passes only when linux, macos and windows each passed, on this commit
+//   scripts/gates --os-leg <os> --job-status <s> --out <dir>/gates-<os>.json
+//                                      inside one OS's CI job (os: linux|macos|windows): write that leg's file, holding G4 (the job's
+//                                      own result) and G11 (the first-sync time from --collect); the other gates are left out
 //   scripts/gates --list               print the gates and their proofs, run nothing
 //   scripts/gates --no-gh              do not ask GitHub for the CI matrix and the installer smoke
 //
@@ -31,7 +36,7 @@ function arg(name) {
 const flag = (name) => process.argv.includes(name);
 
 for (const a of process.argv.slice(2)) {
-  if (a.startsWith('--') && !['--profile', '--only', '--with-web', '--publish', '--collect', '--needs', '--list', '--no-gh', '--out', '--seed', '--help'].includes(a)) {
+  if (a.startsWith('--') && !['--profile', '--only', '--with-web', '--publish', '--collect', '--needs', '--os-results', '--os-leg', '--job-status', '--list', '--no-gh', '--out', '--seed', '--help'].includes(a)) {
     console.error(`gates: unknown option ${a} (see the top of scripts/gates)`);
     process.exit(2);
   }
@@ -43,7 +48,11 @@ if (flag('--help')) {
 
 const profile = arg('--profile') || 'ci';
 if (!['smoke', 'ci', 'long'].includes(profile)) { console.error('gates: --profile is smoke, ci or long'); process.exit(2); }
-const only = arg('--only') ? arg('--only').split(',').map((s) => s.trim().toUpperCase()) : null;
+const osLeg = arg('--os-leg');
+if (osLeg && !lib.LEGS.includes(osLeg)) { console.error(`gates: --os-leg is one of ${lib.LEGS.join(', ')}`); process.exit(2); }
+if (osLeg && !arg('--out')) { console.error('gates: --os-leg needs --out <dir>/gates-<os>.json'); process.exit(2); }
+// WHY a leg is only G4 and G11: they are the two that differ per OS; the other gates run once, on Linux, in the gates job
+const only = osLeg ? ['G4', 'G11'] : arg('--only') ? arg('--only').split(',').map((s) => s.trim().toUpperCase()) : null;
 if (only && only.some((id) => !lib.GATE_IDS.includes(id))) { console.error(`gates: --only takes ids G1..G12, got ${arg('--only')}`); process.exit(2); }
 
 const outFile = path.resolve(arg('--out') || path.join(REPO, 'reports', 'status', 'gates.json'));
@@ -59,7 +68,8 @@ const pathEnv = process.env.PATH + path.delimiter + path.dirname(goBin);
 const ctx = {
   profile, soakProfile: profile, soakSeed: arg('--seed') || process.env.FOLDER_SYNC_SOAK_SEED || '1', outDir,
   branch: git('rev-parse', '--abbrev-ref', 'HEAD'), defaultBranch: 'main', sha,
-  withWeb: flag('--with-web'), noGh: flag('--no-gh'), collect: arg('--collect'),
+  withWeb: flag('--with-web'), noGh: flag('--no-gh'), collect: arg('--collect'), osResults: arg('--os-results'),
+  leg: osLeg ? { os: osLeg, jobStatus: arg('--job-status') || 'unknown', arch: os.arch() === 'x64' ? 'amd64' : os.arch(), runner: process.env.RUNNER_NAME || os.hostname() } : null,
   needs: arg('--needs') ? JSON.parse(fs.readFileSync(arg('--needs'), 'utf8')) : null,
 };
 
@@ -162,7 +172,7 @@ for (const gate of gates) {
 
 const doc = {
   schema: lib.SCHEMA, run_at: new Date().toISOString(), code_sha: sha + (dirty ? '+dirty' : ''), branch: ctx.branch,
-  profile, host: `${os.platform()}/${os.arch()}`, gates: out,
+  profile, host: `${os.platform()}/${os.arch()}`, ...(ctx.leg ? { leg: ctx.leg } : {}), gates: out,
 };
 const problems = lib.validate(doc);
 if (problems.length) { console.error(`gates: the document I built is invalid:\n  ${problems.join('\n  ')}`); process.exit(1); }

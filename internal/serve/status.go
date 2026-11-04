@@ -502,7 +502,7 @@ func (s *Server) listWaiting(f folder) {
 	}
 	defer p.Close()
 	prefix := p.Root + "_requests/" + p.Config.Project + "/"
-	listed, err := p.S3.List(p.Config.Bucket, prefix, "")
+	listed, err := p.Objects().List(p.Config.Bucket, prefix, "")
 	if err != nil {
 		return
 	}
@@ -520,7 +520,7 @@ func (s *Server) listWaiting(f folder) {
 		if seen, ok := before[obj.Key]; ok && seen.etag == obj.ETag {
 			read[obj.Key] = seen
 		} else {
-			got, err := p.S3.GetIfNoneMatch(p.Config.Bucket, obj.Key, "")
+			got, err := p.Objects().GetIfNoneMatch(p.Config.Bucket, obj.Key, "")
 			if err != nil {
 				return
 			}

@@ -25,6 +25,7 @@ import (
 	"folder-sync/internal/manifest"
 	"folder-sync/internal/rclone"
 	"folder-sync/internal/s3"
+	"folder-sync/internal/store"
 	"folder-sync/internal/trace"
 )
 
@@ -108,6 +109,14 @@ type Project struct {
 	Refresh  func() (creds.Creds, error) // the credentials to use now; Round calls it first
 	Rclone   rclone.Runner
 	S3       *s3.Client
+	// Store answers the engine's own object calls for a store that is not plain R2: a directory (file://), or an S3
+	// client guarded for what its provider lacks (docs/STORAGE.md). Nil means S3 itself; use Objects.
+	Store store.Objects
+	Caps  store.Capabilities // what the store's conditional calls do (measured for s3:// and gs://; all for R2 and file://)
+	// capsKnown: Caps is settled (probed or read from store-caps.json), not the cautious guess of a store that was unreachable.
+	capsKnown bool
+	// capsOverride is FOLDER_SYNC_STORE_CAPS: the capabilities declared instead of probed ("" = probe).
+	capsOverride string
 	StateDir string
 	Log      io.Writer // round log (~/.folder-sync/logs/<key>.log)
 	Out      io.Writer // what the user sees
@@ -116,6 +125,9 @@ type Project struct {
 	// over its storage quota, docs/peps/0003 §3.7), as job (an id kept until the answer comes), from the manifest at
 	// fromSeq; the server answers the manifest it built. Nil when not signed in.
 	RemoteDelete func(ctx context.Context, job string, fromSeq int64, paths []string) (DeleteAnswer, error)
+	// SharedCommit sends a commit to the folder's shared tree through the accounts server (docs/peps/0010 §5); nil when not
+	// signed in. A folder that is shared needs it to push: the tree has one writer, the folder's Durable Object.
+	SharedCommit func(ctx context.Context, request SharedRequest) (SharedAnswer, error)
 	Trace    *trace.Writer // FOLDER_SYNC_TRACE: step timings; nil = off
 
 	// reportedSkips are the names last round already reported, so --watch says each once.
@@ -126,6 +138,9 @@ type Project struct {
 	restoring map[string]restoreMark
 	// behind is set by a pull that did not apply a peer's latest manifest (this round is not "synced").
 	behind bool
+	// shared is shared.json, loaded once per round (shared.go); sharedDirty says it was changed since it was saved.
+	shared      *sharedState
+	sharedDirty bool
 }
 
 // Open loads everything a round needs for the folder.
@@ -143,6 +158,7 @@ func Open(folder string, l layout.Layout, getenv func(string) string, rcloneBin 
 		return nil, err
 	}
 	resolver := creds.NewResolver(l.Credentials, l.Session, getenv)
+	resolver.Store = cfg.StoreSpec()
 	c, err := resolver.Current()
 	if err != nil {
 		return nil, err
@@ -171,12 +187,102 @@ func Open(folder string, l layout.Layout, getenv func(string) string, rcloneBin 
 		return nil, err
 	}
 	p.Log = logFile
-	p.Rclone = rclone.Runner{Bin: rcloneBin, Layout: l, Creds: c, Log: logFile, Debug: getenv("FOLDER_SYNC_DEBUG") != ""}
+	p.Rclone = rclone.Runner{Bin: rcloneBin, Layout: l, Creds: c, Store: cfg.StoreSpec(), Log: logFile, Debug: getenv("FOLDER_SYNC_DEBUG") != ""}
 	p.Trace = trace.Open(getenv(trace.Env))
 	p.Rclone.Trace = p.Trace
 	p.S3 = &s3.Client{}
+	p.capsOverride = getenv("FOLDER_SYNC_STORE_CAPS")
 	p.useCreds(c)
+	p.openObjects()
 	return p, nil
+}
+
+// Objects is what answers the engine's own object calls: the store when one is set, else the S3 client (nil when neither).
+// WHY an accessor: tests and the R2 path set S3 alone, and every call site reads the same way.
+func (p *Project) Objects() store.Objects {
+	if p.Store != nil {
+		return p.Store
+	}
+	if p.S3 != nil {
+		return p.S3
+	}
+	return nil
+}
+
+// openObjects picks the object calls for the folder's store. A file store is a directory. R2 is trusted as it always
+// was. An s3:// or gs:// store is probed once for the four conditional calls the engine leans on (store.Probe), the answer
+// kept in store-caps.json, and wrapped so a call the provider ignores is checked by the engine instead.
+// WHY not probe R2: its behaviour is the baseline every PEP was written against; a probe would only add requests.
+func (p *Project) openObjects() {
+	spec := p.Config.StoreSpec()
+	switch spec.Kind {
+	case store.File:
+		p.Store, p.Caps, p.capsKnown = store.NewFile(spec), store.AllCaps(), true
+	case store.S3, store.GS:
+		p.Caps, p.capsKnown = store.Capabilities{}, false
+		p.Store = store.Guard(p.S3, p.Caps)
+		p.resolveCaps()
+	default:
+		p.Caps, p.capsKnown = store.AllCaps(), true
+	}
+}
+
+// resolveCaps settles Caps for an s3:// or gs:// store: the cache, else a probe. A store that cannot be reached leaves
+// the cautious answer (every call checked by the engine) and is asked again at the next round.
+func (p *Project) resolveCaps() {
+	spec := p.Config.StoreSpec()
+	if p.capsKnown || (spec.Kind != store.S3 && spec.Kind != store.GS) {
+		return
+	}
+	if p.capsOverride != "" {
+		caps, err := store.ParseCaps(p.capsOverride)
+		if err != nil {
+			p.say("store: FOLDER_SYNC_STORE_CAPS: %v; probing instead", err)
+		} else {
+			p.Caps, p.capsKnown = caps, true
+			p.Store = store.Guard(p.S3, caps)
+			return
+		}
+	}
+	key := spec.String() + "|" + p.Creds.Endpoint + "|" + p.Root
+	cache := filepath.Join(p.StateDir, "store-caps.json")
+	caps, ok := store.LoadCaps(cache, key)
+	if !ok {
+		var err error
+		if caps, err = store.Probe(p.S3, p.Config.Bucket, p.Root); err != nil {
+			p.say("store: could not probe %s (%v); every conditional call is checked by folder-sync until it can", spec.String(), err)
+			return
+		}
+		if err := store.SaveCaps(cache, key, caps); err != nil {
+			p.say("store: could not save %s: %v", cache, err)
+		}
+		p.say("store: %s honours %s", spec.String(), DescribeCaps(caps))
+	}
+	p.Caps, p.capsKnown = caps, true
+	p.Store = store.Guard(p.S3, caps)
+}
+
+// DescribeCaps is the capabilities in a sentence: what the store honours, and what folder-sync checks itself.
+func DescribeCaps(c store.Capabilities) string {
+	var yes, no []string
+	for _, f := range []struct {
+		name string
+		on   bool
+	}{{"create-once", c.CreateOnce}, {"put-if-match", c.PutIfMatch}, {"copy-if-match", c.CopyIfMatch}, {"get-if-match", c.GetIfMatch}} {
+		if f.on {
+			yes = append(yes, f.name)
+		} else {
+			no = append(no, f.name)
+		}
+	}
+	out := strings.Join(yes, ", ")
+	if out == "" {
+		out = "none of the conditional calls"
+	}
+	if len(no) > 0 {
+		out += "; folder-sync checks " + strings.Join(no, ", ") + " itself"
+	}
+	return out
 }
 
 // CheckBucket refuses a bucket other than the one the credentials are bound to.
@@ -217,6 +323,7 @@ func (p *Project) refreshCreds() error {
 		return rootError(registered, c.Prefix)
 	}
 	p.useCreds(c)
+	p.resolveCaps()
 	return nil
 }
 

@@ -7,6 +7,9 @@
 //
 //   node bench/cost/cost.mjs table      the markdown table docs/PRICES.md quotes
 //   node bench/cost/cost.mjs points     the points (not written)
+//   node bench/cost/cost.mjs store URL  what a folder on that store URL costs (r2://, s3://, gs://, file://): the provider is read from the URL
+// The store a folder is on is FOLDER_SYNC_STORE (its .folder-sync.toml's store URL; absent = r2://). Every provider still
+// gets its point, so the dev view can compare; the point of the folder's own provider carries labels.is_store_provider.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -14,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { makePoint, sourceOf, stampOf, readSeries, DEFAULT_OUT, codeSha } from "../kpi/lib.mjs";
 import { loadCounters } from "../kpi/ops.mjs";
 import { costSummary, PROFILES } from "./model.mjs";
+import { providerOfStore, storeCostLine, storeLabel } from "./store.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const PROVIDERS = ["r2", "s3", "gcs", "b2", "wasabi"];
@@ -59,8 +63,10 @@ export function latestH(series, slice) {
 	return mine[0] ? { h: mine[0].value, t: mine[0].t } : null;
 }
 
-export function costPoints({ prices = loadPrices(), counters, series, usage = null, folders = null, logs = null, at = new Date(), code = codeSha() }) {
+export function costPoints({ prices = loadPrices(), counters, series, usage = null, folders = null, logs = null, at = new Date(), code = codeSha(), store = process.env.FOLDER_SYNC_STORE ?? "" }) {
 	const t = stampOf(at);
+	const storeProvider = providerOfStore(store);
+	const ofStore = (provider) => ({ store: storeLabel(store), is_store_provider: provider === storeProvider, ...(storeProvider ? {} : { store_unpriced: true }) });
 	const hour = at.toISOString().slice(0, 13).replace(/[-:]/g, "");
 	const out = [];
 	if (!counters) {
@@ -85,7 +91,7 @@ export function costPoints({ prices = loadPrices(), counters, series, usage = nu
 			// WHY gate 1.0 when no H was measured: an unmeasured H must not make storage look free; 1.0 is the objective's ceiling
 			const hUsed = h ? h.h : 1.0;
 			const c = costSummary({ provider, prices, counters, profile, h: hUsed });
-			const labels = { provider_name: prices.providers[provider].name, h: hUsed, h_from: h ? `${hFrom}, ${h.t}` : "the 1.0 gate (no H measured yet)", live_gb: profile.live_gb, machines: profile.machines, changes_per_day: profile.changes_per_day, change_kb: profile.change_kb, lower_bound: c.lower_bound, min_monthly_applied: c.min_applied, counters_measured_at: counters.measured_at, prices_accessed: prices.date_accessed };
+			const labels = { ...ofStore(provider), provider_name: prices.providers[provider].name, h: hUsed, h_from: h ? `${hFrom}, ${h.t}` : "the 1.0 gate (no H measured yet)", live_gb: profile.live_gb, machines: profile.machines, changes_per_day: profile.changes_per_day, change_kb: profile.change_kb, lower_bound: c.lower_bound, min_monthly_applied: c.min_applied, counters_measured_at: counters.measured_at, prices_accessed: prices.date_accessed };
 			out.push(makePoint({ kpi: "cost_per_gb_month_usd", value: c.per_gb_usd, n: 1, t, source, slice, labels: { ...labels, storage_usd: c.storage_usd, ops_usd: c.ops_usd, egress_usd: c.egress_usd, per: "live GB" } }));
 			out.push(makePoint({ kpi: "cost_per_person_month_usd", value: c.person_usd, n: 1, t, source, slice, labels: { ...labels, provider_usd: c.total_usd, platform_usd: c.platform.usd, platform_base_usd: c.platform.base_usd, target: 0.5 } }));
 		}
@@ -107,7 +113,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
 	const verb = process.argv[2] || "table";
 	const counters = loadCounters();
 	const series = readSeries(DEFAULT_OUT);
-	if (verb === "points") {
+	if (verb === "store") {
+		if (!counters) throw new Error("no counters: run node bench/kpi/ops.mjs first");
+		const hGate = latestH(series, { env: "test" })?.h ?? 1;
+		console.log(storeCostLine({ url: process.argv[3] ?? process.env.FOLDER_SYNC_STORE ?? "", prices: loadPrices(), counters, h: hGate }));
+	} else if (verb === "points") {
 		console.log(costPoints({ counters, series }).map((p) => JSON.stringify(p)).join("\n"));
 	} else {
 		if (!counters) throw new Error("no counters: run node bench/kpi/ops.mjs first");

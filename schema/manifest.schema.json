@@ -19,6 +19,15 @@
     "files": {
       "type": "array",
       "items": { "$ref": "#/$defs/entry" }
+    },
+    "shared": {
+      "description": "Present on the shared tree's host only (docs/peps/0010): the gitignore patterns of the files that stay on each machine's own host. A reader that ignores it shows the files under a host named \"shared\".",
+      "type": "object",
+      "required": ["private"],
+      "additionalProperties": true,
+      "properties": {
+        "private": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 256 } }
+      }
     }
   },
   "$defs": {

@@ -30,7 +30,7 @@ var (
 
 // versionObjects lists every object under one path's history on host, in any form, oldest first (one delimiter listing).
 func (p *Project) versionObjects(host, path string) ([]history.Version, error) {
-	listed, err := p.S3.List(p.Config.Bucket, history.PathPrefix(p.Root, p.Config.Project, host, path), "/")
+	listed, err := p.Objects().List(p.Config.Bucket, history.PathPrefix(p.Root, p.Config.Project, host, path), "/")
 	if err != nil {
 		return nil, err
 	}
@@ -89,12 +89,12 @@ func (p *Project) fetchForm(ctx context.Context, host, path string, v history.Ve
 	case history.KindZst:
 		tmp := dest + ".zst"
 		defer os.Remove(tmp)
-		if err := notFound(p.S3.GetToFile(bucket, v.Key, tmp)); err != nil {
+		if err := notFound(p.Objects().GetToFile(bucket, v.Key, tmp)); err != nil {
 			return err
 		}
 		return decodeFile(tmp, dest, -1, v.Size, v.SHA16)
 	case history.KindPrefix:
-		got, err := p.S3.GetIfNoneMatch(bucket, v.Key, "")
+		got, err := p.Objects().GetIfNoneMatch(bucket, v.Key, "")
 		if err != nil {
 			return err
 		}
@@ -112,15 +112,15 @@ func (p *Project) fetchForm(ctx context.Context, host, path string, v history.Ve
 		switch {
 		case !rests:
 			// WHY If-Match: the live file is the only bytes that can move under a pointer
-			err = p.S3.GetRangeToFile(bucket, p.HostPrefix(host)+"/"+path, dest, 0, body.Size-1, liveETag)
+			err = p.Objects().GetRangeToFile(bucket, p.HostPrefix(host)+"/"+path, dest, 0, body.Size-1, liveETag)
 		case anchor.Kind == history.KindZst:
 			tmp := dest + ".zst"
 			defer os.Remove(tmp)
-			if err = p.S3.GetToFile(bucket, anchor.Key, tmp); err == nil {
+			if err = p.Objects().GetToFile(bucket, anchor.Key, tmp); err == nil {
 				err = decodeFile(tmp, dest, body.Size, -1, "")
 			}
 		default:
-			err = p.S3.GetRangeToFile(bucket, anchor.Key, dest, 0, body.Size-1, "")
+			err = p.Objects().GetRangeToFile(bucket, anchor.Key, dest, 0, body.Size-1, "")
 		}
 		if err != nil {
 			return notFound(err)
@@ -134,7 +134,7 @@ func (p *Project) fetchForm(ctx context.Context, host, path string, v history.Ve
 		}
 		return nil
 	}
-	if err := notFound(p.S3.GetToFile(bucket, v.Key, dest)); err != nil {
+	if err := notFound(p.Objects().GetToFile(bucket, v.Key, dest)); err != nil {
 		return err
 	}
 	if v.Unlisted {

@@ -4,12 +4,13 @@
 # fails here, before a release is published.
 #   windows  msiexec /i <msi> /qn, then <name>-setup.exe /S; each is uninstalled before the next so they do not meet
 #   macos    mount the .dmg, copy the .app out, unmount
-# Usage: app/scripts/smoke_install.sh <windows|macos> <bundle dir>      (Git Bash on Windows; bash on macOS)
+#   linux    unpack the .deb with dpkg-deb -x (no root, no maintainer scripts), run the engine it holds
+# Usage: app/scripts/smoke_install.sh <linux|windows|macos> <bundle dir>      (bash; Git Bash on Windows)
 # Success is `folder-sync version` exiting 0 from the installed copy. (`status` exits 1 without an initialised folder, so
 # it says nothing about the install.)
 set -euo pipefail
-os="${1:?usage: smoke_install.sh <windows|macos> <bundle dir>}"
-bundle="${2:?usage: smoke_install.sh <windows|macos> <bundle dir>}"
+os="${1:?usage: smoke_install.sh <linux|windows|macos> <bundle dir>}"
+bundle="${2:?usage: smoke_install.sh <linux|windows|macos> <bundle dir>}"
 bundle="$(cd "$bundle" && pwd)"
 scratch="$(mktemp -d)"
 home="$scratch/home" # WHY: the engine writes ~/.folder-sync; keep the runner's own home clean
@@ -94,6 +95,14 @@ case "$os" in
     ditto "$app" "$scratch/Applications/$(basename "$app")"
     detach
     smoke_engine "dmg ($(basename "$app"))" "$scratch/Applications/$(basename "$app")/Contents/MacOS/folder-sync" ;;
+
+  linux)
+    deb="$(ls "$bundle"/deb/*.deb | head -1)"
+    root="$scratch/root"
+    echo "== DEB: dpkg-deb -x $(basename "$deb")"
+    dpkg-deb -x "$deb" "$root"
+    [[ -f "$root/usr/bin/folder-sync-desktop" ]] || { echo "::error::the .deb holds no /usr/bin/folder-sync-desktop:"; find "$root" -maxdepth 3 | sort; exit 1; }
+    smoke_engine "deb (usr/bin/folder-sync)" "$root/usr/bin/folder-sync" ;;
 
   *) echo "smoke_install.sh: no installer smoke for '$os'" >&2; exit 2 ;;
 esac

@@ -19,7 +19,7 @@ import type { App } from "./apps.ts";
 import { bucketFor, fail, json, READ_TTL_S, session, type Deps, type Env } from "./app.ts";
 import { userRoot } from "./creds.ts";
 import { parseName, parseVersion } from "./history.ts";
-import { overQuota, quotaOf } from "./quota.ts";
+import { overQuota, quotaFor } from "./quota.ts";
 import type { S3Bucket } from "./s3-bucket.ts";
 
 export interface BreakdownEnv {
@@ -303,7 +303,7 @@ export async function storageBreakdown(request: Request, env: Env, deps: Deps, a
 	const names = await namesOf(bucket, root, listed.items);
 	const now = deps.now();
 	const answer = breakdownOf(listed.items, names, now);
-	const quota = quotaOf(env, owner);
+	const quota = await quotaFor(env, deps.store, owner);
 	return json(200, {
 		owner,
 		measured_at: new Date(now).toISOString(),

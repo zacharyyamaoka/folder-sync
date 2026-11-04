@@ -243,3 +243,42 @@ func TestGitignoreStyleRules(t *testing.T) {
 		t.Fatalf("rclone kept\n  %s\ngit keeps\n  %s\nfilters:\n%s", strings.Join(got, "\n  "), strings.Join(want, "\n  "), body)
 	}
 }
+
+// TestCompileOnlyListsWhatGitIgnores: the private files of a shared folder (PEP 0010 §7) are exactly the files git would
+// ignore for the same patterns, listed by the same rclone that applies the ignore rules.
+func TestCompileOnlyListsWhatGitIgnores(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		testtools.Missing(t, "no git")
+	}
+	root := t.TempDir()
+	files := []string{"a.md", "events/2026-11-04.jsonl", "notes/events/x.md", "data/app.sqlite", "keep.sqlite", "secrets.txt", "sub/secrets.txt", "plan.md", "build/out", "src/build"}
+	writeTree(t, root, files)
+	private := []string{"events/", "*.sqlite", "!keep.sqlite", "/secrets.txt", "build/"}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(strings.Join(private, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-c", "init.defaultBranch=main", "init", "-q", root).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	out, err := exec.Command("git", "-C", root, "ls-files", "--others", "--ignored", "--exclude-standard").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			want = append(want, line)
+		}
+	}
+	sort.Strings(want)
+	body, err := CompileOnly(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := listWithRclone(t, root, body); !reflect.DeepEqual(got, want) {
+		t.Fatalf("rclone lists as private\n  %s\ngit ignores\n  %s\nfilters:\n%s", strings.Join(got, "\n  "), strings.Join(want, "\n  "), body)
+	}
+	if len(want) == 0 {
+		t.Fatal("the oracle found no private file: the test proves nothing")
+	}
+}

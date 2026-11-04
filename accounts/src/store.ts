@@ -28,6 +28,10 @@ export interface Store {
 	webHost(owner: string, project: string): Promise<string | null>;
 	/** The folder's web host id: `candidate` if this call made the row, else the one already there. */
 	ensureWebHost(owner: string, project: string, candidate: string, now: string): Promise<string>;
+	/** The folder's shared tree host id (PEP 0010), or null while the folder is not shared. */
+	sharedTree(owner: string, project: string): Promise<string | null>;
+	/** The folder's shared tree id: `candidate` if this call made the row, else the one already there. */
+	ensureSharedTree(owner: string, project: string, candidate: string, now: string): Promise<string>;
 	/** The person's storage as last measured (quota.ts), or null before the first measurement. `history` is the share of
 	 *  it under _history/, _changes/, _requests/ and legacy _trash/ (PEP 0007 §3.5). */
 	usage(owner: string): Promise<{ bytes: number; objects: number; measured_at: string; partial?: boolean; stale?: boolean; history?: { bytes: number; objects: number } } | null>;
@@ -46,6 +50,35 @@ export interface Store {
 	 *  bounded list (judge r2 #2, #4). What a key refresh and a queued web write check last (devices.ts). Absent in a
 	 *  stand-in that cannot revoke. */
 	sessionAlive?(owner: string, sessionId: string, now: number): Promise<boolean>;
+	/** The plan ids of the person's active or trialing subscriptions (the Stripe plugin's `subscription` rows, migration
+	 *  0011): what quota.ts quotaFor turns into a ceiling. Absent in a stand-in with no payments. */
+	activePlans?(owner: string): Promise<string[]>;
+	/** The person's billing state for their page: their Stripe customer id (null before their first checkout) and the
+	 *  subscription worth showing (any but incomplete or canceled), the active ones first. */
+	billing?(owner: string): Promise<BillingRow>;
+	/** The person's own bucket (byo.ts), its secret still sealed; null when they attached none. */
+	byo?(owner: string): Promise<ByoRow | null>;
+	setByo?(row: ByoRow): Promise<void>;
+	removeByo?(owner: string): Promise<boolean>;
+}
+
+/** A person's billing state: see Store.billing. */
+export interface BillingRow {
+	customer: string | null;
+	subscription: { plan: string; status: string; periodEnd: string | null; cancelAtPeriodEnd: boolean } | null;
+}
+
+/** One person's attached bucket, as migration 0012 stores it. `sealed` is byo.ts sealSecret's output for { id, secret }. */
+export interface ByoRow {
+	owner_id: string;
+	endpoint: string;
+	bucket: string;
+	prefix: string;
+	region: string;
+	key_hint: string;
+	sealed: string;
+	created_at: string;
+	updated_at: string;
 }
 
 /** The subset of Cloudflare's D1Database binding used here. */
@@ -107,6 +140,16 @@ export function d1Store(db: D1Like): Store {
 			if (!id) throw new Error("the web host row did not stick");
 			return id;
 		},
+		async sharedTree(owner, project) {
+			return (await one<{ host_id: string }>('SELECT host_id FROM "shared_tree" WHERE owner_id = ? AND project = ?', owner, project))?.host_id ?? null;
+		},
+		async ensureSharedTree(owner, project, candidate, now) {
+			// WHY insert-then-read, as the web host: two shares at once both try; the primary key keeps exactly one tree
+			await run('INSERT INTO "shared_tree" (owner_id, project, host_id, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (owner_id, project) DO NOTHING', owner, project, candidate, now);
+			const id = await store.sharedTree(owner, project);
+			if (!id) throw new Error("the shared tree row did not stick");
+			return id;
+		},
 		async usage(owner) {
 			const row = await one<{ bytes: number; objects: number; measured_at: string; partial: number; stale: number; history_bytes: number; history_objects: number }>('SELECT bytes, objects, measured_at, partial, stale, history_bytes, history_objects FROM "usage" WHERE owner_id = ?', owner);
 			return row ? { bytes: row.bytes, objects: row.objects, measured_at: row.measured_at, partial: !!row.partial, stale: !!row.stale, history: { bytes: row.history_bytes, objects: row.history_objects } } : null;
@@ -144,6 +187,31 @@ export function d1Store(db: D1Like): Store {
 		async sessionAlive(owner, sessionId, now) {
 			const row = await one<{ expiresAt: unknown }>('SELECT "expiresAt" FROM "session" WHERE "id" = ? AND "userId" = ?', sessionId, owner);
 			return !!row && instant(row.expiresAt) > now;
+		},
+		async activePlans(owner) {
+			return (await all<{ plan: string }>('SELECT "plan" FROM "subscription" WHERE "referenceId" = ? AND "status" IN (\'active\', \'trialing\')', owner)).map((r) => r.plan);
+		},
+		async billing(owner) {
+			const customer = (await one<{ customer: string | null }>('SELECT "stripeCustomerId" AS customer FROM "user" WHERE "id" = ?', owner))?.customer ?? null;
+			const row = await one<{ plan: string; status: string; periodEnd: unknown; cancelAtPeriodEnd: number | null }>(
+				'SELECT "plan", "status", "periodEnd", "cancelAtPeriodEnd" FROM "subscription" WHERE "referenceId" = ? AND "status" NOT IN (\'incomplete\', \'incomplete_expired\', \'canceled\') ORDER BY CASE WHEN "status" IN (\'active\', \'trialing\') THEN 0 ELSE 1 END, "periodEnd" DESC LIMIT 1',
+				owner,
+			);
+			const end = row?.periodEnd ? instant(row.periodEnd) : 0;
+			return { customer, subscription: row ? { plan: row.plan, status: row.status, periodEnd: end ? new Date(end).toISOString() : null, cancelAtPeriodEnd: !!row.cancelAtPeriodEnd } : null };
+		},
+		async byo(owner) {
+			return one<ByoRow>('SELECT "owner_id", "endpoint", "bucket", "prefix", "region", "key_hint", "sealed", "created_at", "updated_at" FROM "byo_store" WHERE "owner_id" = ?', owner);
+		},
+		async setByo(row) {
+			await run(
+				'INSERT INTO "byo_store" ("owner_id", "endpoint", "bucket", "prefix", "region", "key_hint", "sealed", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT ("owner_id") DO UPDATE SET "endpoint" = excluded."endpoint", "bucket" = excluded."bucket", "prefix" = excluded."prefix", "region" = excluded."region", "key_hint" = excluded."key_hint", "sealed" = excluded."sealed", "updated_at" = excluded."updated_at"',
+				row.owner_id, row.endpoint, row.bucket, row.prefix, row.region, row.key_hint, row.sealed, row.created_at, row.updated_at,
+			);
+		},
+		async removeByo(owner) {
+			const done = await run('DELETE FROM "byo_store" WHERE "owner_id" = ?', owner);
+			return (done.meta?.changes ?? 0) > 0;
 		},
 	};
 	return store;

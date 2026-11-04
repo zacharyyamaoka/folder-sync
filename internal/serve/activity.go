@@ -276,7 +276,7 @@ func (s *Server) pullEvents(p *syncer.Project, host, name string, q activityQuer
 	listing, ok := s.pulls[prefix]
 	s.mu.Unlock()
 	if !ok || now.Sub(listing.at) >= pullsFor {
-		listed, err := p.S3.List(p.Config.Bucket, prefix, "")
+		listed, err := p.Objects().List(p.Config.Bucket, prefix, "")
 		if err != nil {
 			return nil, false
 		}
@@ -328,7 +328,7 @@ func (s *Server) record(p *syncer.Project, key, host, name string, seq int64, ki
 		return nil, false, false
 	}
 	*reads++
-	got, err := p.S3.GetIfNoneMatch(p.Config.Bucket, key, "")
+	got, err := p.Objects().GetIfNoneMatch(p.Config.Bucket, key, "")
 	if err != nil {
 		return nil, false, false
 	}

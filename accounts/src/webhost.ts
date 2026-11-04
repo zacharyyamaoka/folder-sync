@@ -15,20 +15,23 @@
 // at: every reader (the Go round, readers/worker, readers/python) reads hosts/<host>/<path> and checks its sha256
 // against the manifest; a second key layout would change the bucket contract for all of them.
 //
-// WHY not v1's two-way shared/: it needs the lease, which is not built; the web host needs nothing new from the sync
-// engine and keeps every rule.
+// The shared tree (PEP 0010, shared.ts) is a second host of the same folder with the same single writer: its commits run
+// in this queue, journal through the same Pending (a batch of paths) and settle before anything else runs.
 
 import { checkPath, ContractError, SCHEMA, validateManifest, type Manifest, type ManifestEntry, type R2BucketLike } from "../../readers/worker/src/folder-sync-read.ts";
 import { mint, NotConfigured, userRoot, type CredsEnv } from "./creds.ts";
 import { EVERY_MS, anchorOf, changesKey, historyKey, historyPrefix, keepOnWrite, keyFits, listedObject, parseVersion, trashStampTime, unlistedId, versionId } from "./history.ts";
 import { pruneFolder, type LiveOf } from "./prune.ts";
-import { Measuring, overQuota, quotaOf, usageOf, type QuotaEnv } from "./quota.ts";
+import { commitShared, restoreShared, shareTree, type SharedRequest } from "./shared.ts";
+import { Measuring, overQuota, quotaFor, usageOf, type QuotaEnv } from "./quota.ts";
+import type { FeatureEnv } from "./features.ts";
+import type { PlanEnv } from "./plans.ts";
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store } from "./store.ts";
 
 export const WEB_HOST_NAME = "web";
 /** How many times a manifest write starts over after a 412 before giving up. */
-const ATTEMPTS = 6;
+export const ATTEMPTS = 6;
 
 export interface WritableBucket extends R2BucketLike {
 	put(key: string, body: Uint8Array, options?: { ifMatch?: string; ifNoneMatch?: "*"; contentType?: string }): Promise<{ ok: boolean; status: number; etag: string }>;
@@ -51,6 +54,16 @@ export class BadBody extends Error {}
 export class Recovering extends Error {}
 /** The write would take the person past their quota (quota.ts; answered 403). */
 export class OverQuota extends Error {}
+/** A refusal with its own answer: the shared tree's 409s and 412 (PEP 0010; docs/API.md). */
+export class Refusal extends Error {
+	readonly status: number;
+	readonly code: string;
+	constructor(status: number, code: string, why: string) {
+		super(why);
+		this.status = status;
+		this.code = code;
+	}
+}
 
 /** A change's cost to the person's quota: admitted before any byte moves, charged once the manifest takes it. Both
  *  run in the folder's queue (review r2 #6), so two writes are never admitted against the same figure. */
@@ -124,23 +137,28 @@ export function trashStamp(now: number): string {
 	return `${stamp(now)}-${String(new Date(now).getUTCMilliseconds()).padStart(3, "0")}-${nonce}`;
 }
 
-async function sha256Hex(data: Uint8Array): Promise<string> {
+export async function sha256Hex(data: Uint8Array): Promise<string> {
 	const digest = await crypto.subtle.digest("SHA-256", data);
 	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** Where a host of a folder lives; `name` is what its manifest calls it (absent: the web host). */
 export interface Where {
 	root: string;
 	project: string;
 	hostId: string;
+	/** What the host's manifest calls it: "web" when absent, "shared" for the shared tree. */
+	name?: string;
 }
+/** The shared tree's host_name (PEP 0010 §4). */
+export const SHARED_NAME = "shared";
 
-function hostKey(w: Where, path: string): string {
+export function hostKey(w: Where, path: string): string {
 	return `${w.root}${w.project}/hosts/${w.hostId}/${path}`;
 }
 
 /** Where the version `old` of `path` goes when it leaves: its history key (PEP 0007). */
-function keptKey(w: Where, path: string, old: ManifestEntry): string {
+export function keptKey(w: Where, path: string, old: ManifestEntry): string {
 	if (!keyFits(w.root, w.project, w.hostId, path)) throw new BadPath("the path is too long for its versions to be kept (a history key is at most 1,024 bytes)");
 	return historyKey(w.root, w.project, w.hostId, path, versionId(old.written_at, old.sha256));
 }
@@ -149,7 +167,7 @@ function keptKey(w: Where, path: string, old: ManifestEntry): string {
  *  object_etag when the manifest has one (CONTRACT "Deletions and history"). A 412 means the object is not the listed
  *  version: it is still copied, as <its LastModified>_unlisted, so nothing is lost or mislabelled, and this change
  *  stops (its undo would put back the wrong bytes). False when there is nothing to copy. */
-async function copyOut(bucket: WritableBucket, w: Where, path: string, old: ManifestEntry, to: string): Promise<boolean> {
+export async function copyOut(bucket: WritableBucket, w: Where, path: string, old: ManifestEntry, to: string): Promise<boolean> {
 	if (!old.object_etag || !bucket.copyIf || /^0+$/.test(old.object_etag)) return bucket.copy(hostKey(w, path), to);
 	const copied = await bucket.copyIf(hostKey(w, path), to, old.object_etag);
 	if (copied === "copied") return true;
@@ -170,7 +188,7 @@ export interface ChangeRecord {
 	host_name: string;
 	seq: number;
 	at: string;
-	by: "web" | "server";
+	by: "web" | "server" | "shared";
 	via?: string;
 	events: Record<string, unknown>[];
 }
@@ -196,13 +214,13 @@ export async function putRecord(bucket: WritableBucket, key: string, record: Cha
 export type Recorder = (key: string, record: ChangeRecord) => Promise<void>;
 
 /** `was` of a change record's event: the version that left and where it went. */
-function wasOf(old: ManifestEntry, kept: string | null, why?: string): Record<string, unknown> {
+export function wasOf(old: ManifestEntry, kept: string | null, why?: string): Record<string, unknown> {
 	return { sha256: old.sha256, size: old.size, written_at: old.written_at, kept, ...(kept === null ? { why } : {}) };
 }
 
 /** The web host's manifest, the ETag it was read with and its size in bytes; an empty seq-0 manifest (size 0) before
  *  the first write. */
-async function readManifest(bucket: WritableBucket, w: Where): Promise<{ manifest: Manifest; etag: string | null; size: number }> {
+export async function readManifest(bucket: WritableBucket, w: Where): Promise<{ manifest: Manifest; etag: string | null; size: number }> {
 	const object = await bucket.get(hostKey(w, "manifest.json"));
 	if (!object) {
 		return { manifest: { schema: SCHEMA, project: w.project, host_id: w.hostId, host_name: WEB_HOST_NAME, seq: 0, generated_at: "", files: [] }, etag: null, size: 0 };
@@ -213,23 +231,25 @@ async function readManifest(bucket: WritableBucket, w: Where): Promise<{ manifes
 	return { manifest, etag: object.etag, size: data.byteLength };
 }
 
-function manifestBytes(manifest: Manifest): Uint8Array {
+export function manifestBytes(manifest: Manifest): Uint8Array {
 	return new TextEncoder().encode(`${JSON.stringify(manifest, null, 2)}\n`);
 }
 
-async function writeManifest(bucket: WritableBucket, w: Where, manifest: Manifest, etag: string | null): Promise<boolean> {
+export async function writeManifest(bucket: WritableBucket, w: Where, manifest: Manifest, etag: string | null): Promise<boolean> {
 	const body = manifestBytes(manifest);
 	const answer = await bucket.put(hostKey(w, "manifest.json"), body, etag ? { ifMatch: etag, contentType: "application/json" } : { ifNoneMatch: "*", contentType: "application/json" });
 	return answer.ok;
 }
 
-function next(manifest: Manifest, files: ManifestEntry[], now: number): Manifest {
+export function next(manifest: Manifest, files: ManifestEntry[], now: number): Manifest {
 	const iso = new Date(now).toISOString();
 	return {
 		schema: SCHEMA,
 		project: manifest.project,
 		host_id: manifest.host_id,
-		host_name: WEB_HOST_NAME,
+		// WHY the manifest's own name: the shared tree is a host too (PEP 0010), named "shared" at share time
+		host_name: manifest.host_name || WEB_HOST_NAME,
+		...(manifest.shared ? { shared: manifest.shared } : {}),
 		seq: manifest.seq + 1,
 		generated_at: iso,
 		// sorted by path, byte order as folder-sync's Go writer sorts them
@@ -250,6 +270,11 @@ export interface Pending {
 	restoreSize?: number | null;
 	/** What the manifest lists once the change commits: the new bytes' sha256, or null for a delete. */
 	sha256: string | null;
+	/** The rest of a batch (PEP 0010: one manifest write for a shared commit's paths): each is settled on its own, and
+	 *  the manifest takes all of them or none. Absent for a web-host write. */
+	more?: Pending[];
+	/** Objects to remove if the batch did not commit (a merge's copy of the device's own bytes). */
+	discard?: string[];
 }
 
 /** The paths a host's manifest lists, or null when it cannot be read (then nothing is concluded from it). */
@@ -275,6 +300,9 @@ export interface Journal {
 	 *  within the last history_every (5 minutes). WHY no listing: the web host is the only writer of its history. */
 	recent?(): Promise<Record<string, number>>;
 	kept?(path: string, leftAt: number): Promise<void>;
+	/** The paths whose newest kept version is a pointer (PEP 0009 §4.3, the pin): only the shared tree writes pointers. */
+	pointers?(): Promise<Set<string>>;
+	pointed?(path: string, on: boolean): Promise<void>;
 	/** Where a committed change's record waits to be written (the folder's object); absent, it is written at once. */
 	record?: Recorder;
 }
@@ -287,6 +315,7 @@ export function remember(recent: Record<string, number>, path: string, at: numbe
 export function memoryJournal(): Journal {
 	let pending: Pending | null = null;
 	let recent: Record<string, number> = {};
+	const pointers = new Set<string>();
 	return {
 		get: async () => pending,
 		put: async (p) => { pending = p; },
@@ -294,6 +323,8 @@ export function memoryJournal(): Journal {
 		stray: async () => undefined,
 		recent: async () => recent,
 		kept: async (path, at) => { recent = remember(recent, path, at); },
+		pointers: async () => new Set(pointers),
+		pointed: async (path, on) => { if (on) pointers.add(path); else pointers.delete(path); },
 	};
 }
 
@@ -308,27 +339,45 @@ function ownerOf(root: string): string {
 export async function settle(bucket: WritableBucket, w: Where, journal: Journal): Promise<void> {
 	const pending = await journal.get();
 	if (!pending) return;
-	const { manifest } = await readManifest(bucket, w);
-	const entry = manifest.files.find((e) => e.path === pending.path);
-	const committed = pending.sha256 === null ? !entry : entry?.sha256 === pending.sha256;
-	if (!committed) {
-		if (!entry) await bucket.delete(hostKey(w, pending.path));
-		else if (!(await holds(bucket, hostKey(w, pending.path), entry.sha256))) {
+	// WHY the pending's own host, not the caller's: the folder's object also writes the shared tree, and a read that
+	// settles "the web host" may find the shared tree's cut-off commit in the journal (PEP 0010)
+	const where = pending.where ?? w;
+	const { manifest } = await readManifest(bucket, where);
+	const committed = (item: Pending): boolean => {
+		const entry = manifest.files.find((e) => e.path === item.path);
+		return item.sha256 === null ? !entry : entry?.sha256 === item.sha256;
+	};
+	const items = [pending, ...(pending.more ?? [])];
+	for (const item of items) {
+		if (committed(item)) continue;
+		const entry = manifest.files.find((e) => e.path === item.path);
+		if (!entry) await bucket.delete(hostKey(where, item.path));
+		else if (!(await holds(bucket, hostKey(where, item.path), entry.sha256))) {
 			// WHY checked, not assumed (review r4 #2): a COPY from a backup that is gone copies nothing, and the journal
 			// is the only record of what to put back; it stays until the file is verified to hold the manifest's bytes
-			if (!pending.restore || entry.sha256 !== pending.restoreSha256 || !(await bucket.copy(pending.restore, hostKey(w, pending.path)))) {
-				throw new Error(`the backup of ${JSON.stringify(pending.path)} is not there to put back`);
+			if (!item.restore || entry.sha256 !== item.restoreSha256 || !(await bucket.copy(item.restore, hostKey(where, item.path)))) {
+				throw new Error(`the backup of ${JSON.stringify(item.path)} is not there to put back`);
 			}
-			if (!(await holds(bucket, hostKey(w, pending.path), entry.sha256))) throw new Error(`${JSON.stringify(pending.path)} does not match its manifest after the restore`);
+			if (!(await holds(bucket, hostKey(where, item.path), entry.sha256))) throw new Error(`${JSON.stringify(item.path)} does not match its manifest after the restore`);
 		}
 		// WHY (review r3 #6): the history copy was taken for this change alone; undone, it is a second copy of what is
 		// live, which the quota never charged. WHY a stray when its delete fails (review r4 #7): it is charged until the
 		// folder's alarm removes it, so the usage never counts less than what is stored
-		if (pending.restore) {
+		if (item.restore) {
 			try {
-				await bucket.delete(pending.restore);
+				await bucket.delete(item.restore);
 			} catch {
-				await journal.stray(w.root, pending.restore, pending.restoreSize ?? 0);
+				await journal.stray(where.root, item.restore, item.restoreSize ?? 0);
+			}
+		}
+	}
+	// a batch's other objects (the device's own bytes kept beside a merge) go only if nothing of it committed
+	if (pending.discard && !items.some(committed)) {
+		for (const key of pending.discard) {
+			try {
+				await bucket.delete(key);
+			} catch {
+				await journal.stray(where.root, key, 0);
 			}
 		}
 	}
@@ -342,7 +391,7 @@ async function holds(bucket: WritableBucket, key: string, sha256: string): Promi
 }
 
 /** Settles any cut-off change first; one that cannot be undone yet stops this operation (Recovering). */
-async function recover(bucket: WritableBucket, w: Where, journal: Journal): Promise<void> {
+export async function recover(bucket: WritableBucket, w: Where, journal: Journal): Promise<void> {
 	try {
 		await settle(bucket, w, journal);
 	} catch (error) {
@@ -354,7 +403,7 @@ async function recover(bucket: WritableBucket, w: Where, journal: Journal): Prom
  *  WHY a failed undo throws (review r2 #3): a retry would journal a new change over this one, and the record of the
  *  bytes to put back would be lost; so the change stops, its journal stays, and the next operation (or the alarm,
  *  webhost-do.ts) undoes it before anything else runs. */
-async function change(bucket: WritableBucket, w: Where, journal: Journal, pending: Pending, steps: () => Promise<boolean>): Promise<boolean> {
+export async function change(bucket: WritableBucket, w: Where, journal: Journal, pending: Pending, steps: () => Promise<boolean>): Promise<boolean> {
 	await journal.put(pending);
 	let committed = false;
 	let failure: unknown = null;
@@ -385,7 +434,7 @@ export interface WriteOptions {
 }
 
 /** Records a committed change: through the journal's queue when it has one, else at once; never the change's failure. */
-async function recordChange(bucket: WritableBucket, journal: Journal, key: string, record: ChangeRecord): Promise<void> {
+export async function recordChange(bucket: WritableBucket, journal: Journal, key: string, record: ChangeRecord): Promise<void> {
 	try {
 		await (journal.record ? journal.record(key, record) : putRecord(bucket, key, record));
 	} catch {
@@ -599,7 +648,7 @@ export class Serial {
 export interface WebOp {
 	/** SETTLE only puts a cut-off change right (a read asks for it first: review r2 #2). HOST_DELETE is a machine
 	 *  host's delete through the Worker while its keys are read-only (over quota: review r2 #7, r3 #1-2). */
-	method: "PUT" | "DELETE" | "SETTLE" | "HOST_DELETE" | "PURGE_TRASH" | "RESTORE" | "PURGE_HISTORY" | "TOUCH";
+	method: "PUT" | "DELETE" | "SETTLE" | "HOST_DELETE" | "PURGE_TRASH" | "RESTORE" | "PURGE_HISTORY" | "TOUCH" | "SHARE" | "SHARED_COMMIT" | "SHARED_RESTORE";
 	owner: string;
 	project: string;
 	hostId: string;
@@ -626,6 +675,10 @@ export interface WebOp {
 	/** The browser, as /fs/v1/devices names it (a change record's `via`), and when the Worker received the request (up_ms). */
 	via?: string;
 	receivedAt?: number;
+	/** The shared tree (PEP 0010). SHARE: `hostId` is the tree's id and `private` the patterns that stay on each machine.
+	 *  SHARED_COMMIT: `commit` is the request. SHARED_RESTORE: `items` are the versions to write back. */
+	private?: string[];
+	commit?: SharedRequest;
 }
 
 /** The answer to send: a status, a JSON body (an error is { error, why }) and extra headers. */
@@ -645,7 +698,7 @@ const WRITE_TTL_S = 300;
 
 /** Runs one web-host operation in the caller's queue: signs a read-write credential for the owner's root, settles any
  *  cut-off change first, then writes or deletes. Errors the person can act on come back as answers. */
-export async function runWebOp(env: CredsEnv & QuotaEnv, s3: FetchLike, op: WebOp, journal: Journal, clock: () => number, store: Store): Promise<WebAnswer> {
+export async function runWebOp(env: CredsEnv & QuotaEnv & PlanEnv & FeatureEnv, s3: FetchLike, op: WebOp, journal: Journal, clock: () => number, store: Store): Promise<WebAnswer> {
 	// admitted: the asking session must still be live now, not only when its request arrived (judge r2 #5)
 	if (op.method !== "SETTLE" && op.sessionId && store.sessionAlive && !(await store.sessionAlive(op.owner, op.sessionId, clock()))) {
 		return { status: 401, body: { error: "signed_out", why: "this device was signed out before its change could start" } };
@@ -654,7 +707,7 @@ export async function runWebOp(env: CredsEnv & QuotaEnv, s3: FetchLike, op: WebO
 		const root = userRoot(op.owner, env);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, clock()), s3);
 		const w = { root, project: op.project, hostId: op.hostId };
-		const quota = quotaOf(env, op.owner);
+		const quota = await quotaFor(env, store, op.owner);
 		const ledger: Ledger = {
 			async admit(bytes, objects) {
 				if (bytes <= 0 && objects <= 0) return;
@@ -668,6 +721,12 @@ export async function runWebOp(env: CredsEnv & QuotaEnv, s3: FetchLike, op: WebO
 			await recover(bucket, w, journal);
 			return { status: 200, body: { settled: true } };
 		}
+		if (op.method === "SHARE") return { status: 200, body: await shareTree(bucket, { ...w, name: SHARED_NAME }, op.private, clock) };
+		if (op.method === "SHARED_COMMIT") return { status: 200, body: await commitShared(bucket, { ...w, name: SHARED_NAME }, op.commit!, clock, journal, ledger) };
+		if (op.method === "SHARED_RESTORE") {
+			await recover(bucket, w, journal);
+			return { status: 200, body: await restoreShared(bucket, { ...w, name: SHARED_NAME }, op.items ?? [], clock, journal, ledger, { via: op.via }) };
+		}
 		if (op.method === "PUT") return { status: 200, body: await writeWebFile(bucket, w, op.path, op.data ?? new Uint8Array(), clock, journal, { keepNewest: op.keepNewest, tiePrefers: op.tiePrefers, ledger, via: op.via, receivedAt: op.receivedAt }) };
 		if (op.method === "RESTORE") {
 			await recover(bucket, w, journal);
@@ -676,6 +735,7 @@ export async function runWebOp(env: CredsEnv & QuotaEnv, s3: FetchLike, op: WebO
 		const gone = await deleteWebFile(bucket, w, op.path, clock, journal, ledger, { via: op.via, receivedAt: op.receivedAt });
 		return gone ? { status: 200, body: gone } : { status: 404, body: { error: "not_found", why: "the web host does not hold that file" } };
 	} catch (error) {
+		if (error instanceof Refusal) return { status: error.status, body: { error: error.code, why: error.message } };
 		if (error instanceof BadPath) return { status: 400, body: { error: "bad_path", why: error.message } };
 		if (error instanceof Busy) return { status: 503, body: { error: "busy", why: error.message }, headers: { "Retry-After": "1" } };
 		if (error instanceof Stale) return { status: 409, body: { error: "stale", why: error.message } };
@@ -913,6 +973,14 @@ export class WebHostCore {
 			},
 			kept: async (path, at) => {
 				await storage.put("recent", remember((await storage.get<Record<string, number>>("recent")) ?? {}, path, at));
+			},
+			pointers: async () => new Set(Object.keys((await storage.get<Record<string, true>>("pointers")) ?? {})),
+			pointed: async (path, on) => {
+				const now = (await storage.get<Record<string, true>>("pointers")) ?? {};
+				if (on === (path in now)) return;
+				if (on) now[path] = true;
+				else delete now[path];
+				await storage.put("pointers", now);
 			},
 		};
 	}

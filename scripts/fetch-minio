@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Fetch the pinned MinIO server into <repo>/.tools/ for the storage e2e (e2e/storage_test.go: "another S3 store").
+#   scripts/fetch-minio             build it if .tools/minio is not already this version
+#   scripts/fetch-minio --print-pin print "<module> <version> <h1 hash>" and stop (used by a Go test)
+# FOLDER_SYNC_TOOLS_DIR installs somewhere other than <repo>/.tools; GO names the go tool.
+# WHY a build and not a download: MinIO's community edition is archived and dl.min.io answers 410 Gone for every release
+# (checked 2026-11-04), so there is no stock binary left to checksum. The official source is still on GitHub and on the
+# Go module proxy. The pin is the module version (a commit) and the h1: hash of its source tree; `go mod download` checks
+# the hash against what is pinned here AND against Go's checksum database, so a rewritten tag cannot change what is built.
+# The build takes a few minutes the first time and only needs Go, which the repo needs anyway; it runs on Linux, macOS
+# and Windows (Git Bash).
+set -euo pipefail
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tools="${FOLDER_SYNC_TOOLS_DIR:-$repo/.tools}"
+go="${GO:-go}"
+if ! command -v "$go" >/dev/null 2>&1 && [ -x "$HOME/.local/go/bin/go" ]; then go="$HOME/.local/go/bin/go"; fi
+
+MINIO_MODULE="github.com/minio/minio"
+MINIO_VERSION="v0.0.0-20260212201848-7aac2a2c5b7c"
+MINIO_HASH="h1:/qdoYujxF5MBLDMVLeiYJ/7fBa1HikX39Dvzb9Ji8pA="
+
+if [[ "${1:-}" == "--print-pin" ]]; then
+  echo "$MINIO_MODULE $MINIO_VERSION $MINIO_HASH"
+  exit 0
+fi
+
+exe=""
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe=".exe" ;; esac
+stamp="$tools/minio.version"
+if [[ -x "$tools/minio$exe" && -f "$stamp" && "$(cat "$stamp")" == "$MINIO_VERSION" ]]; then
+  echo "fetch-minio: $tools/minio$exe is already $MINIO_VERSION"
+  exit 0
+fi
+
+# the source tree's hash must be the pinned one before anything is built from it
+got="$("$go" mod download -json "$MINIO_MODULE@$MINIO_VERSION" | awk -F'"' '/"Sum":/ {print $4}')"
+if [[ "$got" != "$MINIO_HASH" ]]; then
+  echo "fetch-minio: $MINIO_MODULE@$MINIO_VERSION hashes to '$got', not the pinned '$MINIO_HASH'; refusing to build it" >&2
+  exit 1
+fi
+
+mkdir -p "$tools"
+GOBIN="$tools" GOFLAGS=-mod=mod "$go" install "$MINIO_MODULE@$MINIO_VERSION"
+echo "$MINIO_VERSION" > "$stamp"
+"$tools/minio$exe" --version | head -1

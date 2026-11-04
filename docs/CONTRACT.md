@@ -7,9 +7,13 @@ Two reference readers implement this page and are tested against a live stand-in
 - Python, stdlib only (boto3 optional): [`readers/python/folder_sync_read.py`](../readers/python/folder_sync_read.py)
 - TypeScript for a Cloudflare Worker with an R2 binding: [`readers/worker/src/folder-sync-read.ts`](../readers/worker/src/folder-sync-read.ts)
 
+**The shared tree** ([`docs/peps/0010`](peps/0010-shared-tree.md), accepted and built 2026-11-04) is one more host of a folder that opts in: the files that every machine, agent and page of the folder edits, written by the folder's Durable Object alone, with its merge rules below ("The shared tree"). It replaces the reserved `shared/` and `_leases/` of v0.
+
 **History, change records, pull records, restore requests, the activity log and sync times** ([`docs/peps/0007`](peps/0007-history-and-sync-view.md), accepted 2026-10-28) are frozen here, with their schemas in [`schema/`](../schema/) and shared fixtures in [`testdata/`](../testdata/) (`node --test schema/fixtures.test.mjs` keeps them in step). Pointers, keyframes and the 5-minute rule ([`docs/peps/0009`](peps/0009-storage-efficient-history.md), 2026-11-04) amend the history parts of this page; their schemas are [`schema/prefix.schema.json`](../schema/prefix.schema.json) and [`schema/zstd-frames.schema.json`](../schema/zstd-frames.schema.json). The engine writes all three forms; the web host writes whole copies, throttled to the same 5 minutes. Rounds and the web host no longer write `_trash/` ("Legacy `_trash/`" below is what is left of it). The view's HTTP API is [`docs/API.md`](API.md).
 
 ## Bucket layout
+
+**The bucket is a store.** A folder's `.folder-sync.toml` names where its bytes live as a URL: `r2://bucket` (the default; `bucket = "name"` alone means this), `s3://bucket/prefix` (AWS or any S3-compatible endpoint), `gs://bucket/prefix` (Google Cloud Storage's S3-interoperable API) or `file:///dir` (a directory, where `<bucket>/` below is that directory). The layout, the manifest and every rule on this page are the same on all of them; what differs is how they are kept consistent. The engine needs four conditional calls (create-once `PUT`, `PUT` and `COPY` with `If-Match`, ranged `GET` with `If-Match`); a store that lacks one gets the engine's own check in its place (a `HEAD`, then the call without the header), measured at `init`. [`docs/STORAGE.md`](STORAGE.md) has the capability table and the examples. `ETag` is the quoted MD5 of a single-part object on every store, which is what `object_etag` below records. The accounts Worker, the web host and the quota exist for `r2://` only. The Python reference reader reads any S3-compatible endpoint; a `file://` store is plain files in that layout.
 
 ```text
 <bucket>/
@@ -20,7 +24,8 @@ Two reference readers implement this page and are tested against a live stand-in
         manifest.json                its file list (schema below)
         notes/plan.md                files, at their path in that machine's folder
         ...
-    shared/                          two-way folder under a lease: v1, not written in v0
+      <shared-id>/                   the shared tree, when the folder is shared: a host whose only writer is the folder's
+                                     Durable Object; its manifest has "shared": {"private": [...]} and host_name "shared"
   _history/
     <project>/<host-id>/<path>/<version>               a kept version: the file's exact bytes (PEP 0007)
     <project>/<host-id>/<path>/<version>.<size>.zst    ... or one zstd frame of exactly those bytes (PEP 0009)
@@ -30,12 +35,13 @@ Two reference readers implement this page and are tested against a live stand-in
     <project>/<host-id>/pulls/<at>.json      the peer files that host wrote to its disk in one round (PEP 0007)
   _requests/
     <project>/<host-id>/<id>.json            a restore that host is asked to make (PEP 0007)
+  _incoming/
+    <project>/<host-id>/<uuid>               a machine's file for a shared-tree commit, uploaded with its own key (PEP 0010)
   _trash/
     <project>/<host-id>/<UTC-stamp>/<path>   legacy: overwritten or deleted objects before PEP 0007
-  _leases/<project>.json             the shared folder's lock: v1
 ```
 
-- `<root>` is the empty string (the layout above, unchanged) or an account root: one to eight segments, each `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, each followed by `/` (so `users/AbC123/`; exactly `^([A-Za-z0-9][A-Za-z0-9._-]{0,127}/){1,8}$`). With a root, every key in this page, `_trash/` included, is that key with `<root>` in front: `<root><project>/hosts/<host-id>/manifest.json`, `<root>_trash/<project>/<host-id>/<UTC-stamp>/<path>`. The root comes from the credentials folder-sync is given, never from a project's config, and a folder keeps the root it was first synced under (a round under another root is refused). Readers take the root as an optional parameter whose default, `""`, reads a v0 bucket.
+- `<root>` is the empty string (the layout above, unchanged) or an account root: one to eight segments, each `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, each followed by `/` (so `users/AbC123/`; exactly `^([A-Za-z0-9][A-Za-z0-9._-]{0,127}/){1,8}$`). With a root, every key in this page, `_trash/` included, is that key with `<root>` in front: `<root><project>/hosts/<host-id>/manifest.json`, `<root>_trash/<project>/<host-id>/<UTC-stamp>/<path>`. The root comes from the credentials folder-sync is given, never from a project's config, and a folder keeps the root it was first synced under (a round under another root is refused). One exception, for a store that is not R2 and has no accounts server: a store URL with a prefix (`s3://bucket/team`, [`docs/STORAGE.md`](STORAGE.md)) puts that prefix in front of the credentials' own, so `team/` is the root of a folder whose keys carry none. Readers take the root as an optional parameter whose default, `""`, reads a v0 bucket.
 - `<project>` matches `^[a-z0-9][a-z0-9._-]{0,62}$`. A leading `_` is reserved for folder-sync's own prefixes.
 - `<host-id>` is a lowercase UUID v4, minted once per machine and kept in that machine's `~/.folder-sync/host.json`. The readable name is the manifest's `host_name`.
 - `<version>` is `<written_at>_<sha16>`: the manifest entry's `written_at` truncated (not rounded) to the millisecond, as `YYYY-MM-DDTHH:MM:SS.mmmZ`, then the first 16 hex digits of its `sha256` (`2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f`). An object that was not the version the manifest listed is kept as `<its LastModified, to the ms>_unlisted`. Names sort oldest first. Exactly `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z_([0-9a-f]{16}|unlisted)$` ([`schema/history.schema.json`](../schema/history.schema.json)).
@@ -77,6 +83,7 @@ Two reference readers implement this page and are tested against a live stand-in
 | `seq` | Starts at 1 and goes up by one on every rewrite. |
 | `generated_at` | When this version was written (RFC 3339, UTC). |
 | `files[]` | Every live file this host publishes, sorted by `path`. |
+| `shared` | Optional, on the shared tree's host only: `{"private": [gitignore patterns]}`, the files that stay on each machine's own host (below). A reader that ignores it shows the files under a host named `"shared"`. |
 | `path` | Relative to `hosts/<host-id>/`; never absolute, never `.`/`..`, never a backslash. |
 | `size`, `sha256` | The content. A reader may verify `sha256` after a GET. |
 | `mtime` | The source file's modification time on its machine, nanoseconds where the OS has them. |
@@ -222,11 +229,32 @@ so any page can show them:
 - An app that wants to change a file writes it into a synced folder on some machine; folder-sync publishes it from there.
 - Each host's `_history/…/<host-id>/` and `_changes/…/<host-id>/` (its pull records included) are written only by that host's writer (for the web host, the folder's object). `_requests/…/<host-id>/` is created by others and answered only by that host. The folder's object, and each engine for its own host, delete what has aged out; a key is written once and deleted only after it ages, so writing and pruning never race on one key.
 - A browser writes through folder-sync's accounts Worker, which is itself one more host of the folder: its web host (`host_name` `"web"`, a host id minted on the first write) writes files, history and its manifest exactly as a round does, its manifest PUT conditional on the last ETag, and every machine pulls it read-only like any peer ([`docs/peps/0003`](peps/0003-accounts.md) §3.4).
-- Two-way folders (`<project>/shared/`, under a lease in `_leases/`) are v1. v0 refuses a `shared` mode in `.folder-sync.toml` with an error.
+- The shared tree (`<project>/hosts/<shared-id>/`, below) is written by the folder's Durable Object and by nothing else: a machine sends its change to the accounts server, which orders, merges and writes it. An older engine, which has never heard of it, reads it read-only like any peer. `.folder-sync.toml` still refuses a `shared` mode in `[modes]`: a folder is shared once, for every machine, with `folder-sync share`.
+
+## The shared tree
+
+A folder that opts in with `folder-sync share` (or `POST /fs/v1/folders/:project/share`, [`docs/API.md`](API.md)) gets one tree that every device, agent and page edits ([`docs/peps/0010`](peps/0010-shared-tree.md)). Folders that are not shared change nothing.
+
+- **Where.** `<project>/hosts/<shared-id>/`, a host like any other: its id is a lowercase UUID v4 minted once by the accounts server (D1 row `shared_tree`), its `host_name` is `"shared"`, and its manifest adds `"shared": {"private": [...]}`. Every reader lists it, reads its manifest and checks files against it unchanged; the history, change records, prune and quota treat it as one more host.
+- **Who writes.** Only the folder's Durable Object (PEP 0003 §3.4's web-host queue), one commit at a time. A commit is one manifest version, however many paths it holds: the files first, then the manifest (`If-Match`), then the change record, as a web write does; a commit the manifest did not take is undone from the object's journal before anything else runs.
+- **The private rule.** `private` is gitignore patterns, fixed when the folder is shared (it cannot change afterwards in v1): a path that matches stays in the machine's own `hosts/<id>/`, everything else is the shared tree. Nothing is private unless named at `share` time. The object refuses a commit of a private path (`409 private_path`). A file over 64 MiB stays on its machine's own host in v1.
+- **A change** is sent with its **base**, the version id (and sha256) of the bytes the device last knew at that path, or none for a new path. The device sets its base only from the hash of bytes it wrote (a pull) or sent (a commit), never from what a manifest claims.
+  - The base is the current version, or holds the same bytes, or both are absent: **accepted** (git's fast-forward).
+  - Otherwise the object resolves it, the same for machines, agents and pages:
+    1. *Unchanged.* The device's bytes are its base's: the tree's version stands.
+    2. *Tails.* The base exists, ends in a newline (or is empty), and both sides only appended whole lines: theirs, then the device's tail. No diff; two appends to a JSONL log both stay.
+    3. *Merge.* Otherwise, up to 4 MiB, valid UTF-8 with no NUL byte, in a file with one of the suffixes `.md .markdown .txt .json .jsonl .yaml .yml .toml .csv .canvas`: a three-way merge by lines (diff3, git merge-file semantics; node-diff3). A change both sides made is taken once; changes that touch the same lines or adjacent ones collide. Lines keep their own endings, so CRLF and a missing final newline survive byte for byte. The base's bytes come from `_history/`; when the 5-minute throttle dropped them, the newest kept version written before it is used (diff3 then reports more collisions, never repeats text).
+    4. *Conflict copy.* Anything else (binary, too big, a collision, or a `.json .canvas .jsonl .yaml .yml .toml` result that no longer parses): the path keeps the first change to reach the object, and the device's bytes become a new shared file named `<name> (Conflicted copy <device> <YYYYMMDDHHMM>)<.ext>` in the same folder, Obsidian's own form. `<device>` is the committer's `host_name` (a page's browser), any character other than a letter, digit, space, `.`, `_` or `-` made `-`, at most 40 characters; the time is the committer's local wall clock as it sent it; a name that is taken gets ` 2`, ` 3` after the closing parenthesis. No conflict markers are ever written into a file. A conflict copy syncs to every device like any shared file.
+    5. *An edit beats a delete.* A delete whose base is not current is not applied (`edit_won`) and the file comes back; an edit whose file the other side deleted writes it again.
+  - A merge keeps both of its inputs in history, whatever the throttle: the version it replaces whole, and the device's own bytes under their own version id (`merge.yours` in the change record). A tails merge keeps nothing else: the version it replaces leaves as a pointer.
+- **History** is PEP 0009's forms for this host: a commit that only appends leaves the version as a pointer (about 125 bytes), subject to the pin; everything else is a whole copy. The shared tree writes no keyframes in v1.
+- **Change records** of the shared tree have `by: "shared"`; each event adds `by_host` (the committing machine) and `by_name` (a machine's `host_name`, a page's browser), an `upload` that was merged adds `merge: {base, yours, result}` (version ids), and a collision adds a `conflict` event (`path`, `kept_at`: the copy's path, `peer`: the committer) beside the copy's `upload`.
+- **On a machine.** The shared files are the folder itself, not read-only copies under `peers_dir`. A machine never overwrites a file that differs from what it last knew; it commits that edit on its next round, against the base it was made from. Its own host keeps only the private files: a file leaves it once the tree holds the file, as a move (not counted by `max_delete`, its versions stay in the host's history).
+- **Staging.** A file over 1 MiB reaches a commit through `<root>_incoming/<project>/<host-id>/<uuid>`, uploaded with the machine's own key; the object checks its sha256 and deletes it. The pruner deletes one a crash left after a day.
 
 ## The same layout on disk
 
-A machine's own files stay where they are in its folder. Its peers' files land read-only at `<folder>/<peers_dir>/<host-id>/<path>` (`peers_dir` defaults to `hosts`), so a local app reads a peer's file at the same relative path as the bucket key minus `<project>/`. folder-sync never publishes `peers_dir/` or `.folder-sync.toml`. If you edit a peer's copy, folder-sync moves your edit to `~/.folder-sync/conflicts/` before the peer's next version lands, and `status` lists it.
+A machine's own files stay where they are in its folder (in a shared folder, every file that is not private is the shared tree's: the folder itself). Its peers' files land read-only at `<folder>/<peers_dir>/<host-id>/<path>` (`peers_dir` defaults to `hosts`), so a local app reads a peer's file at the same relative path as the bucket key minus `<project>/`. folder-sync never publishes `peers_dir/` or `.folder-sync.toml`. If you edit a peer's copy, folder-sync moves your edit to `~/.folder-sync/conflicts/` before the peer's next version lands, and `status` lists it.
 
 ## Legacy `_trash/`
 
@@ -242,6 +270,5 @@ This page is the seam between the parts of the repo ([`PARTS.md`](../PARTS.md)):
 
 ## Not part of the contract
 
-- `_leases/` and `shared/` layouts beyond what this page states.
 - Object metadata. rclone stores the mtime as object metadata too, but the manifest is authoritative.
 - How folder-sync decides what changed (its local state in `~/.folder-sync/`), the local log's files and the local restore requests included: an app reads them through `folder-sync serve`. The one file there an app reads is `~/.folder-sync/serve.json` ([`docs/API.md`](API.md)).

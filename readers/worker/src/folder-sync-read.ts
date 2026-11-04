@@ -55,6 +55,8 @@ export interface Manifest {
 	seq: number;
 	generated_at: string;
 	files: ManifestEntry[];
+	/** Present on the shared tree's host only (docs/peps/0010): the gitignore patterns that stay on each machine's own host. */
+	shared?: { private: string[] };
 }
 
 export interface FileRef extends ManifestEntry {

@@ -213,6 +213,11 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		result.Events = append(result.Events, p.holdEvent("unmounted", len(prev.Files)))
 		return &EmptyFolderError{Folder: p.Folder, Had: len(prev.Files)}
 	}
+	// a shared folder (PEP 0010 §7): this host publishes only the private files; the rest is the shared tree's
+	okPaths, sharedSet, err := p.splitShared(ctx, okPaths, byPath)
+	if err != nil {
+		return err
+	}
 	prevIndex := prev.Index()
 	now := manifest.FormatTime(p.Now())
 
@@ -255,11 +260,22 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		// upload's body must be exactly those
 		next = append(next, manifest.Entry{Path: path, Size: read.Size, MTime: mtime, SHA256: read.SHA256, WrittenAt: now})
 	}
-	var deleted []string
+	var deleted, moved []string
 	for _, old := range prev.Files {
-		if !present[old.Path] {
-			deleted = append(deleted, old.Path)
+		if present[old.Path] {
+			continue
 		}
+		if sharedSet[old.Path] {
+			// WHY a move, not a delete (PEP 0010 §7): the shared tree holds it now, so max_delete does not count it and its
+			// versions stay in this host's history; a path the tree does not hold yet stays published until it does
+			if _, held := p.sharedStateRef().Held[old.Path]; held {
+				moved = append(moved, old.Path)
+			} else {
+				next = append(next, old)
+			}
+			continue
+		}
+		deleted = append(deleted, old.Path)
 	}
 	if len(deleted) > p.Config.MaxDelete {
 		p.say("holding %d deletes: more than max_delete = %d in one round; they stay in the bucket until you raise max_delete or restore the files", len(deleted), p.Config.MaxDelete)
@@ -270,6 +286,8 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		}
 		deleted = nil
 	}
+	deleted = append(deleted, moved...)
+	isMoved := setOf(moved)
 
 	if p.Creds.ReadOnly {
 		return p.pushReadOnly(ctx, prev, changed, deleted, result)
@@ -356,7 +374,7 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 			return err
 		}
 		deletedAt = p.Now()
-		result.Deleted = append(result.Deleted, deleted...)
+		result.Deleted = append(result.Deleted, withoutPaths(deleted, isMoved)...)
 	}
 	needManifest := len(changed) > 0 || len(deleted) > 0 || metadataOnly > 0 || p.manifestMissing()
 	if !needManifest {
@@ -400,7 +418,7 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 	p.pruneShadows(m.Files)
 	result.ManifestWritten = true
 	// 3. the change record, PUT with the round's other records once the manifest is out (FlushRecords)
-	events := p.pushEvents(m, items, changed, deleted, byPath, uploadedAt, deletedAt, published)
+	events := p.pushEvents(m, items, changed, withoutPaths(deleted, isMoved), byPath, uploadedAt, deletedAt, published)
 	result.Events = append(result.Events, events...)
 	if err := p.queueChanges(m, events); err != nil {
 		p.say("the change record for seq %d: %v", m.Seq, err)
@@ -421,7 +439,7 @@ func (p *Project) uploadAppends(next []manifest.Entry, paths []string, reads map
 	errs := make([]error, len(paths))
 	parallel(len(paths), func(i int) {
 		read := reads[paths[i]]
-		etags[i], errs[i] = p.S3.PutFile(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+paths[i], read.Bytes, local[paths[i]].MTime)
+		etags[i], errs[i] = p.Objects().PutFile(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+paths[i], read.Bytes, local[paths[i]].MTime)
 	})
 	if err := errors.Join(errs...); err != nil {
 		return err
@@ -502,7 +520,7 @@ func newJobID() string {
 // multipart upload's "<md5>-<parts>" ETag, a HEAD that fails) leaves the field empty: the file is then read whole and
 // checked by sha256, never served under a wrong identity.
 func (p *Project) recordObjectETags(next []manifest.Entry, uploaded []string, md5s map[string]string) {
-	if p.S3 == nil {
+	if p.Objects() == nil {
 		return
 	}
 	want := map[string]bool{}
@@ -513,7 +531,7 @@ func (p *Project) recordObjectETags(next []manifest.Entry, uploaded []string, md
 		if !want[next[i].Path] {
 			continue
 		}
-		etag, found, err := p.S3.Head(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+next[i].Path)
+		etag, found, err := p.Objects().Head(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+next[i].Path)
 		if err != nil || !found {
 			continue
 		}
@@ -664,7 +682,7 @@ func (p *Project) keepManifest(m manifest.Manifest) error {
 // ReconcileReadOnly is the reconcile of a round with read-only keys: no stray moves (they write), only this host's
 // published manifest taken when it is ahead of the local copy (a delete's answer lost with its job file).
 func (p *Project) ReconcileReadOnly() error {
-	got, err := p.S3.GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
+	got, err := p.Objects().GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
 	if err != nil || got.NotFound {
 		return err
 	}
@@ -681,7 +699,7 @@ func (p *Project) ReconcileReadOnly() error {
 // adoptPublished takes this host's manifest from the bucket (a read): a round with read-only keys reconciles its
 // manifest state this way, with no write (review r3 #2).
 func (p *Project) adoptPublished() error {
-	got, err := p.S3.GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
+	got, err := p.Objects().GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
 	if err != nil {
 		return err
 	}
@@ -751,7 +769,7 @@ func (p *Project) writeList(name string, paths []string) (string, error) {
 func (p *Project) Reconcile(ctx context.Context, stamp string, result *Result) error {
 	own := p.HostPrefix(p.Host.ID)
 	out, err := p.Rclone.Run(ctx, "lsjson", "-R", "--files-only", "--no-mimetype", rclone.Path(p.Config.Bucket, own))
-	if err != nil && !strings.Contains(err.Error(), "directory not found") {
+	if out, err = rclone.Listing(out, err); err != nil {
 		return err
 	}
 	var items []lsjsonItem
@@ -816,7 +834,7 @@ func (p *Project) Reconcile(ctx context.Context, stamp string, result *Result) e
 // it. One whose history key would pass 1,024 bytes stays where it is: nothing is deleted without a copy.
 func (p *Project) moveStray(own, path string) error {
 	key := own + "/" + path
-	stat, err := p.S3.HeadObject(p.Config.Bucket, key)
+	stat, err := p.Objects().HeadObject(p.Config.Bucket, key)
 	if err != nil {
 		return err
 	}
@@ -825,17 +843,17 @@ func (p *Project) moveStray(own, path string) error {
 		p.say("reconcile: %s is not in the manifest, and its history key would be too long; left in place", path)
 		return nil
 	}
-	if err := p.S3.Copy(p.Config.Bucket, key, dest, ""); err != nil {
+	if err := p.Objects().Copy(p.Config.Bucket, key, dest, ""); err != nil {
 		return err
 	}
-	return p.S3.Delete(p.Config.Bucket, key)
+	return p.Objects().Delete(p.Config.Bucket, key)
 }
 
 // Discover lists the project's hosts/ folder one level deep (one delimiter LIST, not a
 // full listing) and adds new peers. It runs with every reconcile and every DiscoverEvery.
 func (p *Project) Discover(ctx context.Context) error {
 	out, err := p.Rclone.Run(ctx, "lsjson", "--dirs-only", "--no-mimetype", "--no-modtime", rclone.Path(p.Config.Bucket, p.HostsPrefix()))
-	if err != nil && !strings.Contains(err.Error(), "directory not found") {
+	if out, err = rclone.Listing(out, err); err != nil {
 		return err
 	}
 	var dirs []lsjsonItem
@@ -854,6 +872,7 @@ func (p *Project) Discover(ctx context.Context) error {
 			p.say("found peer %s", dir.Path)
 			peers.Known = append(peers.Known, dir.Path)
 			known[dir.Path] = true
+			p.noteShared(dir.Path) // a folder that was shared while this machine was away learns it here, before its push
 		}
 	}
 	return p.savePeers(peers)
@@ -893,7 +912,7 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 	if haveCached {
 		etag = peers.ETags[peerID]
 	}
-	got, err := p.S3.GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(peerID)+"/"+manifest.FileName, etag)
+	got, err := p.Objects().GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(peerID)+"/"+manifest.FileName, etag)
 	if err != nil {
 		return PeerResult{}, err
 	}
@@ -909,6 +928,10 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 	}
 	if m.HostID != peerID || m.Project != p.Config.Project {
 		return PeerResult{}, fmt.Errorf("manifest under hosts/%s claims host %s, project %s", peerID, m.HostID, m.Project)
+	}
+	// the shared tree is not a peer's read-only copy: its files are the folder itself (PEP 0010)
+	if m.Shared != nil {
+		return p.pullShared(ctx, peerID, m, got.ETag, cached, peers, result)
 	}
 	pr := PeerResult{ID: peerID, Name: m.HostName, Files: len(m.Files), Seq: m.Seq}
 	online, _ := time.Parse(time.RFC3339Nano, m.GeneratedAt)

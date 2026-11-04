@@ -16,8 +16,10 @@
 import { apps, OWN_APP, type App } from "./apps.ts";
 import { escapeAttr, fail, headers, json, jsonBody, PAGE_POLICY, session, sessionEnded, writer, type Deps, type Env, type Person, type Via } from "./app.ts";
 import { mint, ttlOf, userRoot } from "./creds.ts";
-import { Measuring, overQuota, quotaOf, TooOld, usageOf } from "./quota.ts";
+import { Measuring, overQuota, quotaFor, TooOld, usageOf } from "./quota.ts";
 import { S3Bucket } from "./s3-bucket.ts";
+import { accountForm, byoNote, goTo, byoSection, count, noticeFor, planSection, profileSection, quotaBar, signInMethods, size } from "./account.ts";
+import { featuresOf } from "./features.ts";
 
 /** What a sign-in from before migration 0008 (no session kind) is told: it cannot approve a machine (judge r3 #5). The
  *  device approval answers it too (auth.ts); here, the account page says it beside its Sign out. */
@@ -206,7 +208,10 @@ function see(location: string, cookies: string[] = []): Response {
 	return answer;
 }
 
-async function formPost(request: Request, env: Env, deps: Deps, app: App | null, what: "revoke" | "sign-out"): Promise<Response> {
+type FormWhat = "revoke" | "sign-out" | "plan" | "billing" | "byo" | "byo/remove";
+const FORMS: ReadonlySet<string> = new Set<FormWhat>(["revoke", "sign-out", "plan", "billing", "byo", "byo/remove"]);
+
+async function formPost(request: Request, env: Env, deps: Deps, app: App | null, what: FormWhat): Promise<Response> {
 	if (!formOk(request, app)) return fail(403, "csrf", "this form is sent from this site's own account page");
 	if (!(request.headers.get("Content-Type") || "").toLowerCase().startsWith("application/x-www-form-urlencoded")) return fail(415, "form_only", "send the account page's form");
 	if (Number(request.headers.get("Content-Length") || 0) > FORM_MAX) return fail(413, "too_large", "a form is a few fields");
@@ -223,6 +228,14 @@ async function formPost(request: Request, env: Env, deps: Deps, app: App | null,
 		await sessionEnded(env, deps, who.person, who.person.sessionId);
 		return see("/fs/account?done=signed-out", cookies);
 	}
+	// the plan, billing and bucket forms (account.ts): a browser's own, never a machine's (byo.ts)
+	if (what === "plan" || what === "billing" || what === "byo" || what === "byo/remove") {
+		if (who.via !== "cookie") return fail(403, "browser_only", "these forms are for a signed-in browser");
+		const next = await accountForm(what, fields, request, env, deps, app!, who.person);
+		// a path of this page is a 303 back to it; Stripe's own page is reached by goTo (account.ts says why not a redirect)
+		if (next.startsWith("/fs/account")) return see(next);
+		return goTo(next, app!) ?? see("/fs/account?done=billing-unavailable");
+	}
 	if (!configured(deps)) return fail(503, "not_configured", "devices are not set up on this Worker yet");
 	const id = fields.get("id") || "";
 	const ended = SESSION_ID.test(id) ? await end(request, env, deps, app, who, id) : null;
@@ -230,24 +243,9 @@ async function formPost(request: Request, env: Env, deps: Deps, app: App | null,
 	return ended.current ? see("/fs/account?done=signed-out", ended.cookies) : see("/fs/account?done=revoked");
 }
 
-/** "3 MiB", "512 bytes". */
-function size(bytes: number): string {
-	if (bytes < 1024) return `${bytes} byte${bytes === 1 ? "" : "s"}`;
-	const units = ["KiB", "MiB", "GiB", "TiB"];
-	let value = bytes / 1024;
-	let unit = 0;
-	while (value >= 1024 && unit < units.length - 1) {
-		value /= 1024;
-		unit += 1;
-	}
-	return `${Number.isInteger(value) ? value : value.toFixed(1)} ${units[unit]}`;
-}
-
-const count = (n: number) => n.toLocaleString("en-US");
-
 /** The storage line: what GET /fs/v1/usage answers (quota.ts), or why it cannot be had now. */
 async function usageLine(env: Env, deps: Deps, userId: string): Promise<string> {
-	const quota = quotaOf(env, userId);
+	const quota = await quotaFor(env, deps.store, userId);
 	const root = userRoot(userId, env);
 	let used: { bytes: number; objects: number; measured_at?: string; partial?: boolean } | null;
 	let over: string | null = null;
@@ -270,7 +268,8 @@ async function usageLine(env: Env, deps: Deps, userId: string): Promise<string> 
 	// WHY when: the figure is the cached measurement (quota.ts), up to QUOTA_RECHECK_S old, never presented as live
 	const when = used.measured_at && !Number.isNaN(Date.parse(used.measured_at)) ? ` · measured ${new Date(used.measured_at).toISOString().slice(0, 16).replace("T", " ")} UTC` : "";
 	const figures = `${used.partial ? "over " : ""}${size(used.bytes)} of ${size(quota.bytes)} · ${count(used.objects)} of ${count(quota.objects)} files${when}`;
-	return `<p data-testid="fs-usage">${escapeAttr(figures)}</p>${over ? `<p class="fs-error" data-testid="fs-over">${escapeAttr(over)}</p>` : ""}`;
+	// the same figure as a bar (a native <progress>: the page's policy allows no inline style), full once over the quota
+	return `<p data-testid="fs-usage">${escapeAttr(figures)}</p>\n${quotaBar(used.bytes, quota.bytes, !!over || !!used.partial)}${over ? `\n<p class="fs-error" data-testid="fs-over">${escapeAttr(over)}</p>` : ""}`;
 }
 
 function dayOf(value: string): string {
@@ -308,7 +307,7 @@ function notice(env: Env, done: string | null): string {
 		"wrong-user": "Nothing changed: that page was open for a different account. This is the account this browser is signed in to now.",
 		"signed-out": "You're signed out of this browser.",
 	};
-	const text = done ? said[done] : undefined;
+	const text = done ? (said[done] ?? noticeFor(env, done)) : undefined;
 	return text ? `<p class="fs-notice" role="status" data-testid="fs-notice">${escapeAttr(text)}</p>\n` : "";
 }
 
@@ -347,19 +346,26 @@ ${notice(env, done === "signed-out" ? done : null)}<p>You're not signed in here.
 <p><a class="fs-button" href="/fs/signin?return=/fs/account">Sign in</a></p>`, head);
 	}
 	const { person } = who;
-	const list = configured(deps) ? await devicesOf(deps, person) : [];
+	const features = featuresOf(env);
+	// WHY machines are dropped from the list when local sync is off: it is the machine UI; a browser sign-in is still one
+	const list = configured(deps) ? (await devicesOf(deps, person)).filter((d) => features.sync || d.device.kind === "browser") : [];
 	const devices = configured(deps)
 		? `<ul class="fs-devices" data-testid="fs-devices">\n${list.map((d) => deviceItem(d.device, d.agent, person.userId)).join("\n")}\n</ul>`
 		: '<p class="fs-small">Devices are not set up on this server yet.</p>';
+	const keys = features.sync ? ` Storage keys a machine already holds stop working within ${lifetime(ttlOf(env))}, when they expire.` : "";
+	const files = features.storage ? `\n<p class="fs-small"><a href="/fs/files" data-testid="fs-files-link">Browse your files</a> · <a href="/fs/files?view=storage">See what uses your storage</a></p>` : "";
 	return shell(app, `<h1>Your account</h1>
-${notice(env, done)}<p class="fs-who">Signed in as <strong>${escapeAttr(person.email)}</strong>${person.name ? `<br><span class="fs-small">${escapeAttr(person.name)}</span>` : ""}</p>
+${notice(env, done)}${profileSection(person, await signInMethods(env, deps, person.userId))}
+<section class="fs-section" data-testid="fs-storage">
 <h2>Storage</h2>
-${await usageLine(env, deps, person.userId)}
-<p class="fs-small"><a href="/fs/files" data-testid="fs-files-link">Browse your files</a></p>
-${list.some((d) => d.device.current && d.legacy) ? `<p class="fs-notice" role="status" data-testid="fs-sign-in-again">${escapeAttr(SIGN_IN_AGAIN)}</p>\n` : ""}<h2>Devices</h2>
-<p class="fs-small">Revoking a device signs it out: this server refuses whatever it asks after that, and it gets no new storage keys. A change this server had already started for it may still finish. Storage keys a machine already holds stop working within ${lifetime(ttlOf(env))}, when they expire.</p>
-${devices}${grantList(await deps.grants?.(person.userId), person.userId)}
-<div class="fs-signout"><form method="post" action="/fs/account/sign-out"><input type="hidden" name="user" value="${escapeAttr(person.userId)}"><button type="submit">Sign out</button></form></div>
+${await usageLine(env, deps, person.userId)}${files}
+${await byoNote(env, deps, person.userId)}</section>
+${features.payments ? `${await planSection(env, deps, person)}\n` : ""}${features.byo ? `${await byoSection(env, deps, person)}\n` : ""}<section class="fs-section" data-testid="fs-devices-section">
+${features.sync && list.some((d) => d.device.current && d.legacy) ? `<p class="fs-notice" role="status" data-testid="fs-sign-in-again">${escapeAttr(SIGN_IN_AGAIN)}</p>\n` : ""}<h2>${features.sync ? "Devices" : "Signed-in browsers"}</h2>
+<p class="fs-small">Revoking a device signs it out: this server refuses whatever it asks after that${features.sync ? ", and it gets no new storage keys. A change this server had already started for it may still finish." : "."}${keys}</p>
+${devices}${features.sync ? grantList(await deps.grants?.(person.userId), person.userId) : ""}
+</section>
+<div class="fs-signout" data-testid="fs-signout"><form method="post" action="/fs/account/sign-out"><input type="hidden" name="user" value="${escapeAttr(person.userId)}"><button type="submit">Sign out</button></form></div>
 ${appsList(env)}`, head);
 }
 
@@ -383,9 +389,10 @@ export async function accountRoute(request: Request, env: Env, deps: Deps | null
 	if (!app) return fail(404, "unknown_origin", "this origin is not a registered app: no account page here");
 	const read = method === "GET" || method === "HEAD";
 	if (rest.length === 0 && !read) return fail(405, "method", "GET only", { Allow: "GET, HEAD" });
-	if (rest.length === 1 && (rest[0] === "revoke" || rest[0] === "sign-out") && method !== "POST") return fail(405, "method", "POST only", { Allow: "POST" });
-	if (rest.length > 1 || (rest.length === 1 && rest[0] !== "revoke" && rest[0] !== "sign-out")) return fail(404, "not_found", "no such route");
+	const form = rest.join("/");
+	if (rest.length && FORMS.has(form) && method !== "POST") return fail(405, "method", "POST only", { Allow: "POST" });
+	if (rest.length && !FORMS.has(form)) return fail(404, "not_found", "no such route");
 	if (!deps) return fail(503, "not_configured", "accounts are not set up on this Worker yet");
 	if (rest.length === 0) return accountPage(request, env, deps, app, method === "HEAD");
-	return formPost(request, env, deps, app, rest[0] as "revoke" | "sign-out");
+	return formPost(request, env, deps, app, form as FormWhat);
 }

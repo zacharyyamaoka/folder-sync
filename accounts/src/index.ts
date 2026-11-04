@@ -1,7 +1,9 @@
 // The Worker's entry: the routes are app.ts, the accounts layer auth.ts (PEP 0003). Deploy config (wrangler.toml):
-// vars ENVIRONMENT, PUBLIC_URL, R2_ACCOUNT_ID, SYNC_BUCKET, R2_ENDPOINT, SYNC_CREDENTIAL_TTL_S, QUOTA_*, EMAIL_FROM, ROOT_PREFIX (docs/NEW-APP.md);
+// vars ENVIRONMENT, PUBLIC_URL, R2_ACCOUNT_ID, SYNC_BUCKET, R2_ENDPOINT, SYNC_CREDENTIAL_TTL_S, QUOTA_*, EMAIL_FROM, ROOT_PREFIX (docs/NEW-APP.md),
+// the switches FEATURE_STORAGE / FEATURE_SYNC / FEATURE_PAYMENTS / FEATURE_BYO (src/features.ts) and PLANS (src/plans.ts);
 // secrets BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, RESEND_API_KEY, R2_PARENT_ACCESS_KEY_ID,
-// R2_PARENT_SECRET_ACCESS_KEY, SIGN_UP_EMAILS; the D1 database DB; the Durable Objects WEB_HOST (one web-host writer per
+// R2_PARENT_SECRET_ACCESS_KEY, SIGN_UP_EMAILS, and with payments STRIPE_SECRET_KEY + STRIPE_WEBHOOK_SECRET (docs/PAYMENTS.md),
+// with bring-your-own BYO_ENCRYPTION_KEY (src/byo.ts); the D1 database DB; the Durable Objects WEB_HOST (one web-host writer per
 // folder) and HUB (one push hub per folder, PEP 0005); the ASSETS binding (site/). Until the secrets and the database
 // are there, every account route answers 503 and nothing can be
 // read: no data is ever served signed out.

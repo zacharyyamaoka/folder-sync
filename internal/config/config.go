@@ -19,15 +19,17 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"folder-sync/internal/ignore"
+	"folder-sync/internal/store"
 )
 
 // FileName is the project config's name, at the root of the synced folder.
 const FileName = ".folder-sync.toml"
 
-// Subfolder modes. v0 implements only ModePush.
+// Subfolder modes. Only ModePush is a setting; a shared folder is the folder's own property, set once with `folder-sync
+// share` (docs/peps/0010 §7).
 const (
-	ModePush   = "push"   // this machine's files, published under hosts/<host-id>/ (v0)
-	ModeShared = "shared" // two-way under shared/, with a lease and bisync (v1, refused)
+	ModePush   = "push"   // this machine's files, published under hosts/<host-id>/
+	ModeShared = "shared" // refused here: WHY one rule per folder, in the shared tree's manifest, so no two machines disagree
 )
 
 // Viewer is the R2-Explorer backdoor's settings (publish --viewer).
@@ -39,8 +41,11 @@ type Viewer struct {
 
 // Config is .folder-sync.toml.
 type Config struct {
-	Project   string            `toml:"project"`
-	Bucket    string            `toml:"bucket"`
+	Project string `toml:"project"`
+	Bucket  string `toml:"bucket"`
+	// Store is where the folder's bytes live, as a URL: r2://bucket, s3://bucket/prefix, gs://bucket/prefix or
+	// file:///dir (docs/STORAGE.md). Empty means r2://<bucket>, today's behaviour. When set, Validate fills Bucket from it.
+	Store     string            `toml:"store"`
 	PeersDir  string            `toml:"peers_dir"`
 	Interval  string            `toml:"interval"`
 	MaxDelete int               `toml:"max_delete"`
@@ -74,7 +79,7 @@ var projectName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 var bucketName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
 
 // ValidateProject checks a project name; it becomes the bucket prefix.
-// A leading "_" is reserved for _trash/ and _leases/.
+// A leading "_" is reserved for folder-sync's own prefixes (_history/, _changes/, _requests/, _incoming/, _trash/).
 func ValidateProject(name string) error {
 	if !projectName.MatchString(name) {
 		return fmt.Errorf("project name %q: use lowercase letters, digits, '.', '_' or '-', starting with a letter or digit", name)
@@ -128,12 +133,22 @@ func New(project, bucket string) Config {
 	}
 }
 
-// Validate checks every field, including the v0 refusal of shared folders.
+// Validate checks every field, including the refusal of a shared mode in [modes].
 func (c *Config) Validate() error {
 	if err := ValidateProject(c.Project); err != nil {
 		return err
 	}
-	if err := ValidateBucket(c.Bucket); err != nil {
+	if c.Store != "" {
+		spec, err := store.Parse(c.Store)
+		if err != nil {
+			return err
+		}
+		// WHY refused: two answers to "which bucket" would let a folder sync to the one the other line does not name
+		if c.Bucket != "" && c.Bucket != spec.Bucket {
+			return fmt.Errorf("bucket %q and store %q name different buckets: set store only", c.Bucket, c.Store)
+		}
+		c.Bucket = spec.Bucket
+	} else if err := ValidateBucket(c.Bucket); err != nil {
 		return err
 	}
 	if c.PeersDir == "" {
@@ -170,21 +185,32 @@ func (c *Config) Validate() error {
 		switch mode := c.Modes[subfolder]; mode {
 		case ModePush:
 		case ModeShared:
-			return ErrSharedIsV1{Subfolder: subfolder}
+			return ErrUseShare{Subfolder: subfolder}
 		default:
-			return fmt.Errorf("modes.%q = %q: the modes are %q (v0) and %q (v1)", subfolder, mode, ModePush, ModeShared)
+			return fmt.Errorf("modes.%q = %q: the only mode is %q (a folder is shared with `folder-sync share`)", subfolder, mode, ModePush)
 		}
 	}
 	return nil
 }
 
-// ErrSharedIsV1 is the clear refusal of two-way folders in v0.
-type ErrSharedIsV1 struct{ Subfolder string }
+// ErrUseShare is the refusal of a shared mode in [modes]. WHY (docs/peps/0010 §7): which files are shared is one rule for the
+// whole folder, kept in the shared tree's manifest; each machine's .folder-sync.toml is its own, so a per-machine rule
+// could disagree.
+type ErrUseShare struct{ Subfolder string }
 
-func (e ErrSharedIsV1) Error() string {
-	return fmt.Sprintf("modes.%q = \"shared\" is not available in v0: two-way folders need the lease in "+
-		"_leases/<project>.json and rclone bisync (docs/peps/0001 §6), which ship in v1. "+
-		"In v0 every machine publishes only its own files under hosts/<host-id>/; remove the line to continue", e.Subfolder)
+func (e ErrUseShare) Error() string {
+	return fmt.Sprintf("modes.%q = \"shared\" is not a setting: a folder is shared once, for every machine, with "+
+		"`folder-sync share <project> [--private <pattern>]...` (docs/peps/0010); remove the line to continue", e.Subfolder)
+}
+
+// StoreSpec is the parsed store: the store URL, else r2://<bucket> (Validate must have passed).
+func (c Config) StoreSpec() store.Spec {
+	if c.Store != "" {
+		if spec, err := store.Parse(c.Store); err == nil {
+			return spec
+		}
+	}
+	return store.R2Default(c.Bucket)
 }
 
 // HistoryEveryDuration is the parsed history_every (Validate must have passed).
@@ -255,7 +281,12 @@ func Render(c Config) string {
 	var b bytes.Buffer
 	b.WriteString("# folder-sync project config (docs/peps/0001). Safe to commit: it holds no key and no host id.\n")
 	fmt.Fprintf(&b, "project = %q\n", c.Project)
-	fmt.Fprintf(&b, "bucket = %q\n", c.Bucket)
+	if c.Store != "" {
+		b.WriteString("# Where the bytes live: r2://bucket, s3://bucket/prefix, gs://bucket/prefix or file:///dir (docs/STORAGE.md).\n")
+		fmt.Fprintf(&b, "store = %q\n", c.Store)
+	} else {
+		fmt.Fprintf(&b, "bucket = %q\n", c.Bucket)
+	}
 	b.WriteString("# Peers' files land read-only in <this folder>/<peers_dir>/<host-id>/, the same path as in the bucket.\n")
 	fmt.Fprintf(&b, "peers_dir = %q\n", c.PeersDir)
 	b.WriteString("# How often `sync --watch` runs a round.\n")
@@ -282,8 +313,8 @@ func Render(c Config) string {
 	b.WriteString("]\n")
 	b.WriteString("# History is kept at most this often per file: a burst of saves keeps one version per window (30s at least).\n")
 	fmt.Fprintf(&b, "history_every = %q\n\n", c.HistoryEvery)
-	b.WriteString("# Subfolder modes. v0 has one: every file is this machine's (\"push\").\n")
-	b.WriteString("# \"shared\" (two-way, under a lease) is v1 and is refused today.\n")
+	b.WriteString("# Subfolder modes. There is one: every file is this machine's (\"push\").\n")
+	b.WriteString("# A two-way shared folder is set once, for every machine, with `folder-sync share`; \"shared\" is refused here.\n")
 	b.WriteString("[modes]\n")
 	subfolders := make([]string, 0, len(c.Modes))
 	for subfolder := range c.Modes {

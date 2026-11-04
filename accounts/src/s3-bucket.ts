@@ -38,6 +38,12 @@ function etagOf(answer: Response): string {
 	return (answer.headers.get("ETag") || "").replace(/^W\//, "").replace(/"/g, "");
 }
 
+/** A query as it goes on the wire: a space as %20, not "+". WHY (as encodeKey): it is what SigV4 signs, and a store that checks
+ *  the signature against the query as sent, not as decoded, refused a prefix such as "notes/plan (Conflicted copy …).md/". */
+function wire(query: URLSearchParams): string {
+	return query.toString().replace(/\+/g, "%20");
+}
+
 /** `body`, refused (the stream errors) unless it is exactly `length` bytes. */
 function exactly(body: ReadableStream<Uint8Array> | null, length: number): ReadableStream<Uint8Array> {
 	let seen = 0;
@@ -61,13 +67,15 @@ export class S3Bucket implements R2BucketLike {
 	private readonly send: FetchLike;
 	readonly calls: string[] = [];
 
-	constructor(creds: Pick<Minted, "AccessKeyId" | "SecretAccessKey" | "SessionToken" | "Endpoint" | "Bucket">, send: FetchLike) {
+	/** `SessionToken` and `Region` are for a person's own bucket (byo.ts): long-lived keys have no token, and a store other
+	 *  than R2 signs for its region (R2 takes "auto"). */
+	constructor(creds: Pick<Minted, "AccessKeyId" | "SecretAccessKey" | "Endpoint" | "Bucket"> & { SessionToken?: string; Region?: string }, send: FetchLike) {
 		this.client = new AwsClient({
 			accessKeyId: creds.AccessKeyId,
 			secretAccessKey: creds.SecretAccessKey,
-			sessionToken: creds.SessionToken,
+			sessionToken: creds.SessionToken || undefined,
 			service: "s3",
-			region: "auto",
+			region: creds.Region || "auto",
 			retries: 0,
 		});
 		this.bucket = creds.Bucket;
@@ -75,8 +83,11 @@ export class S3Bucket implements R2BucketLike {
 		this.send = send;
 	}
 
+	// WHY the characters encodeURIComponent leaves (! ' ( ) *) escaped too: they are what SigV4 signs escaped (RFC 3986), and a
+	// store that checks the signature against the path as sent, not as decoded, refuses a key like "plan (Conflicted copy …).md"
+	// (the shared tree's conflict copies always have parentheses)
 	private encodeKey(key: string): string {
-		return key.split("/").map(encodeURIComponent).join("/");
+		return key.split("/").map((segment) => encodeURIComponent(segment).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)).join("/");
 	}
 
 	private url(key: string): string {
@@ -186,7 +197,7 @@ export class S3Bucket implements R2BucketLike {
 		this.calls.push(`LIST ${options.prefix}`);
 		const query = new URLSearchParams({ "list-type": "2", prefix: options.prefix, delimiter: options.delimiter });
 		if (options.cursor) query.set("continuation-token", options.cursor);
-		const answer = await this.call(`${this.base}?${query}`);
+		const answer = await this.call(`${this.base}?${wire(query)}`);
 		if (!answer.ok) {
 			await answer.body?.cancel();
 			throw new Error(`the storage answered ${answer.status} for a listing`);
@@ -224,7 +235,7 @@ export class S3Bucket implements R2BucketLike {
 		if (options.delimiter) query.set("delimiter", options.delimiter);
 		if (options.cursor) query.set("continuation-token", options.cursor);
 		if (options.startAfter) query.set("start-after", options.startAfter);
-		const answer = await this.call(`${this.base}?${query}`);
+		const answer = await this.call(`${this.base}?${wire(query)}`);
 		if (!answer.ok) {
 			await answer.body?.cancel();
 			throw new Error(`the storage answered ${answer.status} for a listing`);
@@ -272,7 +283,7 @@ export class S3Bucket implements R2BucketLike {
 	async keys(prefix: string, max = 1000): Promise<{ keys: { key: string; size: number }[]; more: boolean }> {
 		this.calls.push(`LIST ${prefix}`);
 		const query = new URLSearchParams({ "list-type": "2", prefix, "max-keys": String(max) });
-		const answer = await this.call(`${this.base}?${query}`);
+		const answer = await this.call(`${this.base}?${wire(query)}`);
 		if (!answer.ok) {
 			await answer.body?.cancel();
 			throw new Error(`the storage answered ${answer.status} for a listing`);

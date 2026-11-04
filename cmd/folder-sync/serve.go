@@ -38,12 +38,11 @@ func cmdServe(args []string, out io.Writer) error {
 	if err := ensureDirs(l); err != nil {
 		return err
 	}
-	getenv := credentialEnv(l, os.Getenv, os.Executable)
 	srv, err := serve.New(serve.Config{
 		Layout: l,
 		UI:     ui.Files,
 		Open: func(folder string) (*syncer.Project, error) {
-			return syncer.Open(folder, l, getenv, rcloneBinary(l), io.Discard)
+			return syncer.Open(folder, l, credentialEnvFor(l, folderStore(folder), os.Getenv, os.Executable), rcloneBinary(l), io.Discard)
 		},
 		Account: func() (account.Account, error) {
 			a, _, err := signedIn(l)
