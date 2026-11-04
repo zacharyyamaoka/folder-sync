@@ -651,3 +651,22 @@ test("the store's SQL for the shared tree runs on SQLite, D1's engine: one id pe
 	assert.equal(await store.sharedTree(OWNER.userId, "other"), null);
 	assert.equal(await store.sharedTree(READER.userId, "notes"), null);
 });
+
+test("a key with parentheses is sent escaped, as SigV4 signs it (a store that checks the path as sent refused the conflict copy's name)", async () => {
+	const { w } = await shared();
+	const urls: string[] = [];
+	const inner = w.s3.fetch;
+	(w.s3 as { fetch: typeof inner }).fetch = async (request: Request) => { urls.push(request.url); return inner(request); };
+	// the world's deps hold the original fetch; go straight to a bucket over the recording one
+	const bucket = new S3Bucket(await mint(env(), ROOT, "object-read-write", 300, T0), (r) => { urls.push(r.url); return inner(r); });
+	await bucket.put(`${ROOT}notes/hosts/x/plan (Conflicted copy bam-Air 202611041300).md`, enc.encode("x"));
+	const sent = urls.find((u) => u.includes("Conflicted"))!;
+	assert.match(sent, /plan%20%28Conflicted%20copy%20bam-Air%20202611041300%29\.md$/);
+	assert.doesNotMatch(sent, /[()]/);
+	// and a listing's prefix: a space is %20 on the wire, not "+"
+	urls.length = 0;
+	await bucket.objects(`${ROOT}_history/notes/x/plan (Conflicted copy bam-Air 202611041300).md/`, { delimiter: "/" });
+	const listed = urls.find((u) => u.includes("list-type"))!;
+	assert.match(listed, /prefix=[^&]*plan%20%28Conflicted%20copy%20bam-Air/);
+	assert.doesNotMatch(listed, /\+/);
+});

@@ -61,7 +61,9 @@ func newTreeServer(t *testing.T, store *memStore, clock func() time.Time) *treeS
 	return ts
 }
 
-func (ts *treeServer) key(p string) string { return worldRoot + worldProject + "/hosts/" + treeHost + "/" + p }
+func (ts *treeServer) key(p string) string {
+	return worldRoot + worldProject + "/hosts/" + treeHost + "/" + p
+}
 
 func (ts *treeServer) put(key string, data []byte) {
 	ts.store.mu.Lock()
@@ -409,7 +411,9 @@ func TestSharedAConflictKeepsTheLocalBytesInTheCopyAndTheFileTakesTheTreesVersio
 func TestSharedAMergeReplacesTheLocalFileWithTheMergedResult(t *testing.T) {
 	w := newWorld(t, time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC), nil)
 	ts := newTreeServer(t, w.store, func() time.Time { return w.clock })
-	ts.merge = func(_ string, ours, theirs []byte) ([]byte, bool) { return append(append([]byte{}, theirs...), ours...), true }
+	ts.merge = func(_ string, ours, theirs []byte) ([]byte, bool) {
+		return append(append([]byte{}, theirs...), ours...), true
+	}
 	shareWith(t, w, ts)
 	w.write("n.md", []byte("base\n"))
 	w.advance(time.Second)
@@ -431,7 +435,9 @@ func TestSharedAMergeReplacesTheLocalFileWithTheMergedResult(t *testing.T) {
 func TestSharedAPullNeverOverwritesALocalEdit(t *testing.T) {
 	w := newWorld(t, time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC), nil)
 	ts := newTreeServer(t, w.store, func() time.Time { return w.clock })
-	ts.merge = func(_ string, ours, theirs []byte) ([]byte, bool) { return append(append([]byte{}, theirs...), ours...), true }
+	ts.merge = func(_ string, ours, theirs []byte) ([]byte, bool) {
+		return append(append([]byte{}, theirs...), ours...), true
+	}
 	shareWith(t, w, ts)
 	w.write("n.md", []byte("v1\n"))
 	w.advance(time.Second)

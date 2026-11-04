@@ -37,6 +37,14 @@ function definitions(ctx) {
         { kind: 'go', pkg: './e2e', tests: ['TestSoakNothingLost'],
           env: { FOLDER_SYNC_SOAK: ctx.soakProfile === 'smoke' ? '' : ctx.soakProfile, FOLDER_SYNC_SOAK_SEED: String(ctx.soakSeed), FOLDER_SYNC_SOAK_REPORT: path.join(ctx.outDir, soakReport) },
           evidence: [soakReport] },
+        // the shared tree (PEP 0010): the same promise with one tree that every device and page edits: the real Worker, the real
+        // binary on three machines, a page; every case of PEP 0010 §11 and the randomized soak. The Worker's own side is in
+        // test/shared.test.ts (the merge, the journal, who may write).
+        { kind: 'go', pkg: './e2e', tests: ['TestSharedTree', 'TestSoakSharedNothingLost'],
+          env: { FOLDER_SYNC_SOAK: ctx.soakProfile === 'smoke' ? '' : ctx.soakProfile, FOLDER_SYNC_SOAK_SEED: String(ctx.soakSeed) } },
+        { ...NODE_ACCOUNTS, file: 'test/shared.test.ts' },
+        { ...NODE_ACCOUNTS, file: 'test/shared-merge.test.ts' },
+        { kind: 'go', pkg: './internal/syncer', tests: ['TestSharedAPullNeverOverwritesALocalEdit', 'TestSharedSaveStormMakesNoConflict', 'TestSharedFilesLeaveTheOwnHostOnlyOnceTheTreeHoldsThem', 'TestSharedAFolderThatLooksEmptyDeletesNothing'] },
       ],
     },
     {
@@ -46,6 +54,9 @@ function definitions(ctx) {
         { kind: 'go', pkg: './e2e', tests: ['TestGateVersionHistory30Days', 'TestGateEditsFiveMinutesApartAreAllKept', 'TestHistory'] },
         { kind: 'go', pkg: './internal/history', all: true },
         { ...NODE_ACCOUNTS, file: 'test/history.test.ts' },
+        // the shared tree keeps history in the same forms (PEP 0010 §8): a merge keeps both inputs, an append leaves as a pointer, a
+        // delete keeps the file's last bytes, and a kept version of a shared file restores
+        { ...NODE_ACCOUNTS, file: 'test/shared.test.ts', pattern: 'both inputs|pointer|restore|throttle|an edit beats a delete|two appends' },
       ],
     },
     {
