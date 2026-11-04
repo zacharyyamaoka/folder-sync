@@ -46,6 +46,35 @@ export interface Store {
 	 *  bounded list (judge r2 #2, #4). What a key refresh and a queued web write check last (devices.ts). Absent in a
 	 *  stand-in that cannot revoke. */
 	sessionAlive?(owner: string, sessionId: string, now: number): Promise<boolean>;
+	/** The plan ids of the person's active or trialing subscriptions (the Stripe plugin's `subscription` rows, migration
+	 *  0011): what quota.ts quotaFor turns into a ceiling. Absent in a stand-in with no payments. */
+	activePlans?(owner: string): Promise<string[]>;
+	/** The person's billing state for their page: their Stripe customer id (null before their first checkout) and the
+	 *  subscription worth showing (any but incomplete or canceled), the active ones first. */
+	billing?(owner: string): Promise<BillingRow>;
+	/** The person's own bucket (byo.ts), its secret still sealed; null when they attached none. */
+	byo?(owner: string): Promise<ByoRow | null>;
+	setByo?(row: ByoRow): Promise<void>;
+	removeByo?(owner: string): Promise<boolean>;
+}
+
+/** A person's billing state: see Store.billing. */
+export interface BillingRow {
+	customer: string | null;
+	subscription: { plan: string; status: string; periodEnd: string | null; cancelAtPeriodEnd: boolean } | null;
+}
+
+/** One person's attached bucket, as migration 0012 stores it. `sealed` is byo.ts sealSecret's output for { id, secret }. */
+export interface ByoRow {
+	owner_id: string;
+	endpoint: string;
+	bucket: string;
+	prefix: string;
+	region: string;
+	key_hint: string;
+	sealed: string;
+	created_at: string;
+	updated_at: string;
 }
 
 /** The subset of Cloudflare's D1Database binding used here. */
@@ -144,6 +173,31 @@ export function d1Store(db: D1Like): Store {
 		async sessionAlive(owner, sessionId, now) {
 			const row = await one<{ expiresAt: unknown }>('SELECT "expiresAt" FROM "session" WHERE "id" = ? AND "userId" = ?', sessionId, owner);
 			return !!row && instant(row.expiresAt) > now;
+		},
+		async activePlans(owner) {
+			return (await all<{ plan: string }>('SELECT "plan" FROM "subscription" WHERE "referenceId" = ? AND "status" IN (\'active\', \'trialing\')', owner)).map((r) => r.plan);
+		},
+		async billing(owner) {
+			const customer = (await one<{ customer: string | null }>('SELECT "stripeCustomerId" AS customer FROM "user" WHERE "id" = ?', owner))?.customer ?? null;
+			const row = await one<{ plan: string; status: string; periodEnd: unknown; cancelAtPeriodEnd: number | null }>(
+				'SELECT "plan", "status", "periodEnd", "cancelAtPeriodEnd" FROM "subscription" WHERE "referenceId" = ? AND "status" NOT IN (\'incomplete\', \'incomplete_expired\', \'canceled\') ORDER BY CASE WHEN "status" IN (\'active\', \'trialing\') THEN 0 ELSE 1 END, "periodEnd" DESC LIMIT 1',
+				owner,
+			);
+			const end = row?.periodEnd ? instant(row.periodEnd) : 0;
+			return { customer, subscription: row ? { plan: row.plan, status: row.status, periodEnd: end ? new Date(end).toISOString() : null, cancelAtPeriodEnd: !!row.cancelAtPeriodEnd } : null };
+		},
+		async byo(owner) {
+			return one<ByoRow>('SELECT "owner_id", "endpoint", "bucket", "prefix", "region", "key_hint", "sealed", "created_at", "updated_at" FROM "byo_store" WHERE "owner_id" = ?', owner);
+		},
+		async setByo(row) {
+			await run(
+				'INSERT INTO "byo_store" ("owner_id", "endpoint", "bucket", "prefix", "region", "key_hint", "sealed", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT ("owner_id") DO UPDATE SET "endpoint" = excluded."endpoint", "bucket" = excluded."bucket", "prefix" = excluded."prefix", "region" = excluded."region", "key_hint" = excluded."key_hint", "sealed" = excluded."sealed", "updated_at" = excluded."updated_at"',
+				row.owner_id, row.endpoint, row.bucket, row.prefix, row.region, row.key_hint, row.sealed, row.created_at, row.updated_at,
+			);
+		},
+		async removeByo(owner) {
+			const done = await run('DELETE FROM "byo_store" WHERE "owner_id" = ?', owner);
+			return (done.meta?.changes ?? 0) > 0;
 		},
 	};
 	return store;

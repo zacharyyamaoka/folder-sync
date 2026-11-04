@@ -61,13 +61,15 @@ export class S3Bucket implements R2BucketLike {
 	private readonly send: FetchLike;
 	readonly calls: string[] = [];
 
-	constructor(creds: Pick<Minted, "AccessKeyId" | "SecretAccessKey" | "SessionToken" | "Endpoint" | "Bucket">, send: FetchLike) {
+	/** `SessionToken` and `Region` are for a person's own bucket (byo.ts): long-lived keys have no token, and a store other
+	 *  than R2 signs for its region (R2 takes "auto"). */
+	constructor(creds: Pick<Minted, "AccessKeyId" | "SecretAccessKey" | "Endpoint" | "Bucket"> & { SessionToken?: string; Region?: string }, send: FetchLike) {
 		this.client = new AwsClient({
 			accessKeyId: creds.AccessKeyId,
 			secretAccessKey: creds.SecretAccessKey,
-			sessionToken: creds.SessionToken,
+			sessionToken: creds.SessionToken || undefined,
 			service: "s3",
-			region: "auto",
+			region: creds.Region || "auto",
 			retries: 0,
 		});
 		this.bucket = creds.Bucket;

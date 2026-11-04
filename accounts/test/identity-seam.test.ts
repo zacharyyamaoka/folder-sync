@@ -3,7 +3,9 @@
 // accounts/src/auth.ts. Swapping Better Auth for a company's SSO means rewriting that file and nothing else.
 //
 // Two checks, both static (a read of the source, no Worker started):
-// - no file of the server part but the adapter imports better-auth (or any better-auth/* subpath);
+// - no file of the server part but the adapter imports better-auth (or any better-auth/* subpath), a Better Auth plugin
+//   package (@better-auth/*: the Stripe plugin) or the Stripe SDK (stripe), which is the plugin's other half: billing
+//   reaches Stripe through the `billing` port of Deps (billing.ts), answered in the adapter;
 // - no file of the server part but the Worker entry (index.ts, which wires liveDeps into the router) imports the adapter,
 //   so a route cannot reach createAuth or Better Auth's handler around the port.
 // `scan` is a pure function of the files' text, so the last test can show it goes red on a violation.
@@ -25,7 +27,7 @@ const SOURCE_DIRS = ["accounts/src", "demo"];
 const SOURCE_FILE = /\.(ts|mts|js|mjs)$/;
 const SKIP_DIRS = new Set(["node_modules", "site", "test", "vendor"]);
 
-const IMPORTS_BETTER_AUTH = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["'`]better-auth(?:\/[^"'`]*)?["'`]/;
+const IMPORTS_BETTER_AUTH = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["'`](?:better-auth(?:\/[^"'`]*)?|@better-auth\/[^"'`]+|stripe(?:\/[^"'`]*)?)["'`]/;
 const IMPORTS_ADAPTER = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["'`]\.\/auth(?:\.ts|\.js)?["'`]/;
 
 function sources(dir: string): string[] {
@@ -67,7 +69,7 @@ test("only the Worker entry imports the identity adapter", () => {
 test("the scan can fail: a route that imports better-auth, or the adapter, is caught", () => {
 	const clean = { [ADAPTER]: 'import { betterAuth } from "better-auth";', [WIRING]: 'import { liveDeps } from "./auth.ts";', "accounts/src/app.ts": "export const x = 1;" };
 	assert.deepEqual(scan(clean), { betterAuth: [ADAPTER], adapter: [WIRING] });
-	for (const bad of ['import { getSessionFromCtx } from "better-auth/api";', "const { betterAuth } = await import('better-auth');", 'const a = require("better-auth/plugins");', 'import "better-auth";']) {
+	for (const bad of ['import { stripe } from "@better-auth/stripe";', 'import Stripe from "stripe";', "const Stripe = require('stripe');", 'import { getSessionFromCtx } from "better-auth/api";', "const { betterAuth } = await import('better-auth');", 'const a = require("better-auth/plugins");', 'import "better-auth";']) {
 		assert.deepEqual(scan({ ...clean, "accounts/src/view.ts": bad }).betterAuth, [ADAPTER, "accounts/src/view.ts"], bad);
 	}
 	assert.deepEqual(scan({ ...clean, "accounts/src/view.ts": 'import { createAuth } from "./auth.ts";' }).adapter, ["accounts/src/index.ts", "accounts/src/view.ts"]);

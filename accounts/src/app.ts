@@ -42,7 +42,11 @@
 import { appFor, apps, OWN_APP, type App } from "./apps.ts";
 import { folderPrefix, mint, NotConfigured, PROJECT, ttlOf, USER_ID, userRoot, type CredsEnv } from "./creds.ts";
 import { checkPath, ContractError, Project, SCHEMA, validateManifest, type Manifest, type ManifestEntry } from "../../readers/worker/src/folder-sync-read.ts";
-import { Measuring, overQuota, quotaOf, TooOld, usageOf, type QuotaEnv } from "./quota.ts";
+import { Measuring, overQuota, quotaFor, TooOld, usageOf, type QuotaEnv } from "./quota.ts";
+import { featureOff, featuresOf, type FeatureEnv } from "./features.ts";
+import type { PlanEnv } from "./plans.ts";
+import { billingRoute, stripeReady, type BillingEnv, type BillingPort } from "./billing.ts";
+import { byoRoute, handoff as byoHandoff, type ByoEnv } from "./byo.ts";
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store, Visibility } from "./store.ts";
 import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhost.ts";
@@ -56,7 +60,7 @@ import { activityRoute, browserOf, deleted, history, purge, restore, status, ui 
 import { storageBreakdown } from "./storage.ts";
 import { filesPage } from "./files-page.ts";
 
-export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
+export interface Env extends CredsEnv, QuotaEnv, EmailEnv, FeatureEnv, PlanEnv, BillingEnv, ByoEnv {
 	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
 	ENVIRONMENT?: string;
 	/** This Worker's own host (the CLI's server, the account pages). */
@@ -123,6 +127,11 @@ export interface Deps {
 	grants?(userId: string): Promise<GrantRow[]>;
 	/** Deletes this person's pending grant `id`; false when they have none by that id. */
 	revokeGrant?(userId: string, id: string): Promise<boolean>;
+	/** The sign-in providers this person has linked ("google"), never their tokens (account.ts). Email codes need no link. */
+	signInMethods?(userId: string): Promise<string[]>;
+	/** Stripe, behind the identity adapter like the rest of Better Auth (billing.ts). Present only when payments are on and
+	 *  Stripe is set up with a TEST-mode key (billing.ts stripeReady). */
+	billing?: BillingPort;
 }
 
 export const READ_TTL_S = 300;
@@ -317,7 +326,7 @@ export async function decide(deps: Pick<Deps, "store">, person: Person | null, p
 /** Why the person may not add `addBytes` / `addObjects` now (§3.7, review r1 #7), or null. Measured by listing their
  *  root with a read-only credential when the cached measurement is stale. */
 async function quotaRefusal(env: Env, deps: Deps, owner: string, addBytes = 0, addObjects = 0): Promise<string | null> {
-	const quota = quotaOf(env, owner);
+	const quota = await quotaFor(env, deps.store, owner);
 	const root = userRoot(owner, env);
 	// WHY signed before usageOf: only the listing's own failures are a measurement's (Measuring); a credential that
 	// cannot be signed is a fault, not a 503 to try again
@@ -374,7 +383,7 @@ async function me(request: Request, env: Env, deps: Deps, app: App | null): Prom
 /** A person's storage against their quota (§3.7), split into live and history (PEP 0007 §3.5: history counts
  *  _history/, _changes/, _requests/ and legacy _trash/, and used = live + history). */
 export async function usageFigure(env: Env, deps: Deps, owner: string): Promise<{ used: Amount; live: Amount; history: Amount; quota: Amount; over: string | null; partial: boolean }> {
-	const quota = quotaOf(env, owner);
+	const quota = await quotaFor(env, deps.store, owner);
 	const root = userRoot(owner, env);
 	const bucket = await bucketFor(env, deps, root, "object-read-only", READ_TTL_S);
 	let used: { bytes: number; objects: number; partial?: boolean; history?: Amount };
@@ -430,6 +439,11 @@ async function credentials(request: Request, env: Env, deps: Deps, app: App | nu
 	if (!/^bearer\s+\S/i.test(request.headers.get("Authorization") || "")) return fail(401, "signed_out", "a machine signs in with folder-sync login");
 	const person = await deps.person(request, "bearer", app); // fs-mutation: the bearer session
 	if (!person) return fail(401, "signed_out", "this machine is signed out (signed out or revoked): run folder-sync login");
+	// WHY before the quota: a person's own bucket is theirs (byo.ts), so the service's quota never applies to it
+	if (featuresOf(env).byo) {
+		const own = await byoHandoff(env, deps, person);
+		if (own) return own;
+	}
 	// WHY here: a machine writes to R2 directly and R2 scopes a prefix, never a size, so an account over its quota
 	// gets read-only keys (review r1 #7, r2 #7): it can still pull, its uploads wait, and its deletes go through
 	// POST …/hosts/<host>/delete, which lowers the usage; the read-write keys it holds run out within the TTL
@@ -864,7 +878,7 @@ export const PAGE_POLICY = [
 ].join("; ");
 
 /** Whether this Worker sends sign-in codes by email: dev (to its mailbox), or production with Resend set up. */
-function emailCodes(env: Env): boolean {
+export function emailCodes(env: Env): boolean {
 	return env.ENVIRONMENT === "dev" || (!!env.RESEND_API_KEY && !!env.EMAIL_FROM);
 }
 
@@ -956,6 +970,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 	const head = method === "HEAD";
 	const read = method === "GET" || head;
 	const [, first, ...rest] = parts;
+	const features = featuresOf(env);
 
 	if (method === "OPTIONS") {
 		if (!allowed["Access-Control-Allow-Origin"]) return fail(403, "cors", "this origin is not a registered app");
@@ -970,6 +985,12 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 		// WHY a second guard: the email-code plugin is loaded in dev, or in production once Resend is set up (review r3
 		// #8); without it a request for it is a 404 here even if a config mistake loaded the plugin
 		if (!emailCodes(env) && rest.some((p) => p.includes("email-otp"))) return fail(404, "not_found", "no email codes here");
+		// WHY here and not only in the pages: Better Auth's own routes are the other way in to a switched-off feature
+		if (!features.sync && rest[1] === "device") return featureOff("sync");
+		if (rest[1] === "stripe" || rest[1] === "subscription") {
+			if (!features.payments) return featureOff("payments");
+			if (!deps.billing) return fail(503, "not_configured", "payments are on but Stripe is not set up here (a test-mode STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET)");
+		}
 		return deps.auth(request, app);
 	}
 	if (first === "dev" && rest[0] === "mailbox" && rest.length === 1) {
@@ -983,13 +1004,19 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 	if ((first === "signin" || first === "device") && rest.length === 0) {
 		if (!read) return fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 		if (!app) return fail(404, "unknown_origin", "this origin is not a registered app: no sign-in here");
+		if (first === "device" && !features.sync) return featureOff("sync");
 		const back = first === "signin" ? signInReturn(app, returnPath(new URL(request.url).searchParams.get("return"))) : "/fs/device";
 		const origin = new URL(request.url).origin;
 		return first === "signin" ? page(env, app, origin, "Sign in", "", back, head) : page(env, app, origin, "Sign in a machine", "device.js", back, head);
 	}
 	if (first === "handoff") return handoffRoute(request, deps, app, rest, method);
-	if (first === "account") return accountRoute(request, env, deps, app, rest, method);
+	if (first === "account") {
+		if ((rest[0] === "plan" || rest[0] === "billing") && !features.payments) return featureOff("payments");
+		if (rest[0] === "byo" && !features.byo) return featureOff("byo");
+		return accountRoute(request, env, deps, app, rest, method);
+	}
 	if (first === "files" && rest.length === 0) {
+		if (!features.storage) return featureOff("storage");
 		if (!read) return fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 		if (!app) return fail(404, "unknown_origin", "this origin is not a registered app: no files page here");
 		return filesPage(request, deps, app, head);
@@ -1004,8 +1031,13 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 	if (what === "usage" && rest.length === 1) return read ? usage(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (what === "usage" && rest.length === 2 && project === "breakdown") return read ? storageBreakdown(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (what === "sign-out" && rest.length === 1) return method === "POST" ? signOut(request, env, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
-	if (what === "credentials" && rest.length === 1) return method === "POST" ? credentials(request, env, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
+	if (what === "credentials" && rest.length === 1) {
+		if (!features.sync) return featureOff("sync");
+		return method === "POST" ? credentials(request, env, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
+	}
 	if (what === "devices") return devicesApi(request, env, deps, app, rest.slice(1), method);
+	if (what === "billing") return features.payments ? billingRoute(request, env, deps, app, rest.slice(1), method) : featureOff("payments");
+	if (what === "byo") return features.byo ? byoRoute(request, env, deps, app, rest.slice(1), method) : featureOff("byo");
 	if (what === "access" && rest.length === 1) return read ? access(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (what !== "folders") return fail(404, "not_found", "no such route");
 	if (rest.length === 1) return read ? folders(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
@@ -1019,13 +1051,16 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 	if (sub === "bundle" && more.length === 0) return read ? bundle(request, env, deps, app, project) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (sub === "files" && more.length >= 2) return read ? file(request, env, deps, app, project, more[0], more.slice(1), head) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (sub === "web" && more.length >= 1) {
+		if (!features.storage) return featureOff("storage");
 		return method === "PUT" || method === "DELETE" ? web(request, env, deps, app, project, more, method) : fail(405, "method", "PUT or DELETE", { Allow: "PUT, DELETE" });
 	}
 	if (sub === "readers") return readers(request, env, deps, app, project, more, method);
 	if (sub === "web-trash" && more.length === 1 && more[0] === "purge") {
+		if (!features.storage) return featureOff("storage");
 		return method === "POST" ? purgeWebTrash(request, env, deps, app, project) : fail(405, "method", "POST only", { Allow: "POST" });
 	}
 	if (sub === "hosts" && more.length === 2 && more[1] === "delete") {
+		if (!features.sync) return featureOff("sync");
 		return method === "POST" ? machineDelete(request, env, deps, app, project, more[0]) : fail(405, "method", "POST only", { Allow: "POST" });
 	}
 	// the sync view's data API (PEP 0007, docs/API.md)

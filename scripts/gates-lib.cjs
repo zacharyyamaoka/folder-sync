@@ -117,6 +117,13 @@ function definitions(ctx) {
         { ...NODE_ACCOUNTS, file: 'test/app-root.test.ts' },
         { ...NODE_ACCOUNTS, file: 'test/real-auth.test.ts' },
         { ...NODE_ACCOUNTS, file: 'test/identity-seam.test.ts' },
+        // the stock account page, the four switches, plans as quotas (Stripe, test mode) and a person's own bucket (docs/PAYMENTS.md, NEW-APP.md)
+        { ...NODE_ACCOUNTS, file: 'test/features.test.ts' },
+        { ...NODE_ACCOUNTS, file: 'test/account.test.ts' },
+        { ...NODE_ACCOUNTS, file: 'test/billing.test.ts' },
+        { ...NODE_ACCOUNTS, file: 'test/byo.test.ts' },
+        // WHY advisory: it needs Chromium; it shows in a --with-web run without making G10 depend on a browser being installed
+        { kind: 'cmd', advisory: true, name: 'the account page in Chromium: sign in, upgrade (Stripe fixture), own bucket, devices (accounts/test/account-journey.mjs)', argv: ['node', 'accounts/test/account-journey.mjs'], needs: 'web' },
       ],
     },
     {

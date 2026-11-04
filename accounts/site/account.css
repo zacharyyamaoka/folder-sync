@@ -6,7 +6,7 @@
 }
 body { margin: 0; background: var(--page); }
 .fs-cover {
-  min-height: 100vh; box-sizing: border-box; display: grid; place-items: center; padding: 16px;
+  min-height: 100vh; box-sizing: border-box; display: grid; grid-template-columns: minmax(0, 1fr); place-items: center; padding: 16px;
   color: var(--ink); font: 13px/1.5 system-ui, sans-serif;
 }
 .fs-card {
@@ -34,11 +34,37 @@ body { margin: 0; background: var(--page); }
   margin: 8px 0 12px; padding: 10px; border-radius: var(--radius); background: var(--hover);
   font: 600 22px/1.2 ui-monospace, monospace; letter-spacing: .12em; text-align: center;
 }
-/* the account page (/fs/account, src/devices.ts): who, storage, devices with Revoke, Sign out; no script */
+/* the account page (/fs/account, src/devices.ts + src/account.ts): profile, storage, plan, your own bucket, devices, Sign out;
+   no script. Calm: one column, thin rules between sections, the same tokens as the sign-in page, light and dark. */
 .fs-card.fs-wide { width: min(560px, 100%); }
-.fs-card h2 { margin: 18px 0 4px; font-size: 13px; font-weight: 600; }
-.fs-who { margin: 8px 0 4px; }
+.fs-card h2 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+.fs-section { padding: 16px 0; border-top: 1px solid var(--line); }
+.fs-section > :last-child { margin-bottom: 0; }
+.fs-section a { color: var(--ink); text-decoration-color: var(--ink-3); text-underline-offset: 2px; }
+.fs-profile { display: flex; align-items: flex-start; gap: 12px; border-top: 0; padding-top: 4px; }
+.fs-avatar { flex: none; width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; background: var(--hover); color: var(--ink-2); font-weight: 600; }
+.fs-who { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.fs-methods { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.fs-methods li { padding: 1px 8px; border-radius: 999px; background: var(--hover); color: var(--ink-2); font-size: 11px; }
 .fs-notice { margin: 8px 0 4px; padding: 8px 10px; border-radius: var(--radius); background: var(--hover); }
+.fs-bar { display: block; width: 100%; height: 6px; margin: 8px 0 6px; border: 0; border-radius: 3px; overflow: hidden; background: var(--hover); color: var(--ink-2); appearance: none; -webkit-appearance: none; }
+.fs-bar::-webkit-progress-bar { background: var(--hover); border-radius: 3px; }
+.fs-bar::-webkit-progress-value { background: var(--ink-2); border-radius: 3px; }
+.fs-bar::-moz-progress-bar { background: var(--ink-2); border-radius: 3px; }
+.fs-bar-over { color: var(--danger-ink); }
+.fs-bar-over::-webkit-progress-value { background: var(--danger-ink); }
+.fs-bar-over::-moz-progress-bar { background: var(--danger-ink); }
+.fs-planline { margin: 2px 0 6px; overflow-wrap: anywhere; }
+.fs-offers { list-style: none; margin: 8px 0 0; padding: 0; }
+.fs-offer { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); }
+.fs-offer:last-child { border-bottom: 1px solid var(--line); }
+.fs-offer-text { flex: 1; min-width: 0; }
+.fs-inline { display: inline-block; margin: 10px 0 0; }
+.fs-steps form { display: grid; gap: 8px; margin: 10px 0 0; }
+.fs-field { display: grid; gap: 2px; }
+.fs-field span { color: var(--ink-2); font-size: 12px; }
+.fs-field input { margin: 0; }
+.fs-steps summary { padding: 6px 0; }
 .fs-devices { list-style: none; margin: 8px 0 0; padding: 0; }
 .fs-device { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); }
 .fs-device:last-child { border-bottom: 1px solid var(--line); }
@@ -48,7 +74,7 @@ body { margin: 0; background: var(--page); }
 .fs-device-name { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; font-weight: 500; }
 .fs-tag { margin-left: 6px; padding: 1px 6px; border-radius: 999px; background: var(--hover); color: var(--ink-2); font-size: 11px; white-space: nowrap; }
 .fs-device form { margin: 0; flex: none; }
-.fs-signout { margin: 16px 0 0; }
+.fs-signout { margin: 4px 0 0; padding-top: 16px; border-top: 1px solid var(--line); }
 .fs-button {
   display: block; padding: 6px 12px; border-radius: var(--radius); text-align: center; text-decoration: none;
   background: var(--ink); color: var(--page);
@@ -57,6 +83,14 @@ body { margin: 0; background: var(--page); }
 .fs-apps h2 { margin-top: 18px; }
 .fs-apps ul { margin: 4px 0 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 4px 16px; }
 .fs-apps a { color: var(--ink); }
+/* a phone: the card is the page (no frame), and a row of text and a button stacks when it must */
+@media (max-width: 480px) {
+  .fs-cover { padding: 0; place-items: start stretch; }
+  .fs-card { width: 100% !important; border-radius: 0; box-shadow: none; padding: 18px 16px 14px; }
+  .fs-device, .fs-offer { flex-wrap: wrap; }
+  .fs-card button { min-height: 36px; }
+  .fs-card input { font-size: 16px; } /* iOS zooms into smaller fields */
+}
 /* the download page (/fs/download, src/download.ts): installers per OS, the first-run steps; no script.
    WHY its own fs-dl classes: .fs-button above is the account page's dark Sign in link; reusing the name restyled it */
 .fs-cover.fs-dl-cover { grid-template-columns: minmax(0, 1fr); justify-items: center; } /* never wider than a phone */

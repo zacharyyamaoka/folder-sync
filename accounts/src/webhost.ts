@@ -22,7 +22,9 @@ import { checkPath, ContractError, SCHEMA, validateManifest, type Manifest, type
 import { mint, NotConfigured, userRoot, type CredsEnv } from "./creds.ts";
 import { EVERY_MS, anchorOf, changesKey, historyKey, historyPrefix, keepOnWrite, keyFits, listedObject, parseVersion, trashStampTime, unlistedId, versionId } from "./history.ts";
 import { pruneFolder, type LiveOf } from "./prune.ts";
-import { Measuring, overQuota, quotaOf, usageOf, type QuotaEnv } from "./quota.ts";
+import { Measuring, overQuota, quotaFor, usageOf, type QuotaEnv } from "./quota.ts";
+import type { FeatureEnv } from "./features.ts";
+import type { PlanEnv } from "./plans.ts";
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store } from "./store.ts";
 
@@ -645,7 +647,7 @@ const WRITE_TTL_S = 300;
 
 /** Runs one web-host operation in the caller's queue: signs a read-write credential for the owner's root, settles any
  *  cut-off change first, then writes or deletes. Errors the person can act on come back as answers. */
-export async function runWebOp(env: CredsEnv & QuotaEnv, s3: FetchLike, op: WebOp, journal: Journal, clock: () => number, store: Store): Promise<WebAnswer> {
+export async function runWebOp(env: CredsEnv & QuotaEnv & PlanEnv & FeatureEnv, s3: FetchLike, op: WebOp, journal: Journal, clock: () => number, store: Store): Promise<WebAnswer> {
 	// admitted: the asking session must still be live now, not only when its request arrived (judge r2 #5)
 	if (op.method !== "SETTLE" && op.sessionId && store.sessionAlive && !(await store.sessionAlive(op.owner, op.sessionId, clock()))) {
 		return { status: 401, body: { error: "signed_out", why: "this device was signed out before its change could start" } };
@@ -654,7 +656,7 @@ export async function runWebOp(env: CredsEnv & QuotaEnv, s3: FetchLike, op: WebO
 		const root = userRoot(op.owner, env);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, clock()), s3);
 		const w = { root, project: op.project, hostId: op.hostId };
-		const quota = quotaOf(env, op.owner);
+		const quota = await quotaFor(env, store, op.owner);
 		const ledger: Ledger = {
 			async admit(bytes, objects) {
 				if (bytes <= 0 && objects <= 0) return;
