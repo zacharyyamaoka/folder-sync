@@ -562,7 +562,7 @@ func (r *soakRun) check(machines []*machine) []string {
 			for path, content := range tree {
 				if got, ok := mirror[path]; !ok {
 					problems = append(problems, fmt.Sprintf("%s's copy of %s lacks %s", m.name, label, path))
-				} else if got != content {
+				} else if got != content && !r.editedHere(m.name, id, path, got) {
 					problems = append(problems, fmt.Sprintf("%s's copy of %s differs at %s", m.name, label, path))
 				}
 			}
@@ -578,6 +578,17 @@ func (r *soakRun) check(machines []*machine) []string {
 		problems = append(problems[:12], fmt.Sprintf("… and %d more", len(problems)-12))
 	}
 	return problems
+}
+
+// editedHere: the copy holds a second person's edit, which stays on disk until that host's next manifest replaces it (and then
+// moves to conflicts/). Not a divergence: editsKept proves the edit is not lost.
+func (r *soakRun) editedHere(machine, hostID, path, got string) bool {
+	for _, edit := range r.edits {
+		if edit.on == machine && edit.of == hostID && edit.path == path && edit.content == got {
+			return true
+		}
+	}
+	return false
 }
 
 // lostVersions reads every machine's change records and checks the versions they say were kept.
