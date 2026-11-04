@@ -12,3 +12,6 @@ node_modules/
 /app/src-tauri/target/
 /app/src-tauri/binaries/
 /app/src-tauri/gen/
+# The dev view's generated page (scripts/status, docs/DEV-VIEW.md) and the gate results the gates runner writes
+/site/dev/
+/reports/status/
