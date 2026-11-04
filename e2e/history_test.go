@@ -1,6 +1,6 @@
 package e2e
 
-// PEP 0007's version history, end to end on the stand-in: an edit keeps the old version, a burst keeps one, *.log
+// PEP 0007's version history (and, below, PEP 0009's forms), end to end on the stand-in: an edit keeps the old version, a burst keeps one, *.log
 // keeps none, a delete is restorable, a restore never loses an unsynced edit, a restore request from the web or from
 // another machine is carried out and answered, and the engine's own prune follows the schedule. The stand-in (rclone
 // serve s3) ignores x-amz-copy-source-if-match and lists an object's LastModified as its file's mtime, so the 412
@@ -8,6 +8,7 @@ package e2e
 
 import (
 	"bytes"
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"folder-sync/internal/history"
 	"folder-sync/internal/s3"
 	"folder-sync/internal/testtools"
 )
@@ -227,11 +229,11 @@ func TestHistory(t *testing.T) {
 		validateAgainst(t, "changes.schema.json", raw)
 	})
 
-	t.Run("a burst keeps at most one version per 30 s", func(t *testing.T) {
+	t.Run("a burst keeps at most one version per history_every (5 min)", func(t *testing.T) {
 		writeFile(t, plan, "plan v3\n", time.Time{})
 		w.must(a, "sync", "--once")
 		if kept := w.versions(idA, "notes/plan.md"); len(kept) != 1 {
-			t.Fatalf("v2 lived under 30 s, and v1 was kept seconds ago: %v", kept)
+			t.Fatalf("v2 lived seconds, and v1 was kept seconds ago: %v", kept)
 		}
 		var record changeRecord
 		w.jsonObject(t, fmt.Sprintf("_changes/%s/%s/%012d.json", project, idA, manifestSeq(t, w, idA)), &record)
@@ -561,4 +563,104 @@ func TestHistory(t *testing.T) {
 		validateAgainst(t, "event.schema.json", lines...)
 		t.Logf("%d local log lines valid against schema/event.schema.json", len(lines))
 	})
+}
+
+// TestHistoryForms is PEP 0009 on the real rclone and the stand-in: an appended log keeps a pointer, the rewrite that
+// follows keeps the appended version whole as a zstd keyframe (the pin), and each restores byte for byte through the
+// command line. Their names carry the version's own size, and an appended file's object_etag comes from the engine's own
+// upload.
+func TestHistoryForms(t *testing.T) {
+	w, a, _ := historyWorld(t)
+	idA := hostID(t, a)
+	logPath := filepath.Join(a.folder, "logs", "events.jsonl")
+	line := func(i int) string {
+		return fmt.Sprintf(`{"n":%d,"kind":"claim","text":"the quick brown fox jumps over the lazy dog, again and again, line %d"}`+"\n", i, i)
+	}
+	var v1Bytes, v2Bytes strings.Builder
+	for i := 0; i < 400; i++ {
+		v1Bytes.WriteString(line(i))
+	}
+	v2Bytes.WriteString(v1Bytes.String())
+	for i := 400; i < 450; i++ {
+		v2Bytes.WriteString(line(i))
+	}
+	v3 := strings.Repeat("a rewrite that shares nothing with what came before\n", 200)
+
+	writeFile(t, logPath, v1Bytes.String(), time.Time{})
+	w.must(a, "sync", "--once")
+	writeFile(t, logPath, v2Bytes.String(), time.Time{})
+	w.ops.take()
+	w.must(a, "sync", "--once")
+	ops := w.ops.take()
+	prefix := "_history/" + project + "/" + idA + "/logs/events.jsonl/"
+	forms := func() map[string]string { // object name -> body
+		out := map[string]string{}
+		for _, key := range w.objects(prefix) {
+			body, _ := w.object(key)
+			out[strings.TrimPrefix(key, prefix)] = body
+		}
+		return out
+	}
+	var v1ID, pointerName, pointer string
+	for name, body := range forms() {
+		id, kind, size, err := history.ParseName(name)
+		if err != nil || kind != history.KindPrefix || size != int64(v1Bytes.Len()) {
+			t.Fatalf("after the append the history holds %q (%v), want one prefix pointer of %d bytes", name, err, v1Bytes.Len())
+		}
+		v1ID, pointerName, pointer = id, name, body
+	}
+	if v1ID == "" || !strings.HasSuffix(v1ID, sha16(v1Bytes.String())) {
+		t.Fatalf("the pointer names %q, v1 hashes to %s: %v", v1ID, sha16(v1Bytes.String()), forms())
+	}
+	body, err := history.ParsePrefixBody([]byte(pointer))
+	if err != nil || body.Size != int64(v1Bytes.Len()) || pointer != string(body.Marshal()) {
+		t.Fatalf("pointer %s body %q: %v", pointerName, pointer, err)
+	}
+	validateAgainst(t, "prefix.schema.json", pointer)
+	if c := counts(ops); c["COPY"] != 0 {
+		t.Errorf("an append is kept by a pointer, not a copy: %v", c)
+	}
+	var m struct {
+		Files []struct {
+			Path       string `json:"path"`
+			ObjectETag string `json:"object_etag"`
+		} `json:"files"`
+	}
+	w.jsonObject(t, project+"/hosts/"+idA+"/manifest.json", &m)
+	sum := md5.Sum([]byte(v2Bytes.String()))
+	if len(m.Files) != 1 || m.Files[0].ObjectETag != hex.EncodeToString(sum[:]) {
+		t.Errorf("the appended file's object_etag should be the MD5 of the bytes the engine uploaded: %+v", m.Files)
+	}
+
+	// the rewrite, inside the throttle's window, while the pointer rests on the live file: the pin keeps v2 whole
+	writeFile(t, logPath, v3, time.Time{})
+	w.must(a, "sync", "--once")
+	var zstName string
+	for name := range forms() {
+		if _, kind, _, _ := history.ParseName(name); kind == history.KindZst {
+			zstName = name
+		}
+	}
+	if _, kind, size, err := history.ParseName(zstName); err != nil || kind != history.KindZst || size != int64(v2Bytes.Len()) {
+		t.Fatalf("the pin should have kept v2 as a keyframe of %d bytes: %v", v2Bytes.Len(), forms())
+	}
+	if zbody, _ := w.object(prefix + zstName); len(zbody) >= v2Bytes.Len()/2 || !strings.HasPrefix(zbody, "\x28\xb5\x2f\xfd") {
+		t.Errorf("the keyframe should be a zstd frame under half of v2's %d bytes, it is %d bytes", v2Bytes.Len(), len(zbody))
+	}
+
+	v2ID, _, _, _ := history.ParseName(zstName)
+	out := w.must(a, "history", "logs/events.jsonl")
+	for _, id := range []string{v1ID, v2ID} {
+		if !strings.Contains(out, id) {
+			t.Errorf("history does not list %s:\n%s", id, out)
+		}
+	}
+	for _, step := range []struct{ id, want, what string }{{v1ID, v1Bytes.String(), "a pointer resting on a keyframe"}, {v2ID, v2Bytes.String(), "a keyframe"}} {
+		if out := w.must(a, "restore", "logs/events.jsonl", "--version", step.id); !strings.Contains(out, "estored") {
+			t.Logf("restore output: %s", out)
+		}
+		if data, _ := os.ReadFile(logPath); string(data) != step.want {
+			t.Fatalf("restoring %s (%s): %d bytes back, want %d", step.id, step.what, len(data), len(step.want))
+		}
+	}
 }

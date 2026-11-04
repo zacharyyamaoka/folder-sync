@@ -6,6 +6,8 @@ package s3
 // scripts/check-r2 sets FOLDER_SYNC_CHECK_R2=1, writes only under _checks/<stamp>/, and deletes what it wrote.
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -128,5 +130,44 @@ func TestR2HistoryCalls(t *testing.T) {
 		t.Errorf("FAIL  DeleteObject of a deleted key: %v", err)
 	} else {
 		pass("DeleteObject, and again on the deleted key (a no-op)")
+	}
+
+	// 5. PEP 0009 (docs/peps/0009 §14, "what was not verified"): the engine's own upload of an append, and a pointer's reads
+	log := base + "hosts/h/logs/events.jsonl"
+	pointerKey := base + "_history/notes/e/" + version + ".1800.prefix"
+	written = append(written, log, pointerKey)
+	body := []byte(strings.Repeat("a line of the log, appended to all day\n", 50))
+	sum := md5.Sum(body)
+	put, err := c.PutFile(bucket, log, body, time.Unix(1730000000, 123456789))
+	switch {
+	case err != nil:
+		t.Errorf("FAIL  a native PUT of an append: %v", err)
+	case strings.Trim(put, `"`) != hex.EncodeToString(sum[:]):
+		t.Errorf("FAIL  a single PUT's ETag %s is not the MD5 of its body %x: object_etag cannot be recorded from it", put, sum)
+	default:
+		pass("a native PUT answers the MD5 of its body as its ETag (the engine records it as object_etag)")
+	}
+	head := filepath.Join(t.TempDir(), "head")
+	if err := c.GetRangeToFile(bucket, log, head, 0, 99, strings.Trim(put, `"`)); err != nil {
+		t.Errorf("FAIL  a Range GET with If-Match on the current ETag: %v", err)
+	} else if data, _ := os.ReadFile(head); string(data) != string(body[:100]) {
+		t.Errorf("FAIL  the ranged read holds %q", data)
+	} else {
+		pass("a Range GET with If-Match on the current ETag returns exactly the bytes asked for")
+	}
+	if err := c.GetRangeToFile(bucket, log, head, 0, 99, "0123456789abcdef0123456789abcdef"); !errors.Is(err, ErrPreconditionFailed) {
+		t.Errorf("FAIL  a Range GET with a stale If-Match must answer 412, got: %v", err)
+	} else {
+		pass("a Range GET with a stale If-Match answers 412 (a pointer on a rewritten live file is noticed)")
+	}
+	pointer := []byte(`{"schema":"folder-sync-prefix/1","size":1800,"sha256":"` + strings.Repeat("ab", 32) + `"}`)
+	if _, err := c.Put(bucket, pointerKey, pointer, "application/json", "*", ""); err != nil {
+		t.Errorf("FAIL  creating a pointer: %v", err)
+	} else if _, err := c.Put(bucket, pointerKey, pointer, "application/json", "*", ""); !errors.Is(err, ErrPreconditionFailed) {
+		t.Errorf("FAIL  a pointer is created once: the second PUT must answer 412, got: %v", err)
+	} else if listing, err := c.List(bucket, base+"_history/notes/e/", "/"); err != nil || len(listing.Objects) != 1 || listing.Objects[0].Key != pointerKey || listing.Objects[0].Size != int64(len(pointer)) {
+		t.Errorf("FAIL  a pointer's name lists as one object of its own size: %+v %v", listing.Objects, err)
+	} else {
+		pass("a pointer is created once, and lists under <version>.<size>.prefix at its own (small) size")
 	}
 }

@@ -59,7 +59,7 @@
           "enum": [
             "bad_request", "bad_project", "bad_path", "bad_host", "bad_version", "signed_out", "no_token", "wrong_host",
             "csrf", "wrong_user", "not_found", "pruned", "ambiguous_folder", "online_only", "over_quota", "too_large",
-            "json_only", "method", "recovering", "unavailable"
+            "json_only", "method", "recovering", "unavailable", "corrupt"
           ]
         },
         "why": { "type": "string", "minLength": 1 }

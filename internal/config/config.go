@@ -48,6 +48,9 @@ type Config struct {
 	NoHistory []string          `toml:"no_history"`
 	Modes     map[string]string `toml:"modes"`
 	Viewer    Viewer            `toml:"viewer"`
+
+	// HistoryEvery is how finely history is kept: at most one version of a path per this long (PEP 0009 §5).
+	HistoryEvery string `toml:"history_every"`
 }
 
 // Defaults for a new project.
@@ -56,6 +59,10 @@ const (
 	DefaultPeersDir  = "hosts"
 	DefaultInterval  = "10s"
 	DefaultMaxDelete = 50
+	// DefaultHistoryEvery is Zach's default (2026-11-04, "Version control timestamps, every X min? (5 by default)").
+	DefaultHistoryEvery = "5m"
+	// MinHistoryEvery is the least: PEP 0007's 30 s.
+	MinHistoryEvery = 30 * time.Second
 )
 
 // DefaultNoHistory is no_history when .folder-sync.toml does not set it: paths whose replaced or deleted versions are
@@ -116,6 +123,8 @@ func New(project, bucket string) Config {
 		Ignore:    []string{},
 		NoHistory: append([]string{}, DefaultNoHistory...),
 		Modes:     map[string]string{},
+
+		HistoryEvery: DefaultHistoryEvery,
 	}
 }
 
@@ -146,6 +155,12 @@ func (c *Config) Validate() error {
 	if _, err := ignore.Parse(c.NoHistory); err != nil {
 		return fmt.Errorf("no_history: %w", err)
 	}
+	if c.HistoryEvery == "" {
+		c.HistoryEvery = DefaultHistoryEvery
+	}
+	if every, err := time.ParseDuration(c.HistoryEvery); err != nil || every < MinHistoryEvery {
+		return fmt.Errorf("history_every %q: use a duration of at least 30s, e.g. \"5m\"", c.HistoryEvery)
+	}
 	subfolders := make([]string, 0, len(c.Modes))
 	for subfolder := range c.Modes {
 		subfolders = append(subfolders, subfolder)
@@ -170,6 +185,12 @@ func (e ErrSharedIsV1) Error() string {
 	return fmt.Sprintf("modes.%q = \"shared\" is not available in v0: two-way folders need the lease in "+
 		"_leases/<project>.json and rclone bisync (docs/peps/0001 §6), which ship in v1. "+
 		"In v0 every machine publishes only its own files under hosts/<host-id>/; remove the line to continue", e.Subfolder)
+}
+
+// HistoryEveryDuration is the parsed history_every (Validate must have passed).
+func (c Config) HistoryEveryDuration() time.Duration {
+	d, _ := time.ParseDuration(c.HistoryEvery)
+	return d
 }
 
 // IntervalDuration is the parsed interval (Validate must have passed).
@@ -258,7 +279,9 @@ func Render(c Config) string {
 		}
 		fmt.Fprintf(&b, "%q", rule)
 	}
-	b.WriteString("]\n\n")
+	b.WriteString("]\n")
+	b.WriteString("# History is kept at most this often per file: a burst of saves keeps one version per window (30s at least).\n")
+	fmt.Fprintf(&b, "history_every = %q\n\n", c.HistoryEvery)
 	b.WriteString("# Subfolder modes. v0 has one: every file is this machine's (\"push\").\n")
 	b.WriteString("# \"shared\" (two-way, under a lease) is v1 and is refused today.\n")
 	b.WriteString("[modes]\n")

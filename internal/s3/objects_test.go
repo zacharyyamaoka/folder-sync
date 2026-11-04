@@ -175,3 +175,80 @@ func TestBusyAnswersAreSentAgain(t *testing.T) {
 		t.Fatalf("a 403 is final: %v, %d requests", err, len(bodies))
 	}
 }
+
+// TestPutFileCarriesRcloneMTime (PEP 0009 §4.1): an append the engine uploads itself is stored as rclone would store it,
+// with the file's modification time in x-amz-meta-mtime (seconds, then nine digits), so R2-Explorer, `rclone copy` as
+// the way out, and a peer's rclone all read the same object.
+func TestPutFileCarriesRcloneMTime(t *testing.T) {
+	var got http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("ETag", `"d41d8cd98f00b204e9800998ecf8427e"`)
+	}))
+	defer server.Close()
+	client := &Client{Endpoint: server.URL, Region: "auto", AccessKeyID: "key", SecretAccessKey: "secret"}
+	etag, err := client.PutFile("bkt", "demo/hosts/h/log.jsonl", []byte("abc"), time.Unix(1730000000, 123456789))
+	if err != nil || etag != `"d41d8cd98f00b204e9800998ecf8427e"` {
+		t.Fatal(etag, err)
+	}
+	if got.Get("X-Amz-Meta-Mtime") != "1730000000.123456789" {
+		t.Errorf("mtime header %q", got.Get("X-Amz-Meta-Mtime"))
+	}
+	if !strings.Contains(got.Get("Authorization"), "x-amz-meta-mtime") {
+		t.Errorf("the metadata header must be signed: %s", got.Get("Authorization"))
+	}
+}
+
+// TestGetRangeToFile: bytes from..to of an object land in a file; If-Match goes out quoted; a 412 and a 404 are their
+// errors; a store that ignores Range (it answers 200 with the whole object) still yields exactly the range asked for.
+func TestGetRangeToFile(t *testing.T) {
+	const whole = "0123456789abcdef"
+	var seen http.Header
+	mode := "range"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Clone()
+		switch mode {
+		case "412":
+			w.WriteHeader(http.StatusPreconditionFailed)
+		case "404":
+			w.WriteHeader(http.StatusNotFound)
+		case "ignores":
+			io.WriteString(w, whole)
+		case "short":
+			w.WriteHeader(http.StatusPartialContent)
+			io.WriteString(w, "0123")
+		default:
+			w.WriteHeader(http.StatusPartialContent)
+			io.WriteString(w, whole[:10])
+		}
+	}))
+	defer server.Close()
+	client := &Client{Endpoint: server.URL, Region: "auto", AccessKeyID: "key", SecretAccessKey: "secret"}
+	dir := t.TempDir()
+	read := func() string { data, _ := os.ReadFile(filepath.Join(dir, "out")); return string(data) }
+	if err := client.GetRangeToFile("bkt", "k", filepath.Join(dir, "out"), 0, 9, "abc123"); err != nil || read() != whole[:10] {
+		t.Fatalf("%q %v", read(), err)
+	}
+	if seen.Get("Range") != "bytes=0-9" || seen.Get("If-Match") != `"abc123"` {
+		t.Errorf("headers %v", seen)
+	}
+	mode = "ignores"
+	if err := client.GetRangeToFile("bkt", "k", filepath.Join(dir, "out"), 0, 9, ""); err != nil || read() != whole[:10] {
+		t.Fatalf("a store that ignores Range: %q %v", read(), err)
+	}
+	if _, sent := seen["If-Match"]; sent {
+		t.Error("no ETag, no condition")
+	}
+	mode = "short"
+	if err := client.GetRangeToFile("bkt", "k", filepath.Join(dir, "out"), 0, 9, ""); err == nil {
+		t.Error("a short answer is accepted")
+	}
+	mode = "412"
+	if err := client.GetRangeToFile("bkt", "k", filepath.Join(dir, "out"), 0, 9, "x"); !errors.Is(err, ErrPreconditionFailed) {
+		t.Errorf("412: %v", err)
+	}
+	mode = "404"
+	if err := client.GetRangeToFile("bkt", "k", filepath.Join(dir, "out"), 0, 9, ""); !errors.Is(err, ErrNotFound) {
+		t.Errorf("404: %v", err)
+	}
+}

@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"folder-sync/internal/history"
-	"folder-sync/internal/s3"
 	"folder-sync/internal/syncer"
 )
 
@@ -109,7 +108,7 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request, f folder, rest 
 	}
 	defer p.Close()
 	if asked {
-		s.versionBytes(w, p, host, filePath, version[0])
+		s.versionBytes(w, r, f, p, host, filePath, version[0])
 		return
 	}
 	versions, err := p.Versions(host, filePath)
@@ -140,7 +139,7 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request, f folder, rest 
 }
 
 // versionBytes answers one version's bytes, typed by suffix, never as this page (docs/API.md "history").
-func (s *Server) versionBytes(w http.ResponseWriter, p *syncer.Project, host, filePath, version string) {
+func (s *Server) versionBytes(w http.ResponseWriter, r *http.Request, f folder, p *syncer.Project, host, filePath, version string) {
 	tmp, err := os.CreateTemp(p.Layout.Tmp, "serve-version-")
 	if err != nil {
 		writeError(w, err)
@@ -148,8 +147,15 @@ func (s *Server) versionBytes(w http.ResponseWriter, p *syncer.Project, host, fi
 	}
 	tmp.Close()
 	defer os.Remove(tmp.Name())
-	key := history.Key(p.Root, p.Config.Project, host, filePath, version)
-	if err := p.S3.GetToFile(p.Config.Bucket, key, tmp.Name()); errors.Is(err, s3.ErrNotFound) {
+	// a pointer that rests on the live file reads it with the ETag its host's manifest lists
+	liveETag := ""
+	if m, known := s.manifests(f)[host]; known {
+		if e, ok := m.Index()[filePath]; ok {
+			liveETag = e.ObjectETag
+		}
+	}
+	switch err := p.FetchVersion(r.Context(), host, filePath, version, tmp.Name(), liveETag); {
+	case errors.Is(err, syncer.ErrVersionGone):
 		at, _, _, _ := history.SplitVersionID(version)
 		why := "That version was thinned out of the history and is gone."
 		if s.cfg.Now().Sub(at) >= history.KeepDays*24*time.Hour {
@@ -157,7 +163,10 @@ func (s *Server) versionBytes(w http.ResponseWriter, p *syncer.Project, host, fi
 		}
 		writeError(w, fail(http.StatusGone, "pruned", why))
 		return
-	} else if err != nil {
+	case errors.Is(err, syncer.ErrVersionMismatch):
+		writeError(w, fail(http.StatusBadGateway, "corrupt", "The stored bytes are not that version's: "+p.Creds.Scrub(err.Error())))
+		return
+	case err != nil:
 		writeError(w, offline(p, err))
 		return
 	}

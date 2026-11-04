@@ -20,8 +20,8 @@
 
 import { checkPath, ContractError, SCHEMA, validateManifest, type Manifest, type ManifestEntry, type R2BucketLike } from "../../readers/worker/src/folder-sync-read.ts";
 import { mint, NotConfigured, userRoot, type CredsEnv } from "./creds.ts";
-import { BURST_MS, changesKey, historyKey, historyPrefix, keepOnWrite, keyFits, parseVersion, trashStampTime, unlistedId, versionId } from "./history.ts";
-import { pruneFolder } from "./prune.ts";
+import { EVERY_MS, anchorOf, changesKey, historyKey, historyPrefix, keepOnWrite, keyFits, listedObject, parseVersion, trashStampTime, unlistedId, versionId } from "./history.ts";
+import { pruneFolder, type LiveOf } from "./prune.ts";
 import { Measuring, overQuota, quotaOf, usageOf, type QuotaEnv } from "./quota.ts";
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store } from "./store.ts";
@@ -252,6 +252,18 @@ export interface Pending {
 	sha256: string | null;
 }
 
+/** The paths a host's manifest lists, or null when it cannot be read (then nothing is concluded from it). */
+async function readLivePaths(bucket: S3Bucket, key: string): Promise<Set<string> | null> {
+	try {
+		const got = await bucket.get(key);
+		if (!got || !("arrayBuffer" in got)) return null;
+		const doc = JSON.parse(new TextDecoder().decode(await got.arrayBuffer())) as { files?: { path?: unknown }[] };
+		return Array.isArray(doc.files) ? new Set(doc.files.map((e) => String(e.path))) : null;
+	} catch {
+		return null;
+	}
+}
+
 /** Where a web host keeps its one Pending: the Durable Object's storage live, memory in the tests. */
 export interface Journal {
 	get(): Promise<Pending | null>;
@@ -260,16 +272,16 @@ export interface Journal {
 	/** A backup an undo could not remove (review r4 #7): charged to `root`'s person and removed later, durably. */
 	stray(root: string, key: string, size: number): Promise<void>;
 	/** The burst rule's memory (CONTRACT "What is kept", rule 4): when this web host last kept a version of each path,
-	 *  within the last 30 s. WHY no listing: the web host is the only writer of its history. */
+	 *  within the last history_every (5 minutes). WHY no listing: the web host is the only writer of its history. */
 	recent?(): Promise<Record<string, number>>;
 	kept?(path: string, leftAt: number): Promise<void>;
 	/** Where a committed change's record waits to be written (the folder's object); absent, it is written at once. */
 	record?: Recorder;
 }
 
-/** The burst memory after `path` kept a version at `at`: only the last 30 s matter. */
+/** The burst memory after `path` kept a version at `at`: only the last history_every matter. */
 export function remember(recent: Record<string, number>, path: string, at: number): Record<string, number> {
-	return { ...Object.fromEntries(Object.entries(recent).filter(([, t]) => t > at - BURST_MS)), [path]: at };
+	return { ...Object.fromEntries(Object.entries(recent).filter(([, t]) => t > at - EVERY_MS)), [path]: at };
 }
 
 export function memoryJournal(): Journal {
@@ -897,7 +909,7 @@ export class WebHostCore {
 			},
 			recent: async () => {
 				const recent = (await storage.get<Record<string, number>>("recent")) ?? {};
-				return Object.fromEntries(Object.entries(recent).filter(([, t]) => t > this.clock() - BURST_MS));
+				return Object.fromEntries(Object.entries(recent).filter(([, t]) => t > this.clock() - EVERY_MS));
 			},
 			kept: async (path, at) => {
 				await storage.put("recent", remember((await storage.get<Record<string, number>>("recent")) ?? {}, path, at));
@@ -934,17 +946,26 @@ export class WebHostCore {
 	}
 
 	/** Prunes this folder now (PEP 0007 §3.2): what its alarm runs once a day; the next prune is set from here. */
-	async prune(env: CredsEnv = this.env): Promise<{ deleted: number; bytes: number; more: boolean } | null> {
+	async prune(env: CredsEnv = this.env): Promise<{ deleted: number; bytes: number; more: boolean; lost: number } | null> {
 		const folder = await this.storage.get<{ owner: string; project: string }>("folder");
 		if (!folder) return null;
 		const root = userRoot(folder.owner, env);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
-		const pruned = await pruneFolder(bucket, root, folder.project, this.clock());
+		// WHY the manifests are read only on demand (PEP 0009 §7.4): a pointer with no full object after it rests on its
+		// host's live file, so whether the path is still listed decides if its bytes are lost; one GET per such host
+		const livePaths = new Map<string, Set<string> | null>();
+		const liveOf: LiveOf = async (host, path) => {
+			if (!livePaths.has(host)) livePaths.set(host, await readLivePaths(bucket, `${root}${folder.project}/hosts/${host}/manifest.json`));
+			const paths = livePaths.get(host)!;
+			return paths === null ? null : paths.has(path);
+		};
+		const pruned = await pruneFolder(bucket, root, folder.project, this.clock(), undefined, liveOf);
+		for (const lost of pruned.lost) console.warn(`history_lost ${folder.owner} ${folder.project} ${lost.host} ${lost.path} ${lost.version}`);
 		// a credit marks the measurement stale (store.addUsage): the next request measures again
 		if (pruned.deleted) await this.store.addUsage(folder.owner, -pruned.bytes, -pruned.objects, { bytes: -pruned.bytes, objects: -pruned.objects });
 		await this.storage.put("prune_at", this.clock() + (pruned.more ? PRUNE_MORE_MS : PRUNE_EVERY_MS));
 		await this.rearm();
-		return { deleted: pruned.deleted, bytes: pruned.bytes, more: pruned.more };
+		return { deleted: pruned.deleted, bytes: pruned.bytes, more: pruned.more, lost: pruned.lost.length };
 	}
 
 	/** POST …/history/purge (PEP 0007 §3.3, docs/API.md): history deleted for good, up to 1,000 objects a call, the
@@ -963,9 +984,24 @@ export class WebHostCore {
 		const doomed: { key: string; size: number; counts: boolean }[] = [];
 		let more = false;
 		if (purge.version && purge.host && purge.path) {
-			const key = historyKey(root, op.project, purge.host, purge.path, purge.version);
-			const seen = await bucket.head(key);
-			if (seen) doomed.push({ key, size: seen.size, counts: true });
+			// every form the version is stored in, and the pointers that rest on it (PEP 0009 §7.5): purging a keyframe
+			// ("I synced a secret") purges the pointers whose bytes it holds, or they would rest on the next one
+			const prefix = historyPrefix(root, op.project, purge.host, purge.path);
+			const stored = [];
+			let cursor: string | undefined;
+			let pages = 0;
+			do {
+				const page = await bucket.objects(prefix, { delimiter: "/", cursor });
+				for (const object of page.objects) {
+					const listed = listedObject(prefix, object);
+					if (listed) stored.push(listed);
+				}
+				cursor = page.truncated ? page.cursor : undefined;
+			} while (cursor && ++pages < 50);
+			const resting = stored.filter((v) => v.kind === "prefix" && v.id !== purge.version && anchorOf(stored, v.id)?.id === purge.version);
+			const gone = [...stored.filter((v) => v.id === purge.version), ...(stored.some((v) => v.id === purge.version && v.kind !== "prefix") ? resting : [])];
+			// pointers first: a purge cut off halfway strands none
+			for (const v of gone.sort((a, b) => Number(b.kind === "prefix") - Number(a.kind === "prefix"))) doomed.push({ key: v.key, size: v.stored, counts: true });
 		} else {
 			const before = this.clock() - (purge.olderThanDays ?? 0) * 24 * 3600_000;
 			const under = purge.host ? `${purge.host}/` : "";
@@ -995,7 +1031,11 @@ export class WebHostCore {
 				if (more) break;
 			}
 		}
-		const failed = new Set(await bucket.deleteMany(doomed.map((d) => d.key)));
+		// WHY pointers first, in a call of their own (PEP 0009 §7.3): one that outlives the keyframe it rests on is a lost
+		// version, and the keys of one DeleteObjects are deleted in no order
+		const pointers = doomed.filter((d) => d.key.endsWith(".prefix"));
+		const failed = new Set(await bucket.deleteMany(pointers.map((d) => d.key)));
+		for (const key of await bucket.deleteMany(doomed.filter((d) => !d.key.endsWith(".prefix")).map((d) => d.key))) failed.add(key);
 		const gone = doomed.filter((d) => !failed.has(d.key));
 		const bytes = gone.reduce((n, d) => n + d.size, 0);
 		const objects = gone.filter((d) => d.counts).length;

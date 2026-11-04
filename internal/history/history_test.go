@@ -43,6 +43,8 @@ func TestKeysFixture(t *testing.T) {
 		Valid []struct {
 			Key, Root, Project, Host, Path, Version, WrittenAt, SHA16 string
 			Unlisted                                                  bool
+			Kind                                                      string
+			Size                                                      int64
 		} `json:"valid"`
 		InvalidVersionIDs []string `json:"invalid_version_ids"`
 		InvalidKeys       []string `json:"invalid_keys"`
@@ -68,8 +70,20 @@ func TestKeysFixture(t *testing.T) {
 			t.Errorf("%s:\n got %+v\nwant root=%q project=%q host=%q path=%q version=%q written_at=%q sha16=%q unlisted=%v",
 				want.Key, got, want.Root, want.Project, want.Host, want.Path, want.Version, writtenAt, sha16, want.Unlisted)
 		}
-		if built := Key(want.Root, want.Project, want.Host, want.Path, want.Version); built != want.Key {
-			t.Errorf("Key() = %q, want %q", built, want.Key)
+		kind := Kind(want.Kind)
+		if kind == "" {
+			kind = KindFull
+		}
+		if got.Kind != kind || (kind != KindFull && got.Size != want.Size) {
+			t.Errorf("%s: kind %q size %d, want %q %d", want.Key, got.Kind, got.Size, kind, want.Size)
+		}
+		if built := KeyOf(want.Root, want.Project, want.Host, want.Path, want.Version, kind, want.Size); built != want.Key {
+			t.Errorf("KeyOf() = %q, want %q", built, want.Key)
+		}
+		if kind == KindFull {
+			if built := Key(want.Root, want.Project, want.Host, want.Path, want.Version); built != want.Key {
+				t.Errorf("Key() = %q, want %q", built, want.Key)
+			}
 		}
 		if !want.Unlisted {
 			id, err := VersionID(writtenAt, sha16+strings.Repeat("0", 48))
@@ -110,12 +124,15 @@ func TestWriteRuleFixture(t *testing.T) {
 			Op        string   `json:"op"`
 			Path      string   `json:"path"`
 			NoHistory []string `json:"no_history"`
+			EveryMs   int64    `json:"every_ms"`
 			Leaving   struct {
 				WrittenAt string `json:"written_at"`
 			} `json:"leaving"`
-			LastKeptLeftAt *string `json:"last_kept_left_at"`
-			Keep           bool    `json:"keep"`
-			Why            string  `json:"why"`
+			LastKeptLeftAt      *string `json:"last_kept_left_at"`
+			NewestKeptIsPointer bool    `json:"newest_kept_is_pointer"`
+			AppendUploaded      bool    `json:"append_uploaded"`
+			Keep                bool    `json:"keep"`
+			Why                 string  `json:"why"`
 		} `json:"write_cases"`
 	}
 	readFixture(t, "retention/schedule.json", &doc)
@@ -131,7 +148,8 @@ func TestWriteRuleFixture(t *testing.T) {
 		if c.LastKeptLeftAt != nil {
 			last = mustTime(t, *c.LastKeptLeftAt)
 		}
-		keep, why := Keep(c.Op, c.Path, mustTime(t, c.Leaving.WrittenAt), mustTime(t, c.Now), last, matcher)
+		keep, why := Keep(Write{Op: c.Op, Path: c.Path, WrittenAt: mustTime(t, c.Leaving.WrittenAt), At: mustTime(t, c.Now), LastKept: last,
+			Every: time.Duration(c.EveryMs) * time.Millisecond, NewestKeptIsPointer: c.NewestKeptIsPointer, AppendUploaded: c.AppendUploaded}, matcher)
 		if keep != c.Keep || why != c.Why {
 			t.Errorf("%s: keep=%v why=%q, want keep=%v why=%q", c.Name, keep, why, c.Keep, c.Why)
 		}
@@ -180,6 +198,163 @@ func TestPruneFixture(t *testing.T) {
 		if len(gone) != 0 || len(again) != len(keep) {
 			t.Errorf("%s: a second prune dropped %d more", c.Name, len(gone))
 		}
+	}
+}
+
+// TestAnchorFixture: every anchor case in testdata/retention/schedule.json, over the names of every form.
+func TestAnchorFixture(t *testing.T) {
+	var doc struct {
+		AnchorCases []struct {
+			Name     string `json:"name"`
+			Now      string `json:"now"`
+			KeepDays int    `json:"keep_days"`
+			Live     bool   `json:"live"`
+			Versions []struct {
+				Name   string `json:"name"`
+				LeftAt string `json:"left_at"`
+			} `json:"versions"`
+			Keep         []string `json:"keep"`
+			DropPointers []string `json:"drop_pointers"`
+			Drop         []string `json:"drop"`
+			Lost         []string `json:"lost"`
+		} `json:"anchor_cases"`
+	}
+	readFixture(t, "retention/schedule.json", &doc)
+	if len(doc.AnchorCases) == 0 {
+		t.Fatal("no anchor cases")
+	}
+	names := func(versions []Version) []string {
+		out := []string{}
+		for _, v := range versions {
+			out = append(out, Name(v.Version, v.Kind, v.Size))
+		}
+		sort.Strings(out)
+		return out
+	}
+	sorted := func(in []string) []string {
+		out := append([]string{}, in...)
+		sort.Strings(out)
+		return out
+	}
+	for _, c := range doc.AnchorCases {
+		var versions []Version
+		for _, v := range c.Versions {
+			id, kind, size, err := ParseName(v.Name)
+			if err != nil {
+				t.Fatalf("%s: %v", c.Name, err)
+			}
+			versions = append(versions, Version{Path: "notes/plan.md", Version: id, Kind: kind, Size: size, LeftAt: mustTime(t, v.LeftAt)})
+		}
+		plan := PruneGroup(versions, mustTime(t, c.Now), c.KeepDays, c.Live)
+		for label, got := range map[string][]string{"keep": names(plan.Keep), "drop_pointers": names(plan.DropPointers), "drop": names(plan.Drop), "lost": names(plan.Lost)} {
+			want := map[string][]string{"keep": c.Keep, "drop_pointers": c.DropPointers, "drop": c.Drop, "lost": c.Lost}[label]
+			if strings.Join(got, ",") != strings.Join(sorted(want), ",") {
+				t.Errorf("%s: %s\n got %v\n want %v", c.Name, label, got, sorted(want))
+			}
+		}
+		if len(plan.Keep)+len(plan.DropPointers)+len(plan.Drop) != len(versions) {
+			t.Errorf("%s: every object is kept or dropped once", c.Name)
+		}
+		// idempotent: a second prune of what is kept drops nothing (a kept pointer's anchor is kept with it)
+		again := PruneGroup(plan.Keep, mustTime(t, c.Now), c.KeepDays, c.Live)
+		if len(again.DropPointers)+len(again.Drop) != 0 {
+			t.Errorf("%s: a second prune dropped %d more", c.Name, len(again.DropPointers)+len(again.Drop))
+		}
+	}
+}
+
+// TestNamesAreRoundTripped: a name parses to its version, form and size, and builds back; the forms an unlisted
+// version or a malformed size cannot take are refused.
+func TestNamesAreRoundTripped(t *testing.T) {
+	const id = "2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f"
+	for _, tc := range []struct {
+		name string
+		kind Kind
+		size int64
+	}{{id, KindFull, 0}, {id + ".1980.zst", KindZst, 1980}, {id + ".4194304.prefix", KindPrefix, 4194304}, {id + ".1.zst", KindZst, 1}} {
+		gotID, kind, size, err := ParseName(tc.name)
+		if err != nil || gotID != id || kind != tc.kind || size != tc.size {
+			t.Errorf("%s: %q %q %d %v", tc.name, gotID, kind, size, err)
+		}
+		if built := Name(id, kind, size); built != tc.name {
+			t.Errorf("Name = %q, want %q", built, tc.name)
+		}
+	}
+	for _, bad := range []string{id + ".zst", id + ".01.zst", id + ".12.gz", id + ".-1.prefix", id + ".12.zst.prefix", "2026-10-28T20:31:00.117Z_unlisted.12.zst", id + ".", ""} {
+		if _, _, _, err := ParseName(bad); err == nil {
+			t.Errorf("%q is accepted", bad)
+		}
+	}
+}
+
+// TestPrefixBodies: testdata/prefix/pointer.json, the bytes the engine writes and what a reader refuses.
+func TestPrefixBodies(t *testing.T) {
+	var doc struct {
+		Valid []struct {
+			Name string `json:"name"`
+			JSON string `json:"json"`
+		} `json:"valid"`
+		Invalid []struct {
+			Why  string `json:"why"`
+			JSON string `json:"json"`
+		} `json:"invalid"`
+	}
+	readFixture(t, "prefix/pointer.json", &doc)
+	if len(doc.Valid) == 0 || len(doc.Invalid) == 0 {
+		t.Fatal("the fixture is empty")
+	}
+	for _, v := range doc.Valid {
+		body, err := ParsePrefixBody([]byte(v.JSON))
+		if err != nil {
+			t.Fatalf("%s: %v", v.Name, err)
+		}
+		if got := string(body.Marshal()); got != v.JSON {
+			t.Errorf("Marshal = %s, want %s", got, v.JSON)
+		}
+		if len(body.Marshal()) > 130 {
+			t.Errorf("a pointer is about 125 bytes, this one %d", len(body.Marshal()))
+		}
+		if id, kind, size, err := ParseName(v.Name); err != nil || kind != KindPrefix || size != body.Size || !strings.HasSuffix(id, body.SHA256[:16]) {
+			t.Errorf("%s does not name its body: %q %q %d %v", v.Name, id, kind, size, err)
+		}
+	}
+	for _, v := range doc.Invalid {
+		if _, err := ParsePrefixBody([]byte(v.JSON)); err == nil {
+			t.Errorf("%s is accepted: %s", v.Why, v.JSON)
+		}
+	}
+}
+
+// TestPinOutranksTheThrottleButNotNoHistory: the rule's order (PEP 0009 §5): no_history, then delete and restore,
+// then the pin, then the version's age, then the window.
+func TestPinOutranksTheThrottleButNotNoHistory(t *testing.T) {
+	now := mustTime(t, "2026-11-04T12:00:00Z")
+	base := Write{Op: OpReplace, Path: "a.md", WrittenAt: now.Add(-time.Minute), At: now, LastKept: now.Add(-time.Minute)}
+	if keep, why := Keep(base, nil); keep || why != WhyBurst {
+		t.Fatalf("the throttle: %v %q", keep, why)
+	}
+	pinned := base
+	pinned.NewestKeptIsPointer = true
+	if keep, _ := Keep(pinned, nil); !keep {
+		t.Fatal("a pointer's pin keeps the leaving version inside the window")
+	}
+	pinned.AppendUploaded = true
+	if keep, why := Keep(pinned, nil); keep || why != WhyBurst {
+		t.Fatalf("an append the writer uploads itself leaves the pointer resting on live bytes: %v %q", keep, why)
+	}
+	logs, _ := NewMatcher([]string{"*.log"})
+	pinned = Write{Op: OpReplace, Path: "run.log", WrittenAt: now.Add(-time.Minute), At: now, NewestKeptIsPointer: true}
+	if keep, why := Keep(pinned, logs); keep || why != WhyNoHistory {
+		t.Fatalf("no_history outranks the pin: %v %q", keep, why)
+	}
+	// the default window is five minutes, and a folder's own is honoured
+	old := Write{Op: OpReplace, Path: "a.md", WrittenAt: now.Add(-4 * time.Minute), At: now, LastKept: now.Add(-4 * time.Minute)}
+	if keep, _ := Keep(old, nil); keep {
+		t.Fatal("4 minutes into the default 5-minute window")
+	}
+	old.Every = 30 * time.Second
+	if keep, _ := Keep(old, nil); !keep {
+		t.Fatal("history_every = 30s keeps it")
 	}
 }
 

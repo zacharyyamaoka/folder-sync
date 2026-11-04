@@ -352,9 +352,9 @@ test("mutation: dropping the CSRF rule lets a cookie restore without X-Folder-Sy
 });
 
 test("mutation: without the burst rule (rule 4), the retention fixture's burst cases go red", async () => {
-	await withMutant([{ file: "history.ts", marker: "if (leaving.lastKeptLeftAt !== null && leaving.lastKeptLeftAt > leaving.now - BURST_MS) return { keep: false, why: \"burst\" };", replacement: "" }], async (m) => {
+	await withMutant([{ file: "history.ts", marker: "if (leaving.lastKeptLeftAt !== null && leaving.lastKeptLeftAt > leaving.now - every) return { keep: false, why: \"burst\" };", replacement: "" }], async (m) => {
 		const cases = JSON.parse(read("retention/schedule.json")).write_cases;
-		const wrong = cases.filter((c: any) => m.history.keepOnWrite({ op: c.op, path: c.path, writtenAt: c.leaving.written_at, now: Date.parse(c.now), lastKeptLeftAt: c.last_kept_left_at ? Date.parse(c.last_kept_left_at) : null, noHistory: c.no_history }).keep !== c.keep);
+		const wrong = cases.filter((c: any) => m.history.keepOnWrite({ op: c.op, path: c.path, writtenAt: c.leaving.written_at, now: Date.parse(c.now), lastKeptLeftAt: c.last_kept_left_at ? Date.parse(c.last_kept_left_at) : null, noHistory: c.no_history, everyMs: c.every_ms, newestKeptIsPointer: c.newest_kept_is_pointer, appendUploaded: c.append_uploaded }).keep !== c.keep);
 		assert.ok(wrong.length >= 2, `the mutant passes every write case: ${wrong.length}`);
 	});
 });

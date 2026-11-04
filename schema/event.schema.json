@@ -353,6 +353,28 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "history_lost"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "path",
+          "from",
+          "why",
+          "level"
+        ],
+        "properties": {
+          "level": {
+            "const": "warn"
+          }
+        }
+      }
     }
   ],
   "$defs": {

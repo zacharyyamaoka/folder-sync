@@ -1,7 +1,7 @@
 // The folder's daily prune (PEP 0007 §3.2, docs/CONTRACT.md "What is kept"): every host's history thinned by the
 // staggered schedule, and change records, pull records, restore requests and legacy _trash/ deleted 30 days on. Run
 // by the folder's Durable Object (webhost-do.ts, on its one alarm), so a machine that never comes back is pruned too;
-// each engine also prunes its own host with the same rule (history.ts pruneVersions), and two pruners on one key are
+// each engine also prunes its own host with the same rule (history.ts pruneGroup), and two pruners on one key are
 // harmless: the rule is deterministic, and deleting a deleted key is a no-op.
 //
 // WHY by LastModified: an object under _history/ has no metadata, and its LastModified is when its version left the
@@ -15,7 +15,7 @@
 // README's `_trash/` rule never matched a signed-in person's users/<id>/_trash/; without this their trash grew until
 // they hit their quota.
 
-import { KEEP_DAYS, historyPrefix, parseVersion, pruneVersions, pullsPrefix, requestsPrefix, trashStampTime } from "./history.ts";
+import { KEEP_DAYS, historyPrefix, parseName, pruneGroup, pullsPrefix, requestsPrefix, trashStampTime, type StoredVersion } from "./history.ts";
 
 const DAY_MS = 24 * 3600_000;
 
@@ -25,6 +25,10 @@ export interface PruneBucket {
 	deleteMany(keys: string[]): Promise<string[]>;
 }
 
+/** Whether `path` is in `host`'s manifest: the live file is what a pointer with no full object after it rests on. Null:
+ *  unknown (the manifest could not be read), so the pointer stays. Asked only for a host that has such a pointer. */
+export type LiveOf = (host: string, path: string) => Promise<boolean | null>;
+
 export interface Pruned {
 	/** Objects deleted, and their bytes: history ones count toward the quota's objects, change records only bytes. */
 	deleted: number;
@@ -32,6 +36,8 @@ export interface Pruned {
 	objects: number;
 	/** The budget ran out with more to look at: run again soon. */
 	more: boolean;
+	/** Pointers deleted because the bytes they rested on were already gone (PEP 0009 §7.4): each is a history_lost. */
+	lost: { host: string; path: string; version: string }[];
 }
 
 /** How many listing pages one prune reads, and how many objects it deletes, before it stops for the next alarm. WHY
@@ -53,9 +59,9 @@ async function* listed(bucket: PruneBucket, prefix: string, budget: { pages: num
 class OutOfBudget extends Error {}
 
 /** Prunes one folder (`<root>…/<project>/`) at `now`. */
-export async function pruneFolder(bucket: PruneBucket, root: string, project: string, now: number, keepDays = KEEP_DAYS): Promise<Pruned> {
+export async function pruneFolder(bucket: PruneBucket, root: string, project: string, now: number, keepDays = KEEP_DAYS, liveOf?: LiveOf): Promise<Pruned> {
 	const budget = { pages: PAGE_BUDGET };
-	const out: Pruned = { deleted: 0, bytes: 0, objects: 0, more: false };
+	const out: Pruned = { deleted: 0, bytes: 0, objects: 0, more: false, lost: [] };
 	const doomed: { key: string; size: number; counts: boolean }[] = [];
 	const cutoff = now - keepDays * DAY_MS;
 	const flush = async (force: boolean) => {
@@ -79,20 +85,34 @@ export async function pruneFolder(bucket: PruneBucket, root: string, project: st
 		// history: grouped by (host, path), which is the key without its last segment. WHY all groups first: a folder
 		// named like a version's date ("2026-10-27T08/") sorts between that path's own versions, so one group's
 		// versions need not arrive together
-		const groups = new Map<string, { id: string; left_at: number; key: string; size: number }[]>();
+		const groups = new Map<string, (StoredVersion & { key: string; size: number })[]>();
 		for await (const object of listed(bucket, historyPrefix(root, project), budget)) {
 			const cut = object.key.lastIndexOf("/");
-			const id = object.key.slice(cut + 1);
-			if (!parseVersion(id)) continue; // not a version: never this pruner's to delete
+			const name = object.key.slice(cut + 1);
+			const parsed = parseName(name);
+			if (!parsed) continue; // not a version: never this pruner's to delete (an older engine's names too)
 			const dir = object.key.slice(0, cut);
 			const versions = groups.get(dir) ?? [];
-			versions.push({ id, left_at: object.lastModified, key: object.key, size: object.size });
+			versions.push({ name, id: parsed.id, kind: parsed.kind, left_at: object.lastModified, key: object.key, size: object.size });
 			groups.set(dir, versions);
 		}
-		for (const versions of groups.values()) {
-			const kept = pruneVersions(versions, now, keepDays);
-			for (const v of versions) if (!kept.has(v.id)) await doom(v.key, v.size);
+		// WHY pointers first, in every group, before any keyframe (PEP 0009 §7.3): a prune cut off halfway (the budget, a
+		// failed delete) never strands a pointer
+		const keyframes: { key: string; size: number }[] = [];
+		const historyPrefixLength = historyPrefix(root, project).length;
+		for (const [dir, versions] of groups) {
+			const rest = dir.slice(historyPrefixLength).split("/");
+			const host = rest[0];
+			const path = rest.slice(1).join("/");
+			let plan = pruneGroup(versions, now, keepDays, null);
+			// asked only when a kept pointer has no full object after it: then the live file is the bytes it rests on
+			if (liveOf && plan.unanchored.length && (await liveOf(host, path)) === false) plan = pruneGroup(versions, now, keepDays, false);
+			for (const v of plan.lost) out.lost.push({ host, path, version: v.id });
+			for (const v of plan.dropPointers) await doom(v.key, v.size);
+			for (const v of plan.drop) keyframes.push({ key: v.key, size: v.size });
 		}
+		await flush(true);
+		for (const v of keyframes) await doom(v.key, v.size);
 		// change records and pull records (bytes only toward the quota: quota.ts measureRoot)
 		for await (const object of listed(bucket, `${root}_changes/${project}/`, budget)) {
 			const rest = object.key.slice(`${root}_changes/${project}/`.length).split("/");

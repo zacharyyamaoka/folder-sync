@@ -25,6 +25,11 @@
           "op": { "enum": ["replace", "delete", "restore"] },
           "path": { "$ref": "event.schema.json#/$defs/path" },
           "no_history": { "type": "array", "items": { "type": "string" } },
+          "every_ms": {
+            "description": "The folder's history_every in milliseconds (default 300000, the least 30000): the burst window of rules 4 and 5.",
+            "type": "integer",
+            "minimum": 30000
+          },
           "leaving": {
             "description": "The manifest entry that leaves: its written_at.",
             "type": "object",
@@ -35,6 +40,14 @@
           "last_kept_left_at": {
             "description": "left_at of the newest version of this path this writer already kept, or null.",
             "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+          },
+          "newest_kept_is_pointer": {
+            "description": "The newest version this writer kept of the path is a prefix pointer (default false): the pin, rule 3.",
+            "type": "boolean"
+          },
+          "append_uploaded": {
+            "description": "The new bytes are an append that the writer uploads itself, by one native PUT of the bytes it hashed (default false): the pin does not apply.",
+            "type": "boolean"
           },
           "keep": { "type": "boolean" },
           "why": { "enum": ["burst", "no_history"] }
@@ -76,6 +89,61 @@
           }
         }
       }
+    },
+    "anchor_cases": {
+      "description": "The pruner's anchor rule (docs/CONTRACT.md 'What is kept'): a keyframe stays while a kept pointer rests on it; pointers are deleted before keyframes; a pointer whose bytes are gone is dropped and reported lost. versions are every object of one (host, path), in any form.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "now", "keep_days", "live", "versions", "keep", "drop_pointers", "drop", "lost"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "now": { "type": "string", "format": "date-time" },
+          "keep_days": { "type": "integer", "minimum": 1 },
+          "live": {
+            "description": "The path is in the host's manifest, so its live file is what a pointer with no full object after it rests on.",
+            "type": "boolean"
+          },
+          "versions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["name", "left_at"],
+              "additionalProperties": false,
+              "properties": {
+                "name": { "$ref": "#/$defs/object_name" },
+                "left_at": { "type": "string", "format": "date-time" }
+              }
+            }
+          },
+          "keep": { "type": "array", "items": { "$ref": "#/$defs/object_name" } },
+          "drop_pointers": {
+            "description": "Deleted first.",
+            "type": "array",
+            "items": { "$ref": "#/$defs/object_name" }
+          },
+          "drop": {
+            "description": "Deleted after every pointer.",
+            "type": "array",
+            "items": { "$ref": "#/$defs/object_name" }
+          },
+          "lost": {
+            "description": "Pointers that were dropped because their bytes are gone (history_lost).",
+            "type": "array",
+            "items": { "$ref": "#/$defs/object_name" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "object_name": {
+      "description": "An object name under …/<path>/: a version id, then .<size>.zst for a zstd keyframe or .<size>.prefix for a prefix pointer.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z_[0-9a-f]{16}(\\.(0|[1-9][0-9]*)\\.(zst|prefix))?$"
     }
   }
 }
