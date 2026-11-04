@@ -490,6 +490,7 @@ equivalent served by the CLI. It is both: the same files at the same path from t
 | Surface | Online (an app's page) | On the machine (the `serve` page, the desktop app, `vt serve`) |
 |---|---|---|
 | **Pill and menu.** As Obsidian's, without Pause and Settings (§13): Activity log, Version history, Deleted files [5] | the folder's state; each device's last change; warnings; storage and Free up space; a link to `/fs/account` | this device's engine first: syncing, offline, over quota |
+| **Files** (added 2026-11-04, Zach: "Yes build the web files page"; `docs/API.md` "The Files tab"). Every device's files, opened with the browser's own preview; upload, rename and delete for the web host's; the first tab, and the full page `/fs/files` | yes | no: `serve` has no folder listing, so the tab says to browse online |
 | **Activity log.** All / Errors / Skipped / Conflicts, search, Copy sync log | every device's published changes, live | this device's full log, plus the others' published changes |
 | **Version history with diff.** Versions on the left; Show changes, Copy, Download and Restore on the right | yes | yes, with the network for old bytes |
 | **Deleted files and bulk restore** | yes | yes, with the network |

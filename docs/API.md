@@ -70,6 +70,7 @@ public), each with what their role may see.
 | `GET /fs/v1/folders` | `folders` | session (exists, PEP 0003) | the folders this machine syncs, with `folder` |
 | `GET /fs/ui/v1/<file>` | the element's files | yes | yes (embedded in the binary) |
 | `GET /fs/` | a page with one `<folder-sync-status>` per folder | no | yes |
+| `GET /fs/files[?project=]` | the Files page (below): `<folder-sync-status view="files">` full-page | signed in (else `303` to `/fs/signin?return=/fs/files`) | no |
 
 ### Each route
 
@@ -158,8 +159,8 @@ Every app embeds the same element with two lines, on its own origin:
 <folder-sync-status project="notes"></folder-sync-status>
 ```
 
-It is a pill showing the folder's state; clicking it opens a menu (native `popover`) with **Activity**, **Version
-history**, **Deleted files**, **Storage** and a link to `/fs/account` (devices, visibility); each opens a
+It is a pill showing the folder's state; clicking it opens a menu (native `popover`) with **Files**, **Activity**,
+**Version history**, **Deleted files**, **Storage** and a link to `/fs/account` (devices, visibility); each opens a
 panel in a native `<dialog>`. Activity shows each sync's time beside its line (`↑ 0.4 s`, `↓ 1.3 s`, from `up_ms` and
 `down_ms`). Version history shows a file's versions with **Show changes** (a line diff, jsdiff's
 `diffLines`, vendored at `/fs/ui/v1/vendor/diff.js`), **Download** and **Restore**; Deleted files restores one or
@@ -176,14 +177,16 @@ folders and files.
   - `folder` (optional): on a machine, the folder's path, for a project two folders on it sync (sent as `?folder=`,
     so the machine never answers `409 ambiguous_folder`; `serve`'s `/fs/` page sets it on each element).
   - `base` (optional, default `/fs`): where the app mounts folder-sync.
-  - `view` (optional): `activity`, `history`, `deleted` or `storage` opens that panel at once and shows no pill (`serve`'s `/fs/`
-    page and an app's "Sync details" window use it).
+  - `view` (optional): `files`, `activity`, `history`, `deleted` or `storage` opens that panel at once and shows no pill (`serve`'s `/fs/`
+    page, an app's "Sync details" window and `/fs/files` use it).
 - **Methods:** `open(view, {host, path}?)` opens a panel (`history` with a `host` and `path` opens that file's
-  versions); `close()`; `refresh()` reads `status` now.
+  versions, `files` with them opens that file); `close()`; `refresh()` reads `status` now.
 - **Events** (bubbling, composed, on the element):
   - `folder-sync:status`, `detail` = the `status` body, each time it changes: an app can show its own indicator from
     it and hide the pill (`hidden` attribute).
   - `folder-sync:restored`, `detail` = the `restore_response` body, after a Restore.
+  - `folder-sync:project`, `detail` = `{ project }`, when the Files tab's folder picker switches the folder: the element's
+    `project` attribute is now that folder, so every tab follows it (`/fs/files` keeps `?project=` from it).
 - **Theme:** CSS custom properties on the element or any ancestor: `--fs-font`, `--fs-fg`, `--fs-bg`, `--fs-muted`,
   `--fs-accent`, `--fs-warn`, `--fs-error`, `--fs-radius`; `::part(pill)`, `::part(menu)`, `::part(panel)`. It
   follows `prefers-color-scheme` when they are unset. Its Shadow DOM keeps the app's CSS out and its own in.
@@ -195,6 +198,44 @@ folders and files.
   - It works in Chromium and WebKitGTK (the Linux desktop app), by keyboard (the menu and the dialog trap and return
     focus), and with no network on `serve` (status and activity; old versions need the network).
   - A readers' or the public's view shows the pill and the devices only.
+
+## The Files tab and the `/fs/files` page
+
+Zach, 2026-11-04: the web **Files** page is "the only missing piece of the simplest Dropbox": a signed-in person
+browses, opens, uploads, renames and deletes their synced files in a browser, with the browser's own preview. It is a
+tab of the same element (first in the menu and the tab bar) and, full-page, `GET /fs/files`. **It adds no data
+route**: it uses the ones above and PEP 0003 §3.3.
+
+| What the tab does | Route |
+|---|---|
+| lists the person's folders (the picker) | `GET /fs/v1/folders` |
+| lists a folder's files, every device's: `hosts` (`id`, `name`, `web`) and `files` (`host`, `path`, `size`, `sha256`, `mtime`, `writtenAt`) | `GET /fs/v1/folders/:project` |
+| opens a file (image, PDF, video and audio by URL, text by `fetch`), and Download | `GET …/files/:host/<path>` |
+| upload (button or drop), and the second half of a rename | `PUT …/web/<path>` (web host only; `403 csrf`, `409 wrong_user`, `413 too_large` over 32 MiB, `400` for a name the contract refuses, `403 over_quota`) |
+| delete, and the last step of a rename | `DELETE …/web/<path>` (into the web host's history: Deleted files restores it for 30 days) |
+| Version history of a file | the History tab, `open("history", {host, path})` |
+
+- **Who may change what:** only the web host's files. Every other device's file is that device's to write (CONTRACT
+  "Who writes"), so the tab shows "Written by <device>; edit it there." and no Rename or Delete; the web host's `PUT`
+  and `DELETE` cannot name another host's path (`accounts/test/files-page.test.ts` proves a machine's objects and manifest
+  stay byte for byte the same). A shared, editable tree is PEP 0010, not this tab.
+- **Rename** is the three calls a client can make: read the bytes, `PUT` them at the new path, `DELETE` the old one. It
+  refuses a name that already exists, and a failure after the `PUT` leaves the file twice, never zero times.
+- **Preview** is by suffix and nothing else: image `png jpg jpeg gif webp svg avif bmp ico` (an `<img>`, so an SVG's
+  script never runs), `pdf` (a frame on the file's own URL), video `mp4 m4v webm mov`, audio `mp3 wav ogg oga m4a flac
+  aac opus` (native players), and text (`txt md json jsonl csv yaml toml log` and common source suffixes) as plain text in a
+  `<pre>` up to 1 MiB, never markup. Anything else, a text file over 1 MiB and bytes that are not UTF-8 get **Download**.
+- **Sort and filter:** by name (the default), modified or size inside each device's group, and a filter on the path.
+- **Copy link** appears only in a public folder, where a link works for anyone (`?owner=<id>`); a private folder's file
+  has no link that works for another person.
+- **On a machine** (`serve` has no folder listing) the tab says to browse online and the menu does not list it.
+- **The list is resizable:** the handle between the list and the file drags (and takes the arrow keys), and the width is
+  remembered in `localStorage` (`folder-sync-status/files-split`). At 700 px wide or less the list and the file take
+  turns, with a "← Files" button back.
+- **`GET /fs/files`** is a shell: `/fs/site/files.js` signs-in-checks, picks the folder (`?project=` or the first) and mounts
+  `<folder-sync-status view="files">` on it. Its Content-Security-Policy is the page policy plus what a preview needs and
+  nothing else (`media-src 'self'`, `frame-src 'self'`, inline styles for the element's Shadow DOM); scripts, connections
+  and frames stay `'self'` or `'none'`, and the page is never framed.
 
 ## Cut at acceptance (Unix scope)
 

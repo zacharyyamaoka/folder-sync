@@ -16,6 +16,21 @@ export const TYPES = {
 	".png": "image/png", ".pdf": "application/pdf", ".webm": "video/webm", ".wav": "audio/wav", ".step": "application/step",
 };
 
+/** The files the tests start from: what two machines publish (`bam-GPU`, `bam-laptop`) and what the web host holds. */
+export const SEED = [
+	[GPU, "notes/plan.md", PLAN, "2026-11-04T09:58:00.000Z"],
+	[GPU, "notes/todo.json", '{\n  "todo": ["clamp", "bracket"]\n}\n', "2026-11-03T18:00:00.000Z"],
+	[GPU, "photos/lab.png", fixture("tiny.png"), "2026-11-01T12:00:00.000Z"],
+	[GPU, "docs/spec.pdf", fixture("tiny.pdf"), "2026-10-30T12:00:00.000Z"],
+	[GPU, "clips/demo.webm", fixture("tiny.webm"), "2026-10-29T12:00:00.000Z"],
+	[GPU, "audio/beep.wav", fixture("tiny.wav"), "2026-10-28T12:00:00.000Z"],
+	[GPU, "cad/bracket.step", "ISO-10303-21;\nEND-ISO-10303-21;\n", "2026-10-27T12:00:00.000Z"],
+	[GPU, "logs/agent.log", "line of a long log\n".repeat(60_000), "2026-11-04T09:59:00.000Z"],
+	[LAPTOP, "readme.md", "# bam-laptop\n\nthe laptop's own notes\n", "2026-11-02T14:00:00.000Z"],
+	[WEB, "hearts/clamp-24.json", '{"part": "clamp-24", "saved": true}\n', "2026-11-04T09:30:00.000Z"],
+	[WEB, "welcome.md", "# Welcome\n\nAdded on the web.\n", "2026-11-03T09:30:00.000Z"],
+];
+
 /** Folder `project`'s files. `visibility` is what the listing says; `owner` its owner's id. */
 export function world({ project = "notes", visibility = "private" } = {}) {
 	const hosts = [
@@ -25,18 +40,7 @@ export function world({ project = "notes", visibility = "private" } = {}) {
 	];
 	const files = new Map();
 	const requests = [];
-	const add = (host, path, data, mtime) => files.set(`${host}\n${path}`, { host, path, data: Buffer.from(data), mtime });
-	add(GPU, "notes/plan.md", PLAN, "2026-11-04T09:58:00.000Z");
-	add(GPU, "notes/todo.json", '{\n  "todo": ["clamp", "bracket"]\n}\n', "2026-11-03T18:00:00.000Z");
-	add(GPU, "photos/lab.png", fixture("tiny.png"), "2026-11-01T12:00:00.000Z");
-	add(GPU, "docs/spec.pdf", fixture("tiny.pdf"), "2026-10-30T12:00:00.000Z");
-	add(GPU, "clips/demo.webm", fixture("tiny.webm"), "2026-10-29T12:00:00.000Z");
-	add(GPU, "audio/beep.wav", fixture("tiny.wav"), "2026-10-28T12:00:00.000Z");
-	add(GPU, "cad/bracket.step", "ISO-10303-21;\nEND-ISO-10303-21;\n", "2026-10-27T12:00:00.000Z");
-	add(GPU, "logs/agent.log", "line of a long log\n".repeat(60_000), "2026-11-04T09:59:00.000Z");
-	add(LAPTOP, "readme.md", "# bam-laptop\n\nthe laptop's own notes\n", "2026-11-02T14:00:00.000Z");
-	add(WEB, "hearts/clamp-24.json", '{"part": "clamp-24", "saved": true}\n', "2026-11-04T09:30:00.000Z");
-	add(WEB, "welcome.md", "# Welcome\n\nAdded on the web.\n", "2026-11-03T09:30:00.000Z");
+	for (const [host, path, data, mtime] of SEED) files.set(`${host}\n${path}`, { host, path, data: Buffer.from(data), mtime });
 
 	const sha = (data) => createHash("sha256").update(data).digest("hex");
 	const listing = () => ({
