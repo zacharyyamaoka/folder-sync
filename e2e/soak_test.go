@@ -357,6 +357,21 @@ func (r *soakRun) step(machines []*machine) {
 		rel := copies[r.rng.IntN(len(copies))]
 		parts := strings.SplitN(rel, "/", 3)
 		edit := fmt.Sprintf("a second person's edit %d on %s\n", r.rng.Uint32(), m.name)
+		// WHY an earlier edit of this very file stops being expected when it is still the file's content: the person who types
+		// over their own edit has not lost it to the engine. editsKept used to count it lost, and seeds 11, 13, 14 and 27 failed on
+		// it at 29b6e83 (the step log shows the same machine editing the same copy twice). An earlier edit the engine already moved
+		// to conflicts/ is no longer the file's content, so it stays expected there; one the engine overwrote without keeping is
+		// not the file's content either, so it is still reported.
+		if now, err := os.ReadFile(filepath.Join(m.folder, filepath.FromSlash(rel))); err == nil {
+			var expected []peerEdit
+			for _, earlier := range r.edits {
+				if earlier.on == m.name && earlier.of == parts[1] && earlier.path == parts[2] && earlier.content == string(now) {
+					continue
+				}
+				expected = append(expected, earlier)
+			}
+			r.edits = expected
+		}
 		writeFile(r.t, filepath.Join(m.folder, filepath.FromSlash(rel)), edit, time.Time{})
 		r.edits = append(r.edits, peerEdit{on: m.name, of: parts[1], path: parts[2], content: edit})
 		r.ops["edit-peer-copy"]++
@@ -498,7 +513,7 @@ func TestSoakNothingLost(t *testing.T) {
 		t.Errorf("seed %d: %d lost versions:\n  %s", seed, len(lost), strings.Join(lost, "\n  "))
 	}
 	if kept != len(r.edits) {
-		t.Errorf("seed %d: %d of %d edits to peer copies are nowhere (neither in place nor in conflicts/)", seed, len(r.edits)-kept, len(r.edits))
+		t.Errorf("seed %d: %d of %d edits to peer copies are nowhere (neither in place nor in conflicts/); the steps, with the LOST EDIT lines:\n%s", seed, len(r.edits)-kept, len(r.edits), strings.Join(r.log, "\n"))
 	}
 }
 

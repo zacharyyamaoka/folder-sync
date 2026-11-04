@@ -21,6 +21,8 @@ import (
 	"folder-sync/internal/manifest"
 	"folder-sync/internal/names"
 	"folder-sync/internal/rclone"
+	"folder-sync/internal/s3"
+	"folder-sync/internal/store"
 	"folder-sync/internal/synclog"
 )
 
@@ -79,6 +81,33 @@ type Result struct {
 // re-saved under the other spelling was skipped as already there and then deleted under its old name. The engine never
 // rewrites a name: NFC and NFD are two names, each landing exactly once, under the spelling its writer used.
 const exactNames = "--no-unicode-normalization"
+
+// manifestReads is how many times a manifest is read before one that will not parse is an error.
+const manifestReads = 3
+
+// manifestRetryPause is the wait before a manifest that did not parse is read again (times the read number); a test sets it to 0.
+var manifestRetryPause = 200 * time.Millisecond
+
+// getManifest reads the manifest object at key (conditionally on etag; "" always reads) and parses it. A body that is cut short,
+// which manifest.Parse refuses as "not valid JSON", is read again up to manifestReads times before the error is returned.
+// WHY: real S3 and R2 replace an object atomically, but a store that serves an object while it is being replaced can answer 200
+// with part of it (the e2e stand-in, rclone serve s3 over a directory, did, once: G1's one unexplained failure). A cut-short body
+// is never a state, so nothing acts on it; but one such read failed the whole round, and Discover's noteShared dropped it silently
+// and never asked that host again. Only a syntax error is read again: a manifest of the wrong schema or host is not transient.
+func getManifest(objects store.Objects, bucket, key, etag string) (s3.GetResult, manifest.Manifest, error) {
+	for read := 1; ; read++ {
+		got, err := objects.GetIfNoneMatch(bucket, key, etag)
+		if err != nil || got.NotFound || got.NotModified {
+			return got, manifest.Manifest{}, err
+		}
+		m, err := manifest.Parse(got.Body)
+		var syntax *json.SyntaxError
+		if err == nil || !errors.As(err, &syntax) || read == manifestReads {
+			return got, m, err
+		}
+		time.Sleep(manifestRetryPause * time.Duration(read))
+	}
+}
 
 // Filters writes the rclone filter file for this project's push and returns its path.
 // The peers' folder is always excluded: a machine publishes only its own files.
@@ -682,12 +711,8 @@ func (p *Project) keepManifest(m manifest.Manifest) error {
 // ReconcileReadOnly is the reconcile of a round with read-only keys: no stray moves (they write), only this host's
 // published manifest taken when it is ahead of the local copy (a delete's answer lost with its job file).
 func (p *Project) ReconcileReadOnly() error {
-	got, err := p.Objects().GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
+	got, remote, err := getManifest(p.Objects(), p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
 	if err != nil || got.NotFound {
-		return err
-	}
-	remote, err := manifest.Parse(got.Body)
-	if err != nil {
 		return err
 	}
 	if local, err := p.ownManifest(); err == nil && remote.Seq <= local.Seq {
@@ -699,16 +724,12 @@ func (p *Project) ReconcileReadOnly() error {
 // adoptPublished takes this host's manifest from the bucket (a read): a round with read-only keys reconciles its
 // manifest state this way, with no write (review r3 #2).
 func (p *Project) adoptPublished() error {
-	got, err := p.Objects().GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
+	got, m, err := getManifest(p.Objects(), p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
 	if err != nil {
 		return err
 	}
 	if got.NotFound {
 		return fmt.Errorf("this host has no manifest in the bucket")
-	}
-	m, err := manifest.Parse(got.Body)
-	if err != nil {
-		return err
 	}
 	if m.HostID != p.Host.ID || m.Project != p.Config.Project {
 		return fmt.Errorf("the manifest under this host's prefix claims %s/%s", m.Project, m.HostID)
@@ -912,7 +933,7 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 	if haveCached {
 		etag = peers.ETags[peerID]
 	}
-	got, err := p.Objects().GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(peerID)+"/"+manifest.FileName, etag)
+	got, m, err := getManifest(p.Objects(), p.Config.Bucket, p.HostPrefix(peerID)+"/"+manifest.FileName, etag)
 	if err != nil {
 		return PeerResult{}, err
 	}
@@ -921,10 +942,6 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 	}
 	if got.NotFound {
 		return PeerResult{ID: peerID, NotModified: true}, nil
-	}
-	m, err := manifest.Parse(got.Body)
-	if err != nil {
-		return PeerResult{}, err
 	}
 	if m.HostID != peerID || m.Project != p.Config.Project {
 		return PeerResult{}, fmt.Errorf("manifest under hosts/%s claims host %s, project %s", peerID, m.HostID, m.Project)
