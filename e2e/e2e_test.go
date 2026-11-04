@@ -139,7 +139,9 @@ func startStandIn(t *testing.T, rcloneBin, dataDir, keyID, secret string) {
 		t.Fatalf("%s is busy: stop whatever holds it", standInAddr)
 	}
 	logFile := filepath.Join(filepath.Dir(dataDir), "stand-in.log")
-	cmd := exec.Command(rcloneBin, "serve", "s3", "--addr", standInAddr, "--auth-key", keyID+","+secret,
+	// WHY --no-unicode-normalization: S3 and R2 keys are bytes. Without it the stand-in answers a HEAD for café (NFD) with the
+	// object stored as café (NFC), so a client believes an upload already happened (gate G9, e2e/names_test.go).
+	cmd := exec.Command(rcloneBin, "serve", "s3", "--addr", standInAddr, "--auth-key", keyID+","+secret, "--no-unicode-normalization",
 		"--config", testtools.NoConfig(t), "--cache-dir", filepath.Join(filepath.Dir(dataDir), "stand-in-cache"),
 		"-vv", "--log-file", logFile, dataDir)
 	if err := cmd.Start(); err != nil {

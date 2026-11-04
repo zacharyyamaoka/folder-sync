@@ -128,3 +128,118 @@ func TestMatchesGit(t *testing.T) {
 		t.Fatalf("rclone kept\n  %s\ngit keeps\n  %s\nfilters:\n%s", strings.Join(got, "\n  "), strings.Join(want, "\n  "), body)
 	}
 }
+
+// listWithRclone lists the files rclone keeps in root under the compiled filters (the engine folder-sync uses).
+func listWithRclone(t *testing.T, root, filters string) []string {
+	t.Helper()
+	_, here, _, _ := runtime.Caller(0)
+	rcloneBin := testtools.PinnedRclone(t, filepath.Join(filepath.Dir(here), "..", ".."))
+	filterFile := filepath.Join(t.TempDir(), "filters.txt")
+	if err := os.WriteFile(filterFile, []byte(filters), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	listing, err := exec.Command(rcloneBin, "lsjson", "-R", "--files-only", "--no-mimetype", "--config", testtools.NoConfig(t), "--filter-from", filterFile, root).Output()
+	if err != nil {
+		t.Fatalf("rclone: %v", err)
+	}
+	var items []struct{ Path string }
+	if err := json.Unmarshal(listing, &items); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, item := range items {
+		got = append(got, item.Path)
+	}
+	sort.Strings(got)
+	return got
+}
+
+func writeTree(t *testing.T, root string, files []string) {
+	t.Helper()
+	for _, f := range files {
+		path := filepath.Join(root, filepath.FromSlash(f))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(f), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestDefaultsKeepOSJunkOut is gate G9: the files an OS or its file manager scatters through a folder never sync, with no
+// rule written by the person (.DS_Store, Thumbs.db, desktop.ini, and AppleDouble ._* files), at any depth.
+func TestDefaultsKeepOSJunkOut(t *testing.T) {
+	root := t.TempDir()
+	junk := []string{".DS_Store", "sub/.DS_Store", "Thumbs.db", "pictures/Thumbs.db", "desktop.ini", "a/b/desktop.ini", "._photo.jpg", "dir/._notes.md"}
+	real := []string{"notes.md", "sub/.DS_Storey", "sub/my.DS_Store.md", "Thumbs.db.md", "pictures/thumbs.txt", "desktop.ini.bak", "photo._copy.jpg", "dir/_notes.md"}
+	writeTree(t, root, append(append([]string{}, junk...), real...))
+	body, err := Compile(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := listWithRclone(t, root, body)
+	want := append([]string{}, real...)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rclone kept\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+	}
+}
+
+// TestOSJunkDefaultsAreOverridable: a person who really wants Thumbs.db synced writes "!Thumbs.db" (docs/peps/0001 "init":
+// the defaults come first, the project's own rules after, and the last matching rule wins).
+func TestOSJunkDefaultsAreOverridable(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, []string{".DS_Store", "Thumbs.db", "desktop.ini", "._x"})
+	body, err := Compile([]string{"!Thumbs.db", "!._x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := listWithRclone(t, root, body)
+	if want := []string{"._x", "Thumbs.db"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("kept %q, want %q\n%s", got, want, body)
+	}
+}
+
+// TestGitignoreStyleRules is gate G9's "gitignore-style" half: the project's own rules (the `ignore` list in
+// .folder-sync.toml) mean what they mean in a .gitignore, with git itself as the oracle. TestMatchesGit already walks the
+// translation; this adds the shapes people write by hand: nested folders, a rule anchored by a middle slash, a negation
+// after a wildcard, an escaped "#", and a trailing-slash rule that must not match a plain file of that name.
+func TestGitignoreStyleRules(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		testtools.Missing(t, "no git")
+	}
+	root := t.TempDir()
+	writeTree(t, root, []string{
+		"keep.md", "drafts/a.md", "drafts/deep/b.md", "src/drafts/c.md", "out/app.js", "out/app.map", "src/out", "notes/.hidden",
+		"private/key.txt", "private/readme.md", "x.tmp", "a/b/x.tmp", "important.tmp", "docs/api/index.md", "docs/api/v1/index.md",
+		"#todo", "Makefile", "sub/Makefile",
+	})
+	project := []string{"/drafts/", "out/", "*.tmp", "!important.tmp", "private/*", "!private/readme.md", "docs/api/v1/", `\#todo`, "/Makefile"}
+	gitignore := strings.Join(append(append([]string{}, Defaults...), project...), "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(gitignore), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-c", "init.defaultBranch=main", "init", "-q", root).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	out, err := exec.Command("git", "-C", root, "ls-files", "--others", "--exclude-standard").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != ".gitignore" {
+			want = append(want, line)
+		}
+	}
+	sort.Strings(want)
+	body, err := Compile(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := listWithRclone(t, root, body+"- /.gitignore\n")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rclone kept\n  %s\ngit keeps\n  %s\nfilters:\n%s", strings.Join(got, "\n  "), strings.Join(want, "\n  "), body)
+	}
+}

@@ -90,11 +90,11 @@ func everywhere(kind pullKind) map[string]pullKind {
 	return map[string]pullKind{"linux": kind, "darwin": kind, "windows": kind}
 }
 
-// knownBugs are the cases a run found failing: what is wrong, so FOLDER_SYNC_QUARANTINE=<id> says why it skips.
-var knownBugs = map[string]string{
-	"junk-files":            "the default ignore list (internal/ignore Defaults) has no .DS_Store, Thumbs.db or desktop.ini, so they upload and sync to every machine",
-	"unicode-normalization": "a folder holding café as NFC and as NFD lists both in the manifest, but rclone's copy treats the two names as one and uploads only one (--no-unicode-normalization is off), so the manifest names an object the bucket lacks",
-}
+// knownBugs are the cases a run found failing: what is wrong, so FOLDER_SYNC_QUARANTINE=<id> says why it skips. Empty since
+// gate G9 fixed the last two (OS junk now ignored by default, internal/ignore; NFC and NFD kept as the two names they are,
+// internal/syncer exactNames): add an entry here, and list its id or group in FOLDER_SYNC_QUARANTINE, only for a bug found
+// and not yet fixed.
+var knownBugs = map[string]string{}
 
 var preciseMtime = time.Date(2026, 10, 1, 10, 20, 30, 123456789, time.UTC)
 
@@ -356,7 +356,8 @@ func memoryStandIn(t *testing.T, rcloneBin, keyID, secret string) *s3.Client {
 	}
 	work := t.TempDir()
 	logFile := filepath.Join(work, "stand-in.log")
-	cmd := exec.Command(rcloneBin, "serve", "s3", "--addr", standInAddr, "--auth-key", keyID+","+secret, "--config", testtools.NoConfig(t),
+	// WHY --no-unicode-normalization: keys are bytes, as on S3 and R2 (see startStandIn)
+	cmd := exec.Command(rcloneBin, "serve", "s3", "--addr", standInAddr, "--auth-key", keyID+","+secret, "--no-unicode-normalization", "--config", testtools.NoConfig(t),
 		"--cache-dir", filepath.Join(work, "cache"), "-vv", "--log-file", logFile, ":memory:")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
