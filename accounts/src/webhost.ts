@@ -285,9 +285,9 @@ export function memoryJournal(): Journal {
 	};
 }
 
-/** The account id of a root, users/<id>/. */
+/** The account id of a root, <ROOT_PREFIX>users/<id>/: its last segment. */
 function ownerOf(root: string): string {
-	return root.slice("users/".length, -1);
+	return root.slice(root.lastIndexOf("/", root.length - 2) + 1, -1);
 }
 
 /** Puts a cut-off write or delete right: when the manifest did not take it, the file goes back to the bytes the
@@ -639,7 +639,7 @@ export async function runWebOp(env: CredsEnv & QuotaEnv, s3: FetchLike, op: WebO
 		return { status: 401, body: { error: "signed_out", why: "this device was signed out before its change could start" } };
 	}
 	try {
-		const root = userRoot(op.owner);
+		const root = userRoot(op.owner, env);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, clock()), s3);
 		const w = { root, project: op.project, hostId: op.hostId };
 		const quota = quotaOf(env, op.owner);
@@ -920,7 +920,7 @@ export class WebHostCore {
 			if (op.method === "DELETE" && op.permanent) return this.permanentWebDelete(env, op);
 			if (op.method === "PURGE_TRASH") return this.purgeTrash(env, op);
 			if (op.method === "PURGE_HISTORY") return this.purgeHistory(env, op);
-			return runWebOp(env, this.s3, op, this.journalFor(userRoot(op.owner)), this.clock, this.store);
+			return runWebOp(env, this.s3, op, this.journalFor(userRoot(op.owner, env)), this.clock, this.store);
 		});
 		// the change records it queued, written once it has answered (CONTRACT "Consistency": after the manifest and the
 		// hub); the next operation in the queue waits for them
@@ -937,7 +937,7 @@ export class WebHostCore {
 	async prune(env: CredsEnv = this.env): Promise<{ deleted: number; bytes: number; more: boolean } | null> {
 		const folder = await this.storage.get<{ owner: string; project: string }>("folder");
 		if (!folder) return null;
-		const root = userRoot(folder.owner);
+		const root = userRoot(folder.owner, env);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
 		const pruned = await pruneFolder(bucket, root, folder.project, this.clock());
 		// a credit marks the measurement stale (store.addUsage): the next request measures again
@@ -957,7 +957,7 @@ export class WebHostCore {
 			const settled = await runWebOp(env, this.s3, { ...op, method: "SETTLE" }, this.journal(), this.clock, this.store);
 			if (settled.status !== 200) return settled;
 		}
-		const root = userRoot(op.owner);
+		const root = userRoot(op.owner, env);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
 		const purge = op.purge ?? {};
 		const doomed: { key: string; size: number; counts: boolean }[] = [];
@@ -1016,7 +1016,7 @@ export class WebHostCore {
 	private async hostDelete(env: CredsEnv & QuotaEnv, op: WebOp): Promise<WebAnswer> {
 		const refuse = (status: number, error: string, why: string): WebAnswer => ({ status, body: { error, why } });
 		try {
-			const root = userRoot(op.owner);
+			const root = userRoot(op.owner, env);
 			const where = { root, project: op.project, hostId: op.hostId };
 			const paths = op.paths ?? [];
 			let job = await this.storage.get<DeleteJob>(`job:${op.job}`);
@@ -1059,7 +1059,7 @@ export class WebHostCore {
 		} catch (error) {
 			return { status: 400, body: { error: "bad_path", why: error instanceof Error ? error.message : String(error) } };
 		}
-		const root = userRoot(op.owner);
+		const root = userRoot(op.owner, env);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-only", WRITE_TTL_S, this.clock()), this.s3);
 		const { manifest } = await readManifest(bucket, { root, project: op.project, hostId: op.hostId });
 		if (!manifest.files.some((e) => e.path === op.path)) return { status: 404, body: { error: "not_found", why: "the web host does not hold that file" } };
@@ -1077,7 +1077,7 @@ export class WebHostCore {
 		// purge waits (503 recovering), and once settled no journal names any copy here
 		const settled = await runWebOp(env, this.s3, { ...op, method: "SETTLE" }, this.journal(), this.clock, this.store);
 		if (settled.status !== 200) return settled;
-		const root = userRoot(op.owner);
+		const root = userRoot(op.owner, env);
 		const bucket = new S3Bucket(await mint(env, root, "object-read-write", WRITE_TTL_S, this.clock()), this.s3);
 		const { keys, more } = await bucket.keys(`${root}_trash/${op.project}/${op.hostId}/`);
 		let purged = 0;

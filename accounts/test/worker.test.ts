@@ -553,7 +553,7 @@ const red = (failures: string[], pattern: RegExp, what: string) =>
 
 test("mutation: a root taken from the request (?root=, ?owner=) instead of the session crosses people (red)", async () => {
 	const failures = await withMutant([
-		{ file: "app.ts", marker: 'const minted = await mint(env, userRoot(person.userId), "object-read-write", ttlOf(env), deps.now()); // fs-mutation: the session\'s root', replacement: 'const asked = new URL(request.url).searchParams.get("root"); const minted = await mint(env, asked || userRoot(person.userId), "object-read-write", ttlOf(env), deps.now());' },
+		{ file: "app.ts", marker: 'const minted = await mint(env, userRoot(person.userId, env), "object-read-write", ttlOf(env), deps.now()); // fs-mutation: the session\'s root', replacement: 'const asked = new URL(request.url).searchParams.get("root"); const minted = await mint(env, asked || userRoot(person.userId, env), "object-read-write", ttlOf(env), deps.now());' },
 		{ file: "app.ts", marker: "const owner = who.person.userId; // fs-mutation: the web host's root. WHY: the session's, never a URL's, a body's or a header's", replacement: 'const owner = new URL(request.url).searchParams.get("owner") || who.person.userId;' },
 	], (m) => boundary(m.handle));
 	red(failures, /^token-owner-laptop: prefixPaths \["users\/ownerABC1234\/"\]/, "credentials from ?root=");
@@ -561,8 +561,8 @@ test("mutation: a root taken from the request (?root=, ?owner=) instead of the s
 });
 
 test("mutation: a root without its trailing slash lets users/ownerABC123 cover users/ownerABC1234/ (red)", async () => {
-	const slash = { file: "creds.ts" as const, marker: "return `users/${userId}/`;", replacement: "return `users/${userId}`;" };
-	const guard = { file: "creds.ts" as const, marker: 'if (!ONE_ROOT.test(prefix) && !ONE_FOLDER.test(prefix)) throw new Error("a credential is only ever minted for one person\'s root or folder");', replacement: "" };
+	const slash = { file: "creds.ts" as const, marker: "return `${rootPrefixOf(env)}users/${userId}/`;", replacement: "return `${rootPrefixOf(env)}users/${userId}`;" };
+	const guard = { file: "creds.ts" as const, marker: 'if (!ONE_ROOT.test(inner) && !ONE_FOLDER.test(inner)) throw new Error("a credential is only ever minted for one person\'s root or folder");', replacement: "" };
 	// the slash dropped alone: mint's own guard still refuses to sign anything but one person's root
 	await withMutant([slash], async (m) => {
 		const { deps } = fakeDeps(people());
@@ -605,7 +605,7 @@ test("mutation: without the public rule, a public folder is not readable signed 
 
 test("mutation: a public read signed for the owner's whole root instead of the one folder (red)", async () => {
 	const failures = await withMutant([
-		{ file: "app.ts", marker: 'const bucket = await bucketFor(env, deps, folderPrefix(owner, project), "object-read-only", READ_TTL_S); // fs-mutation: the read scope', replacement: 'const bucket = await bucketFor(env, deps, userRoot(owner), "object-read-only", READ_TTL_S);' },
+		{ file: "app.ts", marker: 'const bucket = await bucketFor(env, deps, folderPrefix(owner, project, env), "object-read-only", READ_TTL_S); // fs-mutation: the read scope', replacement: 'const bucket = await bucketFor(env, deps, userRoot(owner, env), "object-read-only", READ_TTL_S);' },
 	], (m) => boundary(m.handle));
 	red(failures, /^a public read was not signed for users\/<owner>\/pub\/ only/, "the read scope");
 });

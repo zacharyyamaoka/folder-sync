@@ -78,7 +78,7 @@ async function body(request: Request): Promise<Record<string, unknown> | Respons
 
 /** The owner's root, read-only (or read-write for a restore request): every key here is under it. */
 function rootBucket(env: Env, deps: Deps, ownerId: string, scope: "object-read-only" | "object-read-write" = "object-read-only"): Promise<S3Bucket> {
-	return bucketFor(env, deps, userRoot(ownerId), scope, READ_TTL_S);
+	return bucketFor(env, deps, userRoot(ownerId, env), scope, READ_TTL_S);
 }
 
 interface HostInfo {
@@ -91,7 +91,7 @@ interface HostInfo {
 async function hostsOf(env: Env, deps: Deps, bucket: S3Bucket, ownerId: string, project: string): Promise<HostInfo[] | Response> {
 	const unsettled = await settledFirst(env, deps, ownerId, project);
 	if (unsettled) return unsettled;
-	const reader = new Project(bucket, project, userRoot(ownerId));
+	const reader = new Project(bucket, project, userRoot(ownerId, env));
 	const out: HostInfo[] = [];
 	for (const id of await reader.hosts()) out.push({ id, manifest: await reader.manifest(id) });
 	return out;
@@ -116,7 +116,7 @@ export async function status(request: Request, env: Env, deps: Deps, app: App | 
 	if (decided instanceof Response) return decided.status === 404 ? notFound() : decided;
 	const isOwner = decided.role === "owner";
 	// WHY a folder-scoped key for a reader's or the public's status: they see only what its manifests say
-	const bucket = isOwner ? await rootBucket(env, deps, decided.owner) : await bucketFor(env, deps, `${userRoot(decided.owner)}${project}/`, "object-read-only", READ_TTL_S);
+	const bucket = isOwner ? await rootBucket(env, deps, decided.owner) : await bucketFor(env, deps, `${userRoot(decided.owner, env)}${project}/`, "object-read-only", READ_TTL_S);
 	const hosts = await hostsOf(env, deps, bucket, decided.owner, project);
 	if (hosts instanceof Response) return hosts;
 	const web = await deps.store.webHost(decided.owner, project);
@@ -129,7 +129,7 @@ export async function status(request: Request, env: Env, deps: Deps, app: App | 
 		return json(200, { ...base, role: decided.role, state, headline: devices.length ? "Synced" : "Nothing synced yet", devices }, { "Cache-Control": "private, no-store" });
 	}
 	const names = new Map(devices.map((d) => [d.id, d]));
-	const waiting = (await waitingRequests(bucket, userRoot(decided.owner), project)).map((r) => ({ request: r.id, host: r.host, host_name: names.get(r.host)?.name ?? "", at: r.at, items: r.items.length }));
+	const waiting = (await waitingRequests(bucket, userRoot(decided.owner, env), project)).map((r) => ({ request: r.id, host: r.host, host_name: names.get(r.host)?.name ?? "", at: r.at, items: r.items.length }));
 	const warnings: Record<string, unknown>[] = [];
 	const storage = await usageFigure(env, deps, decided.owner);
 	if (storage?.over) {
@@ -175,7 +175,7 @@ export async function activityRoute(request: Request, env: Env, deps: Deps, app:
 	if (hosts instanceof Response) return hosts;
 	// hosts with records but no manifest (a machine that only pulls): one delimiter listing of the folder's records
 	const known = new Map(hosts.filter((h) => h.manifest).map((h) => [h.id, { id: h.id, name: h.manifest!.host_name, seq: h.manifest!.seq }]));
-	const root = userRoot(ownerId);
+	const root = userRoot(ownerId, env);
 	let cursor: string | undefined;
 	do {
 		const page = await bucket.objects(`${root}_changes/${project}/`, { delimiter: "/", cursor });
@@ -233,7 +233,7 @@ export async function history(request: Request, env: Env, deps: Deps, app: App |
 	const version = query.get("version");
 	if (version !== null && !parseVersion(version)) return fail(400, "bad_version", "A version is <written_at>_<sha16>, as the history lists it.");
 	const ownerId = who.person.userId;
-	const root = userRoot(ownerId);
+	const root = userRoot(ownerId, env);
 	const bucket = await rootBucket(env, deps, ownerId);
 	if (version !== null) return versionBytes(bucket, root, project, host, path, version, deps.now(), head);
 	const hosts = await hostsOf(env, deps, bucket, ownerId, project);
@@ -282,7 +282,7 @@ export async function deleted(request: Request, env: Env, deps: Deps, app: App |
 	const only = new URL(request.url).searchParams.get("host");
 	if (only !== null && !HOST_ID.test(only)) return fail(400, "bad_host", "A host is its lowercase UUID.");
 	const ownerId = who.person.userId;
-	const root = userRoot(ownerId);
+	const root = userRoot(ownerId, env);
 	const bucket = await rootBucket(env, deps, ownerId);
 	const hosts = await hostsOf(env, deps, bucket, ownerId, project);
 	if (hosts instanceof Response) return hosts;
@@ -370,7 +370,7 @@ export async function restore(request: Request, env: Env, deps: Deps, app: App |
 		if (typeof item.version !== "string" || !parseVersion(item.version)) return fail(400, "bad_version", "A version is <written_at>_<sha16>, as the history lists it.");
 	}
 	const ownerId = who.person.userId;
-	const root = userRoot(ownerId);
+	const root = userRoot(ownerId, env);
 	// WHY again after the body: a device revoked while it sent this writes nothing (judge r2 #5)
 	if (!(await stillSignedIn(deps, who.person))) return fail(401, "signed_out", "This device was signed out before its restore could start.");
 	const reading = await rootBucket(env, deps, ownerId);

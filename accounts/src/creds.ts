@@ -24,6 +24,8 @@ export interface CredsEnv {
 	/** The S3 endpoint; default https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com (a local stand-in in the proof). */
 	R2_ENDPOINT?: string;
 	SYNC_CREDENTIAL_TTL_S?: string;
+	/** This deployment's app root in the bucket: "" (the default: keys start users/<id>/) or e.g. "apps/robotparts/". */
+	ROOT_PREFIX?: string;
 }
 
 /** What `folder-sync credentials` prints (AWS credential_process plus Endpoint, Bucket, Prefix: PEP 0002). */
@@ -49,18 +51,32 @@ export const PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const ONE_ROOT = /^users\/[A-Za-z0-9_-]{8,64}\/$/;
 const ONE_FOLDER = /^users\/[A-Za-z0-9_-]{8,64}\/[a-z0-9][a-z0-9._-]{0,62}\/$/;
 
-/** The one prefix a person's machines may touch: users/<their id>/. */
-export function userRoot(userId: string): string {
+/** An app root: one to four slash-ended segments, each starting with a letter or digit (so never "." or ".."). The Go
+ *  side accepts up to eight segments in all (docs/CONTRACT.md), and users/<id>/ takes two of them. */
+const APP_ROOT = /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,62}\/){1,4}$/;
+
+/** This deployment's app root (ROOT_PREFIX), "" when unset. A malformed one throws: it would otherwise name a prefix
+ *  outside the app's own. */
+export function rootPrefixOf(env: { ROOT_PREFIX?: string }): string {
+	const prefix = env.ROOT_PREFIX ?? "";
+	if (prefix !== "" && !APP_ROOT.test(prefix)) throw new NotConfigured("ROOT_PREFIX must be empty or end in a slash, like apps/robotparts/");
+	return prefix;
+}
+
+/** The one prefix a person's machines may touch: <ROOT_PREFIX>users/<their id>/. */
+export function userRoot(userId: string, env: { ROOT_PREFIX?: string } = {}): string {
 	if (!USER_ID.test(userId)) throw new Error("this account's id cannot name a storage prefix");
 	// WHY the trailing slash (fs-mutation: the root's trailing slash): R2 matches prefixPaths as plain string
 	// prefixes, so without it the prefix users/abc would also cover users/abcd/, another person's.
-	return `users/${userId}/`;
+	// WHY ROOT_PREFIX (docs/NEW-APP.md): two apps share the one bucket, and a Better Auth id is only unique inside its
+	// own D1, so each app's keys live under its own root and two apps' ids can never meet. Unset keeps the old keys.
+	return `${rootPrefixOf(env)}users/${userId}/`;
 }
 
-/** One person's one folder: users/<id>/<project>/, what a page's read is signed for (a public folder's too). */
-export function folderPrefix(userId: string, project: string): string {
+/** One person's one folder: <ROOT_PREFIX>users/<id>/<project>/, what a page's read is signed for (a public folder's too). */
+export function folderPrefix(userId: string, project: string, env: { ROOT_PREFIX?: string } = {}): string {
 	if (!PROJECT.test(project)) throw new Error("not a project name");
-	return `${userRoot(userId)}${project}/`;
+	return `${userRoot(userId, env)}${project}/`;
 }
 
 export function endpointOf(env: CredsEnv): string {
@@ -98,7 +114,9 @@ export async function mint(env: CredsEnv, prefix: string, scope: Scope, ttlSecon
 	const bucket = env.SYNC_BUCKET;
 	if (!parentId || !parentSecret || !bucket || !env.R2_ACCOUNT_ID) throw new NotConfigured("the sync store is not set up on this Worker");
 	// WHY again here: whatever a caller computed, a credential is only ever minted for one person's root or folder
-	if (!ONE_ROOT.test(prefix) && !ONE_FOLDER.test(prefix)) throw new Error("a credential is only ever minted for one person's root or folder");
+	const app = rootPrefixOf(env);
+	const inner = prefix.startsWith(app) ? prefix.slice(app.length) : "";
+	if (!ONE_ROOT.test(inner) && !ONE_FOLDER.test(inner)) throw new Error("a credential is only ever minted for one person's root or folder");
 	const endpoint = endpointOf(env);
 	const iat = Math.floor(now / 1000);
 	const exp = iat + ttlSeconds;

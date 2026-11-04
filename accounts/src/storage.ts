@@ -290,7 +290,7 @@ export async function storageBreakdown(request: Request, env: Env, deps: Deps, a
 	if (!who) return fail(401, "signed_out", "not signed in");
 	// WHY the session's id and nothing from the URL: this lists a whole root, so it is only ever the caller's own
 	const owner = who.person.userId;
-	const root = userRoot(owner);
+	const root = userRoot(owner, env);
 	const bucket = await bucketFor(env, deps, root, "object-read-only", READ_TTL_S);
 	let listed: Awaited<ReturnType<typeof listAll>>;
 	try {
