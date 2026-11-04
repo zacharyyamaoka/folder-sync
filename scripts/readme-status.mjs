@@ -14,7 +14,7 @@ const REPO_URL = "https://github.com/zacharyyamaoka/folder-sync/blob/main/";
 const USAGE = `usage: scripts/readme-status [--kpi <kpi_series.jsonl>] [--gates <gates.json>] [--readme <README.md>] [--landing <index.html>] [--check] [--now <ISO time>]
   --kpi      default ~/vt/zach/producers/folder-sync/kpi_series.jsonl
   --gates    default reports/status/gates.json in the main checkout (the gate runner's --publish target)
-  --readme   the file whose ${BEGIN} ... ${END} block is rewritten (default: README.md in this checkout)
+  --readme   the file whose ${BEGIN} ... ${END} block is rewritten (default: README.md in this checkout; the word none skips it)
   --landing  also rewrite the same block, as HTML, in this file (the gh-pages index.html)
   --check    write nothing; exit 1 if a file's block is out of date
   --now      the "present" for the 30-day window (default: the clock; tests pin it)
@@ -252,7 +252,7 @@ export function main(argv) {
 		return 2;
 	}
 	const view = statusView(buildModel(loadSources({ kpi: resolve(opts.kpi), gates: resolve(opts.gates) }), { now }));
-	const targets = [[resolve(opts.readme), renderMarkdown(view)]];
+	const targets = opts.readme === "none" ? [] : [[resolve(opts.readme), renderMarkdown(view)]];
 	if (opts.landing) targets.push([resolve(opts.landing), renderHtml(view)]);
 	let stale = false;
 	for (const [path, block] of targets) {

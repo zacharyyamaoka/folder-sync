@@ -172,6 +172,16 @@ test("the repository's README carries the markers once and its block is what the
 	for (let n = 1; n <= 12; n++) assert.ok(block.includes(`**G${n}**`), `G${n} is in the README block`);
 });
 
+test("CLI: --readme none rewrites only the landing page (how the gh-pages branch uses it)", () => {
+	const dir = mkdtempSync(join(tmpdir(), "readme-status-landing-"));
+	const landing = join(dir, "index.html");
+	writeFileSync(landing, `<main>\n${BEGIN}\n${END}\n</main>\n`);
+	const done = spawnSync(join(root, "scripts/readme-status"), ["--kpi", KPI, "--gates", GATES, "--now", NOW, "--readme", "none", "--landing", landing], { encoding: "utf8" });
+	assert.equal(done.status, 0, done.stderr);
+	assert.match(readFileSync(landing, "utf8"), /class="cell met"/);
+	assert.doesNotMatch(done.stdout, /README/);
+});
+
 // a copy of the fixtures survives being passed by relative path (the CLI resolves --kpi/--gates from the cwd)
 test("CLI accepts relative source paths", () => {
 	const dir = mkdtempSync(join(tmpdir(), "readme-status-rel-"));
