@@ -433,6 +433,8 @@ test.describe("the list is resizable, and the page works small, light and dark",
 			await page.emulateMedia({ colorScheme: scheme });
 			await load(page);
 			await open(page, "notes/plan.md");
+			// WHY: open() waits for the title only; the preview renders a moment later, and reading its colour first raced.
+			await expect(el(page, ".panel pre")).toBeVisible();
 			const colors = await el(page, ".panel").evaluate((panel) => {
 				const luminance = (css) => { const [r, g, b] = css.match(/\d+(\.\d+)?/g).map(Number).map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
 				const bg = luminance(getComputedStyle(panel).backgroundColor), fg = luminance(getComputedStyle(panel.querySelector("pre")).color);
