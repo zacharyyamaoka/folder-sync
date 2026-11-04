@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { historyKey, keepOnWrite, parseHistoryKey, parseVersion, pruneVersions, toMillis, trashStampTime, versionId } from "../src/history.ts";
+import { anchorOf, historyKey, keepOnWrite, objectName, parseHistoryKey, parseName, parsePrefixBody, parseVersion, pruneGroup, pruneVersions, toMillis, trashStampTime, versionId, type StoredVersion } from "../src/history.ts";
+import { decompress } from "../src/vendor/fzstd.js";
 import { memoryJournal, restoreWebFiles, writeWebFile, deleteWebFile } from "../src/webhost.ts";
 import { mint } from "../src/creds.ts";
 import { S3Bucket } from "../src/s3-bucket.ts";
@@ -21,8 +22,9 @@ test("testdata/history/keys.json: every valid key parses to its parts and is bui
 	assert.equal(keys.fixture, "folder-sync-history-keys/1");
 	for (const k of keys.valid) {
 		const parsed = parseHistoryKey(k.key);
-		assert.deepEqual(parsed, { root: k.root, project: k.project, host: k.host, path: k.path, version: k.version }, k.key);
-		assert.equal(historyKey(k.root, k.project, k.host, k.path, k.version), k.key);
+		const kind = k.kind ?? "full";
+		assert.deepEqual(parsed, { root: k.root, project: k.project, host: k.host, path: k.path, version: k.version, kind, ...(kind === "full" ? {} : { size: k.size }) }, k.key);
+		assert.equal(historyKey(k.root, k.project, k.host, k.path, objectName(k.version, kind, k.size)), k.key);
 		const v = parseVersion(k.version)!;
 		assert.equal(v.unlisted, !!k.unlisted, k.key);
 		if (!k.unlisted) {
@@ -49,7 +51,8 @@ test("testdata/retention/schedule.json: the write-time rule, every case", () => 
 	const cases = fixture("retention/schedule.json");
 	assert.equal(cases.cases, "folder-sync-retention-cases/1");
 	for (const c of cases.write_cases) {
-		const got = keepOnWrite({ op: c.op, path: c.path, writtenAt: c.leaving.written_at, now: Date.parse(c.now), lastKeptLeftAt: c.last_kept_left_at ? Date.parse(c.last_kept_left_at) : null, noHistory: c.no_history });
+		const got = keepOnWrite({ op: c.op, path: c.path, writtenAt: c.leaving.written_at, now: Date.parse(c.now), lastKeptLeftAt: c.last_kept_left_at ? Date.parse(c.last_kept_left_at) : null, noHistory: c.no_history,
+			everyMs: c.every_ms, newestKeptIsPointer: c.newest_kept_is_pointer, appendUploaded: c.append_uploaded });
 		assert.equal(got.keep, c.keep, c.name);
 		if (!c.keep) assert.equal((got as { why: string }).why, c.why, c.name);
 	}
@@ -64,6 +67,66 @@ test("testdata/retention/schedule.json: the pruner's rule, every case", () => {
 		// idempotent: pruning what was kept keeps all of it
 		const again = pruneVersions(c.versions.filter((v: { id: string }) => kept.has(v.id)).map((v: { id: string; left_at: string }) => ({ id: v.id, left_at: Date.parse(v.left_at) })), Date.parse(c.now), c.keep_days);
 		assert.deepEqual([...again].sort(), [...kept].sort(), `${c.name}: a second prune deletes nothing more`);
+	}
+});
+
+test("testdata/retention/schedule.json: the anchor rule, every case (PEP 0009 §7)", () => {
+	const cases = fixture("retention/schedule.json");
+	assert.ok(cases.anchor_cases.length >= 6);
+	const storedOf = (v: { name: string; left_at: string }): StoredVersion & { name: string } => {
+		const n = parseName(v.name)!;
+		return { name: v.name, id: n.id, kind: n.kind, left_at: Date.parse(v.left_at) };
+	};
+	for (const c of cases.anchor_cases) {
+		const versions = c.versions.map(storedOf);
+		const plan = pruneGroup(versions, Date.parse(c.now), c.keep_days, c.live);
+		const names = (list: { name: string }[]) => list.map((v) => v.name).sort();
+		assert.deepEqual(names(plan.keep), [...c.keep].sort(), `${c.name}: keep`);
+		assert.deepEqual(names(plan.dropPointers), [...c.drop_pointers].sort(), `${c.name}: drop_pointers`);
+		assert.deepEqual(names(plan.drop), [...c.drop].sort(), `${c.name}: drop`);
+		assert.deepEqual(names(plan.lost), [...c.lost].sort(), `${c.name}: lost`);
+		// idempotent: a second prune of what is kept drops nothing
+		const again = pruneGroup(plan.keep, Date.parse(c.now), c.keep_days, c.live);
+		assert.equal(again.dropPointers.length + again.drop.length, 0, `${c.name}: a second prune deletes nothing more`);
+	}
+	// a kept pointer's anchor is the oldest full object after it, a pointer never anchors a pointer
+	const chain = [
+		{ name: "a", id: "2026-10-28T10:00:00.000Z_aaaaaaaaaaaaaaaa", kind: "prefix" as const, left_at: 0 },
+		{ name: "b", id: "2026-10-28T10:10:00.000Z_bbbbbbbbbbbbbbbb", kind: "prefix" as const, left_at: 0 },
+		{ name: "c", id: "2026-10-28T10:20:00.000Z_cccccccccccccccc", kind: "zst" as const, left_at: 0 },
+	];
+	assert.equal(anchorOf(chain, chain[0].id)?.name, "c");
+	assert.equal(anchorOf(chain, chain[2].id), null);
+});
+
+test("testdata/prefix/pointer.json: the pointer's body parses and a malformed one is refused", () => {
+	const doc = fixture("prefix/pointer.json");
+	for (const v of doc.valid) {
+		const body = parsePrefixBody(v.json)!;
+		assert.ok(body, v.name);
+		assert.equal(JSON.stringify(body), v.json);
+		const name = parseName(v.name)!;
+		assert.equal(name.kind, "prefix");
+		assert.equal(name.size, body.size);
+	}
+	for (const v of doc.invalid) assert.equal(parsePrefixBody(v.json), null, v.why);
+});
+
+test("object names: a version's form and size, refusing what no engine writes", () => {
+	const id = "2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f";
+	assert.deepEqual(parseName(id), { id, kind: "full", size: null });
+	assert.deepEqual(parseName(`${id}.1980.zst`), { id, kind: "zst", size: 1980 });
+	assert.deepEqual(parseName(`${id}.4194304.prefix`), { id, kind: "prefix", size: 4194304 });
+	assert.equal(objectName(id, "prefix", 12), `${id}.12.prefix`);
+	for (const bad of [`${id}.zst`, `${id}.01.zst`, `${id}.12.gz`, `${id}.-1.prefix`, `${id}.12.zst.prefix`, "2026-10-28T20:31:00.117Z_unlisted.12.zst", `${id}.`, ""]) assert.equal(parseName(bad), null, bad);
+});
+
+test("testdata/zstd/frames.json: the frames the engine writes open to their bytes with the vendored fzstd (PEP 0009 §6)", () => {
+	const doc = fixture("zstd/frames.json");
+	for (const f of doc.frames) {
+		const plain = decompress(new Uint8Array(Buffer.from(f.frame_b64, "base64")));
+		assert.equal(plain.byteLength, f.plain_size, f.name);
+		assert.equal(createHash("sha256").update(plain).digest("hex"), f.plain_sha256, f.name);
 	}
 });
 
@@ -108,7 +171,7 @@ test("the web host keeps a replaced version at _history/<project>/<host>/<path>/
 	assert.equal(second.at, JSON.parse(h.s3.text(`${ROOT}notes/hosts/${WEB}/manifest.json`)!).generated_at, "a record's at is its manifest's generated_at");
 });
 
-test("the burst rule at write time: at most one version per 30 s per path; a delete and a restore always keep", async () => {
+test("the burst rule at write time: at most one version per 5 minutes per path; a delete and a restore always keep", async () => {
 	const h = await webHost();
 	await h.put("a.md", "v1\n");
 	h.clock.now += 1000;
@@ -119,8 +182,8 @@ test("the burst rule at write time: at most one version per 30 s per path; a del
 	await h.put("a.md", "v4\n"); // the same
 	assert.equal(h.versions("a.md").length, 1, "one kept version, the burst's undo copies removed");
 	assert.deepEqual([h.record(3).events[0].was.kept, h.record(3).events[0].was.why], [null, "burst"]);
-	h.clock.now += 30_000;
-	await h.put("a.md", "v5\n"); // v4 lived 30 s: kept, whatever was kept before
+	h.clock.now += 300_000;
+	await h.put("a.md", "v5\n"); // v4 lived 5 min: kept, whatever was kept before
 	assert.equal(h.versions("a.md").length, 2);
 	// a restore inside a burst still keeps the version it replaces
 	h.clock.now += 1000;

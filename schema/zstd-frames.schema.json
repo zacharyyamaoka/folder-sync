@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folder-sync.invalid/schema/folder-sync-zstd-frames-1.json",
+  "title": "folder-sync zstd keyframes, worked examples, version 1",
+  "description": "testdata/zstd/*.json: frames as the engine writes a .zst keyframe (PEP 0009 §6), each with the plain bytes it opens to. Every reader of a keyframe decodes every frame to exactly those bytes: the engine and `folder-sync serve` in Go (klauspost/compress), the accounts Worker in TypeScript (the vendored fzstd), the zstd command line. The plain bytes are the template with printf's %d filled by n and k = n*7919 mod 100003, for n below count.",
+  "type": "object",
+  "required": ["fixture", "encoder", "frames"],
+  "additionalProperties": false,
+  "properties": {
+    "fixture": { "const": "folder-sync-zstd-frames/1" },
+    "encoder": { "type": "string", "minLength": 1 },
+    "frames": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": ["name", "template", "count", "plain_size", "plain_sha256", "frame_b64"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "template": { "type": "string", "minLength": 1 },
+          "count": { "type": "integer", "minimum": 1 },
+          "plain_size": { "type": "integer", "minimum": 1 },
+          "plain_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "frame_b64": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

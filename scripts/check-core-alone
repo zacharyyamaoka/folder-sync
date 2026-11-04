@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Seam 1 of PARTS.md: the core works with no server at all. Copies this checkout to a scratch directory WITHOUT the
+# server-cloudflare part (accounts/, demo/) and the desktop part (app/), then builds, vets and tests the core there:
+# the e2e suite on bucket-key login against the local R2 stand-in (e2e/r2standin), the Go unit tests, the schema fixtures.
+# If anything in the core imports, reads or starts the server part, it is not there and the test fails.
+#   scripts/check-core-alone          the working tree, uncommitted files included
+# FOLDER_SYNC_E2E_REQUIRE=1 (CI sets it) turns a skipped e2e into a failure; GO and NODE override the tools.
+# WHY a copy without the directories and not a grep: a grep misses a path built at run time, and a stub would still let
+# a test start the Worker. A directory that is not there cannot be imported or started.
+# WHY ui/ stays: the core embeds ui/v1 (the one sync view, `folder-sync serve`) at build time, the one edge from core to
+# another part (PARTS.md "Which part may import which").
+set -euo pipefail
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+go="${GO:-go}"
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+
+# The parts the core must run without.
+absent=(accounts demo app)
+
+cd "$repo"
+skip=(); for part in "${absent[@]}"; do skip+=(-e "^$part/"); done
+git ls-files -z --cached --others --exclude-standard | grep -zv "${skip[@]}" | while IFS= read -r -d '' file; do
+  [ -e "$file" ] && printf '%s\0' "$file"
+done | xargs -0 cp --parents -t "$scratch"
+# the pinned rclone is fetched, not tracked: carry it in (scripts/dev-tools) or fetch it there
+if [ -d "$repo/.tools" ]; then cp -r "$repo/.tools" "$scratch/.tools"; else (cd "$scratch" && scripts/dev-tools >/dev/null); fi
+
+for part in "${absent[@]}"; do
+  if [ -e "$scratch/$part" ]; then echo "check-core-alone: $part/ is still in the scratch copy" >&2; exit 1; fi
+done
+echo "core alone: $(find "$scratch" -type f | wc -l | tr -d ' ') files, without ${absent[*]}"
+
+# a git repository of its own: internal/names checks every tracked path with `git ls-files`
+cd "$scratch"
+git init -q
+git add .
+"$go" build ./...
+"$go" vet ./...
+FOLDER_SYNC_QUARANTINE="${FOLDER_SYNC_QUARANTINE:-}" "$go" test -count=1 ./...
+node --test schema/fixtures.test.mjs

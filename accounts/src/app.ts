@@ -8,8 +8,10 @@
 //   GET  /fs/dev/mailbox?email=                   dev + loopback only: the last sign-in code
 //   GET  /fs/v1/me                                the session's person, root and app
 //   GET  /fs/v1/usage                             the session's storage, its quota, and whether it is over
+//   GET  /fs/v1/usage/breakdown                   what is in it: by project, kind and device, the biggest, what to free (storage.ts)
 //   GET  /fs/v1/devices, POST …/devices/revoke    the person's sessions (machines, browsers); revoke one (devices.ts)
 //   GET  /fs/account, POST …/revoke | …/sign-out  the account page, no script (devices.ts)
+//   GET  /fs/files[?project=]                     the Files page: browse, open, upload, rename and delete (files-page.ts)
 //   POST /fs/v1/sign-out                          ends this session
 //   GET  /fs/v1/folders                           my folders and the ones I may read
 //   GET  /fs/v1/folders/:project[?owner=]         the union view of a folder's hosts
@@ -51,6 +53,8 @@ import { handoffRoute } from "./handoff.ts";
 import { servedFile } from "./ranges.ts";
 import type { CloseOrder } from "./hub.ts";
 import { activityRoute, browserOf, deleted, history, purge, restore, status, ui } from "./view.ts";
+import { storageBreakdown } from "./storage.ts";
+import { filesPage } from "./files-page.ts";
 
 export interface Env extends CredsEnv, QuotaEnv, EmailEnv {
 	/** "production" (the committed value) or "dev" (a local proof: email codes instead of Google). */
@@ -90,7 +94,9 @@ export interface Deps {
 	waitUntil?: (work: Promise<unknown>) => void;
 	/** Better Auth's handler for this app's origin (baseURL = that origin, basePath /fs/api/auth). */
 	auth(request: Request, app: App): Promise<Response>;
-	/** The person whose session this request carries: by its cookie (a browser) or its bearer token (a machine). */
+	/** The person whose session this request carries: by its cookie (a browser) or its bearer token (a machine).
+	 *  WHY: this is the identity port, `whoIs(request) -> person | null` (PARTS.md, seam 2). Every route asks it, here and in
+	 *  handoff.ts, and only auth.ts answers it; test/identity-seam.test.ts fails if anything else reaches Better Auth. */
 	person(request: Request, via: Via, app: App | null): Promise<Person | null>;
 	/** A one-minute, one-use token for this browser's session; null when it has none (§3.10). */
 	handoffToken?(request: Request, app: App): Promise<string | null>;
@@ -155,9 +161,21 @@ export const TYPES: Record<string, string> = {
 	".m4v": "video/mp4",
 	".webm": "video/webm",
 	".mov": "video/quicktime",
+	// WHY these (the Files page's preview): an <audio> or <img> on the page's own origin plays what the type says it is
+	".mp3": "audio/mpeg",
+	".wav": "audio/wav",
+	".ogg": "audio/ogg",
+	".oga": "audio/ogg",
+	".opus": "audio/ogg",
+	".m4a": "audio/mp4",
+	".flac": "audio/flac",
+	".aac": "audio/aac",
+	".avif": "image/avif",
+	".bmp": "image/bmp",
+	".ico": "image/x-icon",
 };
 export const ACTIVE = new Set([".html", ".htm", ".svg"]);
-const SITE_FILES: Record<string, string> = { "signin.js": "text/javascript; charset=utf-8", "device.js": "text/javascript; charset=utf-8", "account.css": "text/css; charset=utf-8" };
+const SITE_FILES: Record<string, string> = { "signin.js": "text/javascript; charset=utf-8", "device.js": "text/javascript; charset=utf-8", "account.css": "text/css; charset=utf-8", "files.js": "text/javascript; charset=utf-8", "files.css": "text/css; charset=utf-8" };
 
 // ------------------------------------------------------------------------------------------------ answers
 
@@ -300,7 +318,7 @@ export async function decide(deps: Pick<Deps, "store">, person: Person | null, p
  *  root with a read-only credential when the cached measurement is stale. */
 async function quotaRefusal(env: Env, deps: Deps, owner: string, addBytes = 0, addObjects = 0): Promise<string | null> {
 	const quota = quotaOf(env, owner);
-	const root = userRoot(owner);
+	const root = userRoot(owner, env);
 	// WHY signed before usageOf: only the listing's own failures are a measurement's (Measuring); a credential that
 	// cannot be signed is a fault, not a 503 to try again
 	const bucket = await bucketFor(env, deps, root, "object-read-only", READ_TTL_S);
@@ -336,19 +354,19 @@ async function readProject(env: Env, deps: Deps, owner: string, project: string)
 	if (unsettled) return unsettled;
 	// WHY a read-only credential for exactly this folder: whatever a route below does with a path, R2 lets this
 	// request read users/<owner>/<project>/ and nothing else (a public folder's read too)
-	const bucket = await bucketFor(env, deps, folderPrefix(owner, project), "object-read-only", READ_TTL_S); // fs-mutation: the read scope
-	return new Project(bucket, project, userRoot(owner));
+	const bucket = await bucketFor(env, deps, folderPrefix(owner, project, env), "object-read-only", READ_TTL_S); // fs-mutation: the read scope
+	return new Project(bucket, project, userRoot(owner, env));
 }
 
 // ------------------------------------------------------------------------------------------------ routes
 
-async function me(request: Request, deps: Deps, app: App | null): Promise<Response> {
+async function me(request: Request, env: Env, deps: Deps, app: App | null): Promise<Response> {
 	const who = await session(request, deps, app);
 	if (!who) return fail(401, "signed_out", "not signed in");
 	const { person } = who;
 	return json(200, {
 		user: { id: person.userId, email: person.email, name: person.name, image: person.image },
-		root: userRoot(person.userId),
+		root: userRoot(person.userId, env),
 		app: app && app.id !== OWN_APP ? { id: app.id, project: app.project } : null,
 	});
 }
@@ -357,7 +375,7 @@ async function me(request: Request, deps: Deps, app: App | null): Promise<Respon
  *  _history/, _changes/, _requests/ and legacy _trash/, and used = live + history). */
 export async function usageFigure(env: Env, deps: Deps, owner: string): Promise<{ used: Amount; live: Amount; history: Amount; quota: Amount; over: string | null; partial: boolean }> {
 	const quota = quotaOf(env, owner);
-	const root = userRoot(owner);
+	const root = userRoot(owner, env);
 	const bucket = await bucketFor(env, deps, root, "object-read-only", READ_TTL_S);
 	let used: { bytes: number; objects: number; partial?: boolean; history?: Amount };
 	let over: string | null;
@@ -431,12 +449,12 @@ async function credentials(request: Request, env: Env, deps: Deps, app: App | nu
 	if (deps.now() >= authorizedAt + ttlOf(env) * 1000) return fail(503, "too_slow", "this request took longer than its keys would live: ask again", { "Retry-After": "1" });
 	// from here on this request's clock stands at `authorizedAt` (the marked mint lines below read deps.now())
 	deps = { ...deps, now: () => authorizedAt };
-	if (over) return json(200, { ...(await mint(env, userRoot(person.userId), "object-read-only", ttlOf(env), deps.now())), ReadOnly: true, Reason: over });
-	const minted = await mint(env, userRoot(person.userId), "object-read-write", ttlOf(env), deps.now()); // fs-mutation: the session's root
+	if (over) return json(200, { ...(await mint(env, userRoot(person.userId, env), "object-read-only", ttlOf(env), deps.now())), ReadOnly: true, Reason: over });
+	const minted = await mint(env, userRoot(person.userId, env), "object-read-write", ttlOf(env), deps.now()); // fs-mutation: the session's root
 	return json(200, minted);
 }
 
-async function access(request: Request, deps: Deps, app: App | null): Promise<Response> {
+async function access(request: Request, env: Env, deps: Deps, app: App | null): Promise<Response> {
 	const who = await session(request, deps, app);
 	if (!who) return fail(401, "signed_out", "not signed in");
 	const query = new URL(request.url).searchParams;
@@ -447,7 +465,7 @@ async function access(request: Request, deps: Deps, app: App | null): Promise<Re
 		if (decided.status === 400) return decided;
 		return json(200, { allowed: false, role: null, root: null });
 	}
-	return json(200, { allowed: true, role: decided.role, root: userRoot(decided.owner) });
+	return json(200, { allowed: true, role: decided.role, root: userRoot(decided.owner, env) });
 }
 
 /** The projects under a person's root in the bucket. */
@@ -469,7 +487,7 @@ async function folders(request: Request, env: Env, deps: Deps, app: App | null):
 	const who = await session(request, deps, app);
 	if (!who) return fail(401, "signed_out", "not signed in");
 	const owner = who.person.userId;
-	const root = userRoot(owner);
+	const root = userRoot(owner, env);
 	const bucket = await bucketFor(env, deps, root, "object-read-only", READ_TTL_S);
 	const names = await projectNames(bucket, root);
 	const rows = new Map((await deps.store.folders(owner)).map((r) => [r.project, r]));
@@ -735,7 +753,7 @@ async function closeInHubs(env: Env, names: Iterable<string>, order: CloseOrder)
 async function hubsOf(env: Env, deps: Deps, person: Person): Promise<Set<string>> {
 	const names = new Set<string>();
 	const owner = person.userId;
-	const root = userRoot(owner);
+	const root = userRoot(owner, env);
 	await Promise.all([
 		bucketFor(env, deps, root, "object-read-only", READ_TTL_S).then((bucket) => projectNames(bucket, root)).then((projects) => { for (const p of projects) names.add(hubName(owner, p)); }),
 		deps.store.folders(owner).then((rows) => { for (const r of rows) names.add(hubName(owner, r.project)); }),
@@ -971,18 +989,24 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 	}
 	if (first === "handoff") return handoffRoute(request, deps, app, rest, method);
 	if (first === "account") return accountRoute(request, env, deps, app, rest, method);
+	if (first === "files" && rest.length === 0) {
+		if (!read) return fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+		if (!app) return fail(404, "unknown_origin", "this origin is not a registered app: no files page here");
+		return filesPage(request, deps, app, head);
+	}
 	// public, no session: the desktop installers (PEP 0006), on every app's /fs/ and this Worker's own host
 	if (first === "download") return downloadRoute(request, env, app, rest, method);
 	if (first !== "v1") return fail(404, "not_found", "no such route");
 	if (!deps) return fail(503, "not_configured", "accounts are not set up on this Worker yet");
 	const [what, project, sub, ...more] = rest;
 
-	if (what === "me" && rest.length === 1) return read ? me(request, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (what === "me" && rest.length === 1) return read ? me(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (what === "usage" && rest.length === 1) return read ? usage(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (what === "usage" && rest.length === 2 && project === "breakdown") return read ? storageBreakdown(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (what === "sign-out" && rest.length === 1) return method === "POST" ? signOut(request, env, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
 	if (what === "credentials" && rest.length === 1) return method === "POST" ? credentials(request, env, deps, app) : fail(405, "method", "POST only", { Allow: "POST" });
 	if (what === "devices") return devicesApi(request, env, deps, app, rest.slice(1), method);
-	if (what === "access" && rest.length === 1) return read ? access(request, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
+	if (what === "access" && rest.length === 1) return read ? access(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (what !== "folders") return fail(404, "not_found", "no such route");
 	if (rest.length === 1) return read ? folders(request, env, deps, app) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (!PROJECT.test(project)) return fail(400, "bad_project", "project must match ^[a-z0-9][a-z0-9._-]{0,62}$");

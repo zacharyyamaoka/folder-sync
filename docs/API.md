@@ -66,9 +66,11 @@ public), each with what their role may see.
 | `POST …/restore` | `restore_request` → `restore_response` | owner | owner |
 | `POST …/history/purge` | `purge_request` → `purge_response` | owner | `501 online_only` |
 | `GET /fs/v1/usage` | `usage` (adds `live`, `history`) | session (exists, PEP 0003) | no |
+| `GET /fs/v1/usage/breakdown` | what is in the account (below; not a frozen schema) | session | no |
 | `GET /fs/v1/folders` | `folders` | session (exists, PEP 0003) | the folders this machine syncs, with `folder` |
 | `GET /fs/ui/v1/<file>` | the element's files | yes | yes (embedded in the binary) |
 | `GET /fs/` | a page with one `<folder-sync-status>` per folder | no | yes |
+| `GET /fs/files[?project=]` | the Files page (below): `<folder-sync-status view="files">` full-page | signed in (else `303` to `/fs/signin?return=/fs/files`) | no |
 
 ### Each route
 
@@ -95,7 +97,10 @@ public), each with what their role may see.
   1,000 (`more`). `?version=<id>` answers that version's bytes, typed by suffix as the files route is, with
   `X-Folder-Sync-Version: <id>`, `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff` and, for
   `.html`/`.htm`/`.svg`, `Content-Security-Policy: sandbox`. A version that has been pruned is `410 pruned`; an id that
-  is not one is `400 bad_version`.
+  is not one is `400 bad_version`. A version's `size` is its own whatever form the bucket keeps it in (a whole copy, a
+  `.zst` keyframe or a `.prefix` pointer, docs/CONTRACT.md "Deletions and history"); the bytes are decoded and checked
+  against the version's name before they are sent, bytes that fail are `502 corrupt`, and on the Worker a keyframe or pointer over
+  32 MiB is `413 too_large` (restore it from a machine).
 - **`files`** is a live file's bytes, as PEP 0003 §3.3 serves them online: typed by suffix, `ETag: "<sha256>"`,
   `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox` for
   `.html`/`.htm`/`.svg`, `Accept-Ranges: bytes` with one `Range` (`206`), `If-None-Match` (`304`), `If-Range` and
@@ -113,6 +118,17 @@ public), each with what their role may see.
 - **`history/purge`** deletes history for good, online only: one version (`host`, `path`, `version`: "I synced a
   secret"), or everything older than `older_than_days` (0–30, optionally one `host` and `path`: "Free up space"). Up
   to 1,000 objects a call, the usage lowered by each; `more: true` means call again (as PEP 0003's `web-trash/purge`).
+
+- **`usage/breakdown`** (Storage tab) lists the signed-in person's own root with a read-only credential, at most
+  `BREAKDOWN_MAX_PAGES` (default 100) pages of 1,000 objects, and answers `partial: true` when it was cut. It never
+  takes an owner: a stranger's prefix is not a thing a caller can name. The body: `owner`, `measured_at`, `used` and
+  `quota` (`bytes`, `objects`; `used.objects` is what the quota counts, which is every object but `_changes/` records),
+  `over` (the quota's reason, or `null`), `kinds` (account-wide: `live`, `history`, `trash`, `changes`, `requests`,
+  `other`, each `bytes`, `objects`, `oldest`, `newest` and `clock`: `key` where the date is in the key, trash's stamp
+  and a version's `written_at`, else `modified`), `projects` (each with its `kinds`, each with its `hosts`, a device's
+  `host_name` being its manifest's, empty when it has none), `folders` and `files` (the 10 biggest, a folder at most
+  three levels deep, with `live_bytes` and `old_bytes`, which counts history and legacy trash) and `suggestions`
+  (`id`, `title`, `why`, `bytes`, `objects`: what a person could free, never done by this route; they overlap).
 
 ### Errors
 
@@ -134,6 +150,7 @@ Every non-2xx JSON answer is `{ "error": "<code>", "why": "<sentence>" }` (PEP 0
 | 415 | `json_only` | a `POST` body that is not JSON | both |
 | 421 | `wrong_host` | `Host` is not `127.0.0.1:<port>` | serve |
 | 501 | `online_only` | purge | serve |
+| 502 | `corrupt` | the bytes stored for a version are not that version's: a `.zst` that does not open to its size, or a prefix pointer whose anchor does not hash to its `sha256` (PEP 0009 §4.3). Something outside folder-sync changed the history; the version is not served | both |
 | 503 | `recovering` | the web host is settling a cut-off change (PEP 0003) | Worker |
 | 503 | `unavailable` | a route that reads the bucket (`history`, `files`, `deleted`) could not reach it: no network, or sync's credentials did not open the folder | serve |
 
@@ -146,12 +163,14 @@ Every app embeds the same element with two lines, on its own origin:
 <folder-sync-status project="notes"></folder-sync-status>
 ```
 
-It is a pill showing the folder's state; clicking it opens a menu (native `popover`) with **Activity**, **Version
-history**, **Deleted files**, and online **Storage** and a link to `/fs/account` (devices, visibility); each opens a
+It is a pill showing the folder's state; clicking it opens a menu (native `popover`) with **Files**, **Activity**,
+**Version history**, **Deleted files**, **Storage** and a link to `/fs/account` (devices, visibility); each opens a
 panel in a native `<dialog>`. Activity shows each sync's time beside its line (`↑ 0.4 s`, `↓ 1.3 s`, from `up_ms` and
 `down_ms`). Version history shows a file's versions with **Show changes** (a line diff, jsdiff's
 `diffLines`, vendored at `/fs/ui/v1/vendor/diff.js`), **Download** and **Restore**; Deleted files restores one or
-many at once.
+many at once. Storage (online, the owner's) answers "what is in this account": used of quota and what most of it is,
+a bar by kind, suggestions for what to free (shown, not yet doable), then project, kind and device, and the biggest
+folders and files.
 
 - **URL:** `/fs/ui/v1/folder-sync.js`, an ES module with no dependency beyond its own `/fs/ui/v1/` files; served by
   the Worker from its assets and by `serve` from the binary, the same bytes. `/fs/ui/v1/` takes fixes; a breaking
@@ -162,14 +181,16 @@ many at once.
   - `folder` (optional): on a machine, the folder's path, for a project two folders on it sync (sent as `?folder=`,
     so the machine never answers `409 ambiguous_folder`; `serve`'s `/fs/` page sets it on each element).
   - `base` (optional, default `/fs`): where the app mounts folder-sync.
-  - `view` (optional): `activity`, `history` or `deleted` opens that panel at once and shows no pill (`serve`'s `/fs/`
-    page and an app's "Sync details" window use it).
+  - `view` (optional): `files`, `activity`, `history`, `deleted` or `storage` opens that panel at once and shows no pill (`serve`'s `/fs/`
+    page, an app's "Sync details" window and `/fs/files` use it).
 - **Methods:** `open(view, {host, path}?)` opens a panel (`history` with a `host` and `path` opens that file's
-  versions); `close()`; `refresh()` reads `status` now.
+  versions, `files` with them opens that file); `close()`; `refresh()` reads `status` now.
 - **Events** (bubbling, composed, on the element):
   - `folder-sync:status`, `detail` = the `status` body, each time it changes: an app can show its own indicator from
     it and hide the pill (`hidden` attribute).
   - `folder-sync:restored`, `detail` = the `restore_response` body, after a Restore.
+  - `folder-sync:project`, `detail` = `{ project }`, when the Files tab's folder picker switches the folder: the element's
+    `project` attribute is now that folder, so every tab follows it (`/fs/files` keeps `?project=` from it).
 - **Theme:** CSS custom properties on the element or any ancestor: `--fs-font`, `--fs-fg`, `--fs-bg`, `--fs-muted`,
   `--fs-accent`, `--fs-warn`, `--fs-error`, `--fs-radius`; `::part(pill)`, `::part(menu)`, `::part(panel)`. It
   follows `prefers-color-scheme` when they are unset. Its Shadow DOM keeps the app's CSS out and its own in.
@@ -181,6 +202,44 @@ many at once.
   - It works in Chromium and WebKitGTK (the Linux desktop app), by keyboard (the menu and the dialog trap and return
     focus), and with no network on `serve` (status and activity; old versions need the network).
   - A readers' or the public's view shows the pill and the devices only.
+
+## The Files tab and the `/fs/files` page
+
+Zach, 2026-11-04: the web **Files** page is "the only missing piece of the simplest Dropbox": a signed-in person
+browses, opens, uploads, renames and deletes their synced files in a browser, with the browser's own preview. It is a
+tab of the same element (first in the menu and the tab bar) and, full-page, `GET /fs/files`. **It adds no data
+route**: it uses the ones above and PEP 0003 §3.3.
+
+| What the tab does | Route |
+|---|---|
+| lists the person's folders (the picker) | `GET /fs/v1/folders` |
+| lists a folder's files, every device's: `hosts` (`id`, `name`, `web`) and `files` (`host`, `path`, `size`, `sha256`, `mtime`, `writtenAt`) | `GET /fs/v1/folders/:project` |
+| opens a file (image, PDF, video and audio by URL, text by `fetch`), and Download | `GET …/files/:host/<path>` |
+| upload (button or drop), and the second half of a rename | `PUT …/web/<path>` (web host only; `403 csrf`, `409 wrong_user`, `413 too_large` over 32 MiB, `400` for a name the contract refuses, `403 over_quota`) |
+| delete, and the last step of a rename | `DELETE …/web/<path>` (into the web host's history: Deleted files restores it for 30 days) |
+| Version history of a file | the History tab, `open("history", {host, path})` |
+
+- **Who may change what:** only the web host's files. Every other device's file is that device's to write (CONTRACT
+  "Who writes"), so the tab shows "Written by <device>; edit it there." and no Rename or Delete; the web host's `PUT`
+  and `DELETE` cannot name another host's path (`accounts/test/files-page.test.ts` proves a machine's objects and manifest
+  stay byte for byte the same). A shared, editable tree is PEP 0010, not this tab.
+- **Rename** is the three calls a client can make: read the bytes, `PUT` them at the new path, `DELETE` the old one. It
+  refuses a name that already exists, and a failure after the `PUT` leaves the file twice, never zero times.
+- **Preview** is by suffix and nothing else: image `png jpg jpeg gif webp svg avif bmp ico` (an `<img>`, so an SVG's
+  script never runs), `pdf` (a frame on the file's own URL), video `mp4 m4v webm mov`, audio `mp3 wav ogg oga m4a flac
+  aac opus` (native players), and text (`txt md json jsonl csv yaml toml log` and common source suffixes) as plain text in a
+  `<pre>` up to 1 MiB, never markup. Anything else, a text file over 1 MiB and bytes that are not UTF-8 get **Download**.
+- **Sort and filter:** by name (the default), modified or size inside each device's group, and a filter on the path.
+- **Copy link** appears only in a public folder, where a link works for anyone (`?owner=<id>`); a private folder's file
+  has no link that works for another person.
+- **On a machine** (`serve` has no folder listing) the tab says to browse online and the menu does not list it.
+- **The list is resizable:** the handle between the list and the file drags (and takes the arrow keys), and the width is
+  remembered in `localStorage` (`folder-sync-status/files-split`). At 700 px wide or less the list and the file take
+  turns, with a "← Files" button back.
+- **`GET /fs/files`** is a shell: `/fs/site/files.js` signs-in-checks, picks the folder (`?project=` or the first) and mounts
+  `<folder-sync-status view="files">` on it. Its Content-Security-Policy is the page policy plus what a preview needs and
+  nothing else (`media-src 'self'`, `frame-src 'self'`, inline styles for the element's Shadow DOM); scripts, connections
+  and frames stay `'self'` or `'none'`, and the page is never framed.
 
 ## Cut at acceptance (Unix scope)
 

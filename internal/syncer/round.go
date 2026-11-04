@@ -73,6 +73,13 @@ type Result struct {
 	Restore *history.Outcome `json:"restore,omitempty"`
 }
 
+// exactNames makes rclone's copy treat a name as its bytes. WHY (gate G9; docs/CONTRACT.md "byte for byte"; Zach's rule that
+// stored text is never silently normalized): rclone's default folds a name to NFC to compare, so a folder holding café as NFC
+// and as NFD uploaded one of them ("Duplicate object found in source - ignoring") while the manifest named both, and a file
+// re-saved under the other spelling was skipped as already there and then deleted under its old name. The engine never
+// rewrites a name: NFC and NFD are two names, each landing exactly once, under the spelling its writer used.
+const exactNames = "--no-unicode-normalization"
+
 // Filters writes the rclone filter file for this project's push and returns its path.
 // The peers' folder is always excluded: a machine publishes only its own files.
 func (p *Project) Filters() (string, error) {
@@ -212,6 +219,8 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 	var next []manifest.Entry
 	var changed []string
 	md5s := map[string]string{} // each changed file's MD5, from the same read as its SHA-256 (recordObjectETags)
+	reads := map[string]hashed{}
+	buffered := int64(0) // bytes held this round for native uploads (maxRoundBuffer)
 	metadataOnly := 0
 	present := map[string]bool{}
 	for _, path := range okPaths {
@@ -223,20 +232,28 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 			next = append(next, old)
 			continue
 		}
-		sum, md, err := HashFiles(filepath.Join(p.Folder, filepath.FromSlash(path)))
+		var oldEntry *manifest.Entry
+		if known {
+			oldEntry = &old
+		}
+		read, err := p.hashChange(filepath.Join(p.Folder, filepath.FromSlash(path)), oldEntry, buffered+f.Size <= maxRoundBuffer)
 		if err != nil {
 			return err
 		}
-		md5s[path] = md
-		if known && old.SHA256 == sum {
+		buffered += int64(len(read.Bytes))
+		md5s[path] = read.MD5
+		if known && old.SHA256 == read.SHA256 {
 			// Same content, new mtime: no upload; the manifest records the new mtime.
 			old.MTime = mtime
 			next = append(next, old)
 			metadataOnly++
 			continue
 		}
+		reads[path] = read
 		changed = append(changed, path)
-		next = append(next, manifest.Entry{Path: path, Size: f.Size, MTime: mtime, SHA256: sum, WrittenAt: now})
+		// WHY the size read, not the size listed: the SHA-256 is of the bytes read, and a pointer's size and a native
+		// upload's body must be exactly those
+		next = append(next, manifest.Entry{Path: path, Size: read.Size, MTime: mtime, SHA256: read.SHA256, WrittenAt: now})
 	}
 	var deleted []string
 	for _, old := range prev.Files {
@@ -266,7 +283,9 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 			if _, restored := p.restoring[path]; restored {
 				op = history.OpRestore
 			}
-			items = append(items, &leaving{Path: path, Op: op, Old: old})
+			// WHY only a native upload: a pointer rests on the start of what is live, so it is written only for an
+			// append whose bytes this engine puts there itself, from the bytes it hashed (PEP 0009 §4.1)
+			items = append(items, &leaving{Path: path, Op: op, Old: old, Append: reads[path].Append && reads[path].Bytes != nil})
 		}
 	}
 	for _, path := range deleted {
@@ -305,19 +324,32 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 	remoteRoot := rclone.Path(p.Config.Bucket, p.HostPrefix(p.Host.ID))
 	uploadedAt, deletedAt := p.Now(), p.Now()
 	if len(changed) > 0 {
-		list, err := p.writeList("upload.txt", changed)
-		if err != nil {
+		var native, viaRclone []string
+		for _, path := range changed {
+			if reads[path].Bytes != nil && !held[path] {
+				native = append(native, path)
+			} else {
+				viaRclone = append(viaRclone, path)
+			}
+		}
+		if err := p.uploadAppends(next, native, reads, byPath); err != nil {
 			return err
 		}
-		// rclone refuses --filter-from beside --files-from; the list comes from the
-		// filtered scan above, so the ignore rules are already applied.
-		if _, err := p.Rclone.Run(ctx, "copy", p.Folder, remoteRoot,
-			"--files-from-raw", list, "--no-traverse", "--max-delete", fmt.Sprint(p.Config.MaxDelete)); err != nil {
-			return err
+		if len(viaRclone) > 0 {
+			list, err := p.writeList("upload.txt", viaRclone)
+			if err != nil {
+				return err
+			}
+			// rclone refuses --filter-from beside --files-from; the list comes from the
+			// filtered scan above, so the ignore rules are already applied.
+			if _, err := p.Rclone.Run(ctx, "copy", p.Folder, remoteRoot,
+				"--files-from-raw", list, "--no-traverse", exactNames, "--max-delete", fmt.Sprint(p.Config.MaxDelete)); err != nil {
+				return err
+			}
+			p.recordObjectETags(next, viaRclone, md5s)
 		}
 		uploadedAt = p.Now()
 		result.Uploaded = append(result.Uploaded, changed...)
-		p.recordObjectETags(next, changed, md5s)
 	}
 	if len(deleted) > 0 {
 		if err := p.deleteObjects(deleted); err != nil {
@@ -365,6 +397,7 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		return err
 	}
 	os.Remove(p.statePath("manifest.missing"))
+	p.pruneShadows(m.Files)
 	result.ManifestWritten = true
 	// 3. the change record, PUT with the round's other records once the manifest is out (FlushRecords)
 	events := p.pushEvents(m, items, changed, deleted, byPath, uploadedAt, deletedAt, published)
@@ -373,6 +406,36 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		p.say("the change record for seq %d: %v", m.Seq, err)
 	}
 	return heldError(len(held), copyErr)
+}
+
+// uploadAppends puts each appended file up with one native PUT of the bytes that were hashed, eight at once, and
+// records its object_etag from the PUT's own answer when that is the MD5 of those bytes (docs/peps/0009 §4.1). WHY not
+// rclone: it reads the file again after the engine hashed it, so a rewrite in between would leave a pointer resting on
+// bytes that do not start with it; these bytes cannot differ from the ones the pointer was proved against. It also
+// spares a process, and a HEAD, on the hot path of an appended log.
+func (p *Project) uploadAppends(next []manifest.Entry, paths []string, reads map[string]hashed, local map[string]LocalFile) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	etags := make([]string, len(paths))
+	errs := make([]error, len(paths))
+	parallel(len(paths), func(i int) {
+		read := reads[paths[i]]
+		etags[i], errs[i] = p.S3.PutFile(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+paths[i], read.Bytes, local[paths[i]].MTime)
+	})
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	index := map[string]int{}
+	for i := range next {
+		index[next[i].Path] = i
+	}
+	for i, path := range paths {
+		if etag := strings.ToLower(strings.Trim(etags[i], `"`)); etag == reads[path].MD5 {
+			next[index[path]].ObjectETag = etag
+		}
+	}
+	return nil
 }
 
 func heldError(held int, err error) error {
@@ -726,6 +789,8 @@ func (p *Project) Reconcile(ctx context.Context, stamp string, result *Result) e
 			return err
 		}
 	}
+	// a compressed copy no version needs (a crash left it) goes with the reconcile (PEP 0009 §6)
+	p.pruneShadows(prev.Files)
 	var strays []string
 	for path := range remote {
 		if path != manifest.FileName && !inManifest[path] {
@@ -939,8 +1004,28 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 		// only below, once its files are in, so the next round redoes a cut fetch (the manifest read again, 200 not
 		// 304, then what is missing) and nothing is lost; making the stop wait would hold it as long as the fetch.
 		if _, err := p.Rclone.Run(ctx, "copy", rclone.Path(p.Config.Bucket, p.HostPrefix(peerID)), localRoot,
-			"--files-from-raw", list, "--no-traverse"); err != nil {
+			"--files-from-raw", list, "--no-traverse", exactNames); err != nil {
 			return pr, err
+		}
+	}
+	// two names this disk folds into one file (NFC and NFD on APFS, or case twins) hold one file's bytes between them: neither
+	// lands, and each says why (twins.go). Every name in the manifest is checked, not just this round's fetches: a twin that
+	// arrives later overwrites the file of the one that came before.
+	if len(fetch) > 0 {
+		listed := make([]string, 0, len(newIndex))
+		for path := range newIndex {
+			listed = append(listed, path)
+		}
+		sort.Strings(listed)
+		for _, group := range twinGroups(localRoot, listed) {
+			for _, path := range group {
+				os.Remove(filepath.Join(localRoot, filepath.FromSlash(path)))
+				result.Skipped = append(result.Skipped, names.Skipped{Path: peerID + "/" + path,
+					Reason: fmt.Sprintf("this disk keeps %s and %s as one file (names that differ only in Unicode normalization or case)", group[0], group[1])})
+				pr.Skipped++
+				delete(newIndex, path)
+			}
+			fetch = withoutPaths(fetch, setOf(group))
 		}
 	}
 	consistent := true

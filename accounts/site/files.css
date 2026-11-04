@@ -1,0 +1,25 @@
+/* folder-sync accounts · the Files page (/fs/files, src/files-page.ts). A thin shell around <folder-sync-status view="files">:
+   the element draws everything, this file gives it the page's tokens and the room. Calm, light and dark like account.css. */
+:root { --page: #fcfcfb; --surface: #fff; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #898781; --line: rgba(11, 11, 11, .1); color-scheme: light dark; }
+@media (prefers-color-scheme: dark) {
+  :root { --page: #141413; --surface: #1d1d1b; --ink: #f2f1ee; --ink-2: #b9b7b1; --ink-3: #8a8883; --line: rgba(255, 255, 255, .12); }
+}
+html, body { height: 100%; }
+body { margin: 0; display: flex; flex-direction: column; background: var(--page); color: var(--ink); font: 13px/1.5 system-ui, sans-serif; }
+.fsf-top { display: flex; align-items: baseline; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.fsf-title { font-size: 15px; font-weight: 600; }
+.fsf-app, .fsf-who { color: var(--ink-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fsf-grow { flex: 1; }
+.fsf-top a { color: var(--ink); }
+main { flex: 1; min-height: 0; padding: 12px 16px 16px; box-sizing: border-box; display: flex; flex-direction: column; }
+.fsf-note { color: var(--ink-2); }
+.fsf-note a { color: var(--ink); }
+/* the element follows the page's colours; its accent stays its own */
+folder-sync-status { display: block; flex: 1; min-height: 0; --fs-fg: var(--ink); --fs-bg: var(--surface); --fs-muted: var(--ink-3); }
+/* WHY the viewport and not 100%: the panel sits in the element's Shadow DOM under a block with no height, so a percentage
+   would not resolve; the header (44px) and the main's padding (28px) are what is taken off */
+folder-sync-status::part(panel) { height: calc(100vh - 72px); height: calc(100dvh - 72px); min-height: 360px; }
+@media (max-width: 700px) {
+  .fsf-who { display: none; }
+  main { padding: 8px 8px 12px; }
+}

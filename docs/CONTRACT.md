@@ -7,7 +7,7 @@ Two reference readers implement this page and are tested against a live stand-in
 - Python, stdlib only (boto3 optional): [`readers/python/folder_sync_read.py`](../readers/python/folder_sync_read.py)
 - TypeScript for a Cloudflare Worker with an R2 binding: [`readers/worker/src/folder-sync-read.ts`](../readers/worker/src/folder-sync-read.ts)
 
-**History, change records, pull records, restore requests, the activity log and sync times** ([`docs/peps/0007`](peps/0007-history-and-sync-view.md), accepted 2026-10-28) are frozen here, with their schemas in [`schema/`](../schema/) and shared fixtures in [`testdata/`](../testdata/) (`node --test schema/fixtures.test.mjs` keeps them in step). The writers are being built: until the engine and the accounts Worker ship them, rounds and the web host still write `_trash/` as below ("Legacy `_trash/`"). The view's HTTP API is [`docs/API.md`](API.md).
+**History, change records, pull records, restore requests, the activity log and sync times** ([`docs/peps/0007`](peps/0007-history-and-sync-view.md), accepted 2026-10-28) are frozen here, with their schemas in [`schema/`](../schema/) and shared fixtures in [`testdata/`](../testdata/) (`node --test schema/fixtures.test.mjs` keeps them in step). Pointers, keyframes and the 5-minute rule ([`docs/peps/0009`](peps/0009-storage-efficient-history.md), 2026-11-04) amend the history parts of this page; their schemas are [`schema/prefix.schema.json`](../schema/prefix.schema.json) and [`schema/zstd-frames.schema.json`](../schema/zstd-frames.schema.json). The engine writes all three forms; the web host writes whole copies, throttled to the same 5 minutes. Rounds and the web host no longer write `_trash/` ("Legacy `_trash/`" below is what is left of it). The view's HTTP API is [`docs/API.md`](API.md).
 
 ## Bucket layout
 
@@ -22,7 +22,9 @@ Two reference readers implement this page and are tested against a live stand-in
         ...
     shared/                          two-way folder under a lease: v1, not written in v0
   _history/
-    <project>/<host-id>/<path>/<version>     a kept version: the file's exact bytes (PEP 0007)
+    <project>/<host-id>/<path>/<version>               a kept version: the file's exact bytes (PEP 0007)
+    <project>/<host-id>/<path>/<version>.<size>.zst    ... or one zstd frame of exactly those bytes (PEP 0009)
+    <project>/<host-id>/<path>/<version>.<size>.prefix ... or a pointer: the start of the path's next full object (PEP 0009)
   _changes/
     <project>/<host-id>/<seq>.json           what that host's manifest version <seq> changed (PEP 0007)
     <project>/<host-id>/pulls/<at>.json      the peer files that host wrote to its disk in one round (PEP 0007)
@@ -36,7 +38,8 @@ Two reference readers implement this page and are tested against a live stand-in
 - `<root>` is the empty string (the layout above, unchanged) or an account root: one to eight segments, each `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, each followed by `/` (so `users/AbC123/`; exactly `^([A-Za-z0-9][A-Za-z0-9._-]{0,127}/){1,8}$`). With a root, every key in this page, `_trash/` included, is that key with `<root>` in front: `<root><project>/hosts/<host-id>/manifest.json`, `<root>_trash/<project>/<host-id>/<UTC-stamp>/<path>`. The root comes from the credentials folder-sync is given, never from a project's config, and a folder keeps the root it was first synced under (a round under another root is refused). Readers take the root as an optional parameter whose default, `""`, reads a v0 bucket.
 - `<project>` matches `^[a-z0-9][a-z0-9._-]{0,62}$`. A leading `_` is reserved for folder-sync's own prefixes.
 - `<host-id>` is a lowercase UUID v4, minted once per machine and kept in that machine's `~/.folder-sync/host.json`. The readable name is the manifest's `host_name`.
-- `<version>` is `<written_at>_<sha16>`: the manifest entry's `written_at` truncated (not rounded) to the millisecond, as `YYYY-MM-DDTHH:MM:SS.mmmZ`, then the first 16 hex digits of its `sha256` (`2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f`). An object that was not the version the manifest listed is kept as `<its LastModified, to the ms>_unlisted`. Names sort oldest first. Exactly `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z_([0-9a-f]{16}|unlisted)$` ([`schema/history.schema.json`](../schema/history.schema.json)). WHY a colon is safe: no published path contains `:`, so a version name is never a file or folder of the published tree, and a delimiter listing of `…/<path>/` shows versions as objects and deeper paths as prefixes.
+- `<version>` is `<written_at>_<sha16>`: the manifest entry's `written_at` truncated (not rounded) to the millisecond, as `YYYY-MM-DDTHH:MM:SS.mmmZ`, then the first 16 hex digits of its `sha256` (`2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f`). An object that was not the version the manifest listed is kept as `<its LastModified, to the ms>_unlisted`. Names sort oldest first. Exactly `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z_([0-9a-f]{16}|unlisted)$` ([`schema/history.schema.json`](../schema/history.schema.json)).
+- An object's **name** under `…/<path>/` is `<version>` (the bytes themselves), `<version>.<size>.zst` (a **keyframe**: one zstd frame, RFC 8878, of exactly the version's bytes, made by the writer while it hashed them; window at most 8 MiB) or `<version>.<size>.prefix` (a **pointer**: about 125 bytes, `{"schema":"folder-sync-prefix/1","size":<n>,"sha256":"<64 hex>"}` ([`schema/prefix.schema.json`](../schema/prefix.schema.json)), created once). `<size>` is that version's own size in decimal with no leading zero, so a listing shows every version's true size without a GET; an `_unlisted` version is always a whole copy. A reader that finds one version in more than one form uses the best: the whole copy, then the keyframe, then the pointer. An older reader skips names it cannot parse as a version, so it never reads or deletes one. WHY a colon is safe: no published path contains `:`, so a version name is never a file or folder of the published tree, and a delimiter listing of `…/<path>/` shows versions as objects and deeper paths as prefixes.
 - `<seq>` is the manifest's `seq` as 12 digits (`000000000043`). `<id>` is a lowercase UUID v4.
 - `<UTC-stamp>` (legacy `_trash/` only) is `YYYYMMDDTHHMMSSZ`, the start of the round that replaced the object; the web host appends milliseconds and 8 random hex digits.
 - Object keys are the file's path in its folder, slash-separated, byte for byte. folder-sync skips (and reports in `status`) names that can't exist on every OS: Windows-reserved characters and device names, a trailing dot or space, and case-only twins such as `README.md` beside `readme.md`.
@@ -113,7 +116,8 @@ Either way, re-read the manifest (it has changed) and retry once. Never treat an
 ## Deletions and history
 
 - A path missing from the manifest is deleted. That is the only deletion signal; there are no tombstones.
-- The version that leaves (replaced, deleted, or replaced by a restore) is copied first to `<root>_history/<project>/<host-id>/<path>/<version>`, its exact bytes, when the schedule below keeps it. The object has no custom metadata; its `LastModified` is when it left the folder (`left_at`). Copies use S3 `CopyObject` with `x-amz-copy-source-if-match: "<object_etag>"` when the manifest entry has one; a 412 means the object is not the listed version, and it is kept as `…_unlisted` instead, so nothing is lost or mislabelled. A path whose history key would pass 1,024 bytes is published but never kept.
+- The version that leaves (replaced, deleted, or replaced by a restore) is stored first under `<root>_history/<project>/<host-id>/<path>/`, when the schedule below keeps it, in one of three forms (PEP 0009). **A pointer** when the new bytes are an *append* (the sha256 of their first `size` bytes is the leaving version's `sha256`) that the writer uploads itself, with one native PUT of the very bytes it hashed (up to 64 MiB; at most 256 MiB held in a round): the old version costs about 125 bytes. **A keyframe** (`.zst`) from the compressed copy the writer made while it hashed that version, when one exists. Otherwise **a whole copy**, as PEP 0007 does. The object has no custom metadata; its `LastModified` is when it left the folder (`left_at`). Whole copies use S3 `CopyObject` with `x-amz-copy-source-if-match: "<object_etag>"` when the manifest entry has one; a 412 means the object is not the listed version, and it is kept as `…_unlisted` instead, so nothing is lost or mislabelled. A path whose history key would pass 1,024 bytes is published but never kept (a keyframe or pointer whose longer name would pass it is kept whole instead if that name fits).
+- **A pointer's bytes** are the first `size` bytes of the path's next full object: the oldest object of that path that is not a pointer and whose version id is newer than the pointer's (its **anchor**: a keyframe, a whole copy or an `_unlisted` copy), or, when there is none, the live file. A reader fetches `bytes=0-(size−1)` of it (with `If-Match` on the manifest's `object_etag` when the anchor is the live file; a keyframe is decoded first) and accepts the result only if its sha256 is the pointer's `sha256` and starts with the `sha16` in the name. WHY a pointer only ever rests on bytes the writer itself uploaded: the engine hashes a file and then rclone would read it again, so a rewrite in between would strand the pointer; an append of up to 64 MiB is therefore put up from the buffer that was hashed, and a version that leaves while the newest one kept is a pointer is kept whole unless its replacement is such an append (the pin, "What is kept" below).
 - **A file's versions** are one listing: `ListObjectsV2(prefix="<root>_history/<project>/<host-id>/<path>/", delimiter="/")`. **Deleted files** are the paths with a kept version and no entry in the host's manifest.
 - **Restore** is only ever done by the host that owns the path, which writes the old bytes as a new version (the one it replaces is kept first). Anyone else asks it with a restore request (below). An app never copies history back into `hosts/`.
 - folder-sync never deletes more than `max_delete` files (default 50) in one round, and refuses outright to push when a folder that had files looks empty (unmounted disk); it still pulls the other hosts, and the round reports the refusal.
@@ -121,24 +125,29 @@ Either way, re-read the manifest (it has changed) and retry once. Never treat an
 
 ### What is kept
 
-One rule, implemented twice (the engine in Go, the web host and pruner in TypeScript) and pinned by [`testdata/retention/schedule.json`](../testdata/retention/schedule.json), which both must pass. Constants: `burst` 30 s, `keep_days` 30.
+One rule, implemented twice (the engine in Go, the web host and pruner in TypeScript) and pinned by [`testdata/retention/schedule.json`](../testdata/retention/schedule.json), which both must pass. Constants: `every` (a folder's `history_every`, default 5 min, at least 30 s), `keep_days` 30.
 
 **When a version leaves** (at time `t`, the version's manifest entry written at `w`), it is copied to `_history/` unless the first rule that matches says not:
 
 1. its path matches a `no_history` pattern (`.folder-sync.toml`, gitignore syntax as `ignore`; default `["*.log"]`): **not kept** (`why: no_history`), whether replaced or deleted;
 2. it is deleted, or replaced by a restore: **kept**;
-3. it lived `burst` or longer (`t − w ≥ 30 s`): **kept**;
-4. this writer already kept a version of this path that left after `t − 30 s` (strictly): **not kept** (`why: burst`);
-5. otherwise: **kept**.
+3. **the pin:** the newest version this writer kept of this path is a pointer, and the new bytes are not an append that the writer uploads itself: **kept** (those pointers rest on the live file, and these bytes could replace it with bytes that do not start with theirs);
+4. it lived `every` or longer (`t − w ≥ every`): **kept**;
+5. this writer already kept a version of this path that left after `t − every` (strictly): **not kept** (`why: burst`);
+6. otherwise: **kept**.
 
-So a burst of saves keeps at most one version per 30 s per path, and never costs a copy per save. The writer knows rule 4's answer without a listing: it is the only writer of its host's history.
+So a burst of saves keeps at most one version per `every` (5 min by default) per path, and never costs a copy per save; only the versions kept for undo are thinned, not the live sync. The writer knows rules 3 and 5 without a listing: it is the only writer of its host's history, and remembers for `max(1 h, every)` when and in what form it last kept each path; with no record, nothing is dropped. `history_every` is each machine's own (it applies only to that machine's host); the web host uses 5 min.
 
 **When the pruner runs** (at time `now`), each kept version of one `(host, path)` with `age = now − left_at`:
+
+A version id is the unit, whatever form its object is in: the rules below choose ids, then the anchors rule adds to them.
 
 1. `age ≥ keep_days × 24 h`: **deleted**;
 2. `age < 1 h`: **kept**;
 3. `1 h ≤ age < 24 h`: **kept** only if it is the newest (largest `left_at`, then largest version id) of the versions in this tier whose `left_at` falls in the same UTC clock hour;
 4. `24 h ≤ age < keep_days`: **kept** only if it is the newest of the versions in this tier with `left_at` on the same UTC day.
+
+5. **anchors** (PEP 0009): a keyframe, whole copy or `_unlisted` copy that a kept pointer rests on stays, even if the rules above would delete it, and goes with its last pointer. A pointer beside a whole copy of the same version is deleted (the whole copy is the version). A pointer with no anchor and no live file (the path is not in its host's manifest) has lost its bytes: it is deleted and reported as a `history_lost` event. In every batch, **pointers are deleted before the keyframes they rest on**, so a prune cut off halfway strands none. Purging a version ("I synced a secret") also deletes the pointers that rest on it.
 
 A deleted file's last version is always the newest of its hour or day, so it stays until `keep_days`. The worst case for a path rewritten nonstop is about 120 + 24 + 30 versions (restic's `--keep-within 1h --keep-hourly 24 --keep-daily 30`). Bucketing by clock hour and day, not by distance from `now`, makes a prune idempotent and two pruners running at once harmless.
 
@@ -150,7 +159,11 @@ Worked examples (all at `now` = `2026-10-28T12:00:00.000Z`; the fixture has ever
 |---|---|---|
 | Lived 60 s | written 11:59:00 → left 12:00:00 | yes |
 | Burst | lived 5 s; a version of the path kept at 11:59:50 | no (`burst`) |
-| Burst edge | lived 5 s; the last kept at exactly 11:59:30 | yes (not strictly inside 30 s) |
+| Burst edge | lived 2 min; the last kept at exactly 11:55:00 (5 min) | yes (not strictly inside the window) |
+| Burst, just inside | lived 2 min; the last kept at 11:55:00.001 | no (`burst`) |
+| `history_every = 30s` | lived 20 s; the last kept 40 s ago | yes |
+| The pin | lived 2 min; the newest kept is a pointer; the new bytes are a rewrite | yes (inside the window) |
+| The pin lifts | the same, but the new bytes are an append the engine uploads itself | no (`burst`) |
 | Delete inside a burst | lived 2 s; the last kept 1 s ago | yes |
 | A log | `logs/run.log`, lived a day | no (`no_history`) |
 | Under an hour | 11:59:30, 11:59:00, 11:00:00.001 | all three |
@@ -160,10 +173,12 @@ Worked examples (all at `now` = `2026-10-28T12:00:00.000Z`; the fixture has ever
 | Daily | Oct 26 23:00, Oct 26 08:00, Oct 25 12:00, Oct 25 00:00, Oct 24 23:59:59.999 | Oct 26 23:00, Oct 25 12:00, Oct 24 23:59:59.999 |
 | 30 days | Sep 28 12:00:00.001 and Sep 28 12:00:00.000 | Sep 28 12:00:00.001 only |
 | `keep_days` 7 | Oct 22 12:00, Oct 21 12:00 | Oct 22 12:00 |
+| An anchor past its tier | Oct 25: a pointer (left 23:00) and the keyframe after it (left 10:00) | both (the keyframe is the pointer's anchor) |
+| A dangling pointer | a pointer with no full object after it, its path not in the manifest | deleted, and reported `history_lost` |
 
 ### Change records
 
-`<root>_changes/<project>/<host-id>/<seq>.json`, validated by [`schema/changes.schema.json`](../schema/changes.schema.json): what manifest version `<seq>` changed, as that host's `upload`, `delete` and `restore` events (below) in path order, each saying where the old version went (`was.kept`, a version id, or `null` with `why`). `by` is `machine`, `web` (the web host; `via` names the browser) or `server` (the accounts Worker's over-quota delete job, which builds that manifest). One immutable object per manifest version a writer of this format publishes, written after the manifest; a failed PUT is retried on the writer's next round. A record that is missing means "not recorded"; the manifests stay the truth. These records are a folder's activity log online.
+`<root>_changes/<project>/<host-id>/<seq>.json`, validated by [`schema/changes.schema.json`](../schema/changes.schema.json): what manifest version `<seq>` changed, as that host's `upload`, `delete` and `restore` events (below) in path order, each saying where the old version went (`was.kept`, a version id, or `null` with `why`). `by` is `machine`, `web` (the web host; `via` names the browser) or `server` (the accounts Worker's over-quota delete job, which builds that manifest). One immutable object per manifest version a writer of this format publishes, written after the manifest (compact JSON; the engine's were indented before PEP 0009); a failed PUT is retried on the writer's next round. A record that is missing means "not recorded"; the manifests stay the truth. These records are a folder's activity log online.
 
 ### Restore requests
 
@@ -180,7 +195,7 @@ One line format, `folder-sync-event/1` ([`schema/event.schema.json`](../schema/e
 
 - Every line has `schema`, `event` and `at` (RFC 3339 UTC). A line written to the local log also has `project`, `host`, `host_name` and `level` (`info`, `warn` or `error`); stdout lines may omit them, as the desktop app's do today. New optional fields keep `/1`; readers ignore event names and fields they do not know.
 - The desktop app's events stay exactly as they are: `watching`, `round_start`, `round`, `hub`, `stopped` (`cmd/folder-sync/events.go`).
-- File events: `upload` (`path, size, sha256, op: add | edit`, and `was` for an edit), `delete` (`path, was`, `permanent` for a delete job's), `restore` (`path, from: <version>, request?`; `size, sha256` when it succeeded, and `was` for the version it replaced; `error` and `level: error` when not), `download` and `remove_copy` (`peer, peer_name, path`), `skip` (`path, why`), `conflict` (`peer, peer_name, path, kept_at`), `hold` (`why: max_delete | over_quota | unmounted, count`), `synced` (a clean round, nothing local pending, every known peer's latest manifest applied) and `truncated`.
+- File events: `upload` (`path, size, sha256, op: add | edit`, and `was` for an edit), `delete` (`path, was`, `permanent` for a delete job's), `restore` (`path, from: <version>, request?`; `size, sha256` when it succeeded, and `was` for the version it replaced; `error` and `level: error` when not), `download` and `remove_copy` (`peer, peer_name, path`), `skip` (`path, why`), `conflict` (`peer, peer_name, path, kept_at`), `hold` (`why: max_delete | over_quota | unmounted, count`), `synced` (a clean round, nothing local pending, every known peer's latest manifest applied), `history_lost` (`path, from: <version>, why`, `level: warn`: the pruner found a prefix pointer whose bytes are gone, after an over-quota delete job, a purge, or an object deleted outside folder-sync) and `truncated`.
 - `upload`, `delete` and `restore` reach the bucket in change records, and `download` and `remove_copy` in pull records (below); a failed restore published nothing and is in the local log and the request's `outcome` only. The others stay on the machine.
 - No line ever holds a key or a token: every `why` goes through the engine's scrub (`Creds.Scrub`).
 
@@ -216,6 +231,14 @@ A machine's own files stay where they are in its folder. Its peers' files land r
 ## Legacy `_trash/`
 
 Before PEP 0007 every overwritten or deleted object was kept at `<root>_trash/<project>/<host-id>/<UTC-stamp>/<path>`. It is not migrated and the view does not show it; any S3 tool still reads it, and the pruner deletes it 30 days after its stamp. Its README lifecycle rule (prefix `_trash/`) only ever matched v0 bucket-key folders, whose root is empty: for an account root (`users/<id>/…`) no lifecycle rule can match, since rules match a literal prefix. That is why retention is folder-sync's own job.
+
+## Parts
+
+This page is the seam between the parts of the repo ([`PARTS.md`](../PARTS.md)): **core** (the Go CLI and engine) writes the layout above and works alone, with no server; **server-cloudflare** (`accounts/`, `demo/`) is the online half and one more host of every folder; **ui** (`ui/`, `app/ui/`) is the sync view; **desktop** (`app/src-tauri/`) wraps the core.
+
+- **Seams:** this page (the layout and manifest, with `schema/`, `testdata/` and the two readers), the credential process ([`docs/peps/0002`](peps/0002-short-lived-scoped-credentials.md): a program that prints short-lived keys for a prefix; `login --key` and `folder-sync credentials` are two of them) and `/fs/v1` HTTP ([`docs/API.md`](API.md)).
+- **What each part owns:** the core owns the bucket contract and every write under `hosts/`, `_history/` and `_changes/` from a machine; the server owns identity, key minting, the web host (the one `web` host a browser writes through), the pruner and quota; the ui owns how a folder is shown and nothing about how it is stored.
+- **Who may import whom:** the core imports no server code and the server imports only this contract (`readers/worker`, `schema/`, `testdata/`); the ui reads the view API and fixtures; nothing imports the desktop. `scripts/check-core-alone` and `accounts/test/identity-seam.test.ts` pin the two ends in CI.
 
 ## Not part of the contract
 

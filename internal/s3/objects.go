@@ -117,6 +117,19 @@ func (c *Client) Delete(bucket, key string) error {
 // Put writes body to key. ifNoneMatch "*" creates it only if absent; a non-empty ifMatch overwrites only that ETag.
 // Either refusal is ErrPreconditionFailed. It answers the new object's ETag as the store sent it.
 func (c *Client) Put(bucket, key string, body []byte, contentType, ifNoneMatch, ifMatch string) (string, error) {
+	return c.put(bucket, key, body, contentType, ifNoneMatch, ifMatch, nil)
+}
+
+// PutFile writes a file's bytes as rclone would: with its modification time in x-amz-meta-mtime (seconds, a dot, nine
+// digits), the metadata rclone, R2-Explorer and a peer's pull read back. It is the engine's own upload of an append
+// (docs/peps/0009 §4.1). It answers the new object's ETag as the store sent it.
+func (c *Client) PutFile(bucket, key string, body []byte, mtime time.Time) (string, error) {
+	meta := http.Header{}
+	meta.Set("X-Amz-Meta-Mtime", fmt.Sprintf("%d.%09d", mtime.Unix(), mtime.Nanosecond()))
+	return c.put(bucket, key, body, "", "", "", meta)
+}
+
+func (c *Client) put(bucket, key string, body []byte, contentType, ifNoneMatch, ifMatch string, extra http.Header) (string, error) {
 	req, err := c.newRequest(http.MethodPut, bucket, key)
 	if err != nil {
 		return "", err
@@ -132,6 +145,9 @@ func (c *Client) Put(bucket, key string, body []byte, contentType, ifNoneMatch, 
 	}
 	if ifMatch != "" {
 		req.Header.Set("If-Match", quote(ifMatch))
+	}
+	for name, values := range extra {
+		req.Header[name] = values
 	}
 	resp, err := c.do(req, sha256Hex(body))
 	if err != nil {
@@ -278,6 +294,57 @@ func (c *Client) GetToFile(bucket, key, path string) error {
 	}
 	if _, err := io.Copy(f, resp.Body); err != nil {
 		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// GetRangeToFile streams bytes from..to (both included) of an object into path (created or truncated). A non-empty
+// ifMatch (an ETag, quoted or not) is sent as If-Match: an object that has moved on answers ErrPreconditionFailed, and
+// nothing is written. A store that ignores Range and sends the whole object still yields exactly the range asked for.
+// An answer shorter than the range is an error. ErrNotFound when absent.
+func (c *Client) GetRangeToFile(bucket, key, path string, from, to int64, ifMatch string) error {
+	req, err := c.newRequest(http.MethodGet, bucket, key)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", from, to))
+	if ifMatch != "" {
+		req.Header.Set("If-Match", quote(ifMatch))
+	}
+	// WHY no client timeout: as GetToFile
+	client := c.HTTP
+	if client == nil {
+		client = &http.Client{}
+	}
+	SignWithToken(req, c.AccessKeyID, c.SecretAccessKey, c.SessionToken, c.Region, c.now(), EmptySHA256)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body := io.Reader(resp.Body)
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+	case http.StatusOK:
+		if _, err := io.CopyN(io.Discard, resp.Body, from); err != nil {
+			return fmt.Errorf("GET %s: %w", key, err)
+		}
+	default:
+		return statusError("GET "+key, resp)
+	}
+	want := to - from + 1
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	n, err := io.Copy(f, io.LimitReader(body, want))
+	if err == nil && n != want {
+		err = fmt.Errorf("GET %s: got %d bytes of the %d asked for", key, n, want)
+	}
+	if err != nil {
+		f.Close()
+		os.Remove(path)
 		return err
 	}
 	return f.Close()

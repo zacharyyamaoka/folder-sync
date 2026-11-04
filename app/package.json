@@ -2,7 +2,7 @@
   "name": "folder-sync-desktop",
   "private": true,
   "version": "0.1.0",
-  "description": "folder-sync desktop app (Tauri 2). Build: scripts/build.sh",
+  "description": "Part desktop (PARTS.md): folder-sync desktop app (Tauri 2). Build: scripts/build.sh",
   "scripts": {
     "tauri": "tauri"
   },

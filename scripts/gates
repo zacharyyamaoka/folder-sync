@@ -1,0 +1,191 @@
+#!/usr/bin/env node
+'use strict';
+// Runs the proofs for the gates G1..G12 and writes reports/status/gates.json (docs/GATES.md).
+//
+//   scripts/gates                      the CI profile: every proof that runs on this machine, about 6 minutes
+//   scripts/gates --profile smoke      the soak as the smoke run `go test ./...` makes (seconds, not minutes)
+//   scripts/gates --profile long       the soak for 30 minutes
+//   scripts/gates --only G1,G9         just those gates (the file then holds the others as not run: see --merge)
+//   scripts/gates --with-web           also the Files page against the real accounts Worker (wrangler; needs npm ci in accounts/ and ui/)
+//   scripts/gates --publish            also write /home/bam/folder-sync/reports/status/gates.json (the dev view reads that one)
+//   scripts/gates --collect <dir>      first-sync times the CI matrix jobs uploaded (g11-<os>.json)
+//   scripts/gates --needs <file.json>  the workflow's `toJSON(needs)`, so G4 reads this very run
+//   scripts/gates --list               print the gates and their proofs, run nothing
+//   scripts/gates --no-gh              do not ask GitHub for the CI matrix and the installer smoke
+//
+// Exit status: 0 when no gate failed (a gate that is not_built or skipped is not a failure: it says what is missing),
+// 1 when a gate failed, 2 for a usage error. FOLDER_SYNC_E2E_STANDIN / FOLDER_SYNC_E2E_PROXY pick the e2e ports.
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const lib = require('./gates-lib.cjs');
+
+const { REPO } = lib;
+const MAIN_CHECKOUT_STATUS = '/home/bam/folder-sync/reports/status';
+
+function arg(name) {
+  const i = process.argv.indexOf(name);
+  return i > 0 ? process.argv[i + 1] : undefined;
+}
+const flag = (name) => process.argv.includes(name);
+
+for (const a of process.argv.slice(2)) {
+  if (a.startsWith('--') && !['--profile', '--only', '--with-web', '--publish', '--collect', '--needs', '--list', '--no-gh', '--out', '--seed', '--help'].includes(a)) {
+    console.error(`gates: unknown option ${a} (see the top of scripts/gates)`);
+    process.exit(2);
+  }
+}
+if (flag('--help')) {
+  console.log(fs.readFileSync(__filename, 'utf8').split('\n').filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n'));
+  process.exit(0);
+}
+
+const profile = arg('--profile') || 'ci';
+if (!['smoke', 'ci', 'long'].includes(profile)) { console.error('gates: --profile is smoke, ci or long'); process.exit(2); }
+const only = arg('--only') ? arg('--only').split(',').map((s) => s.trim().toUpperCase()) : null;
+if (only && only.some((id) => !lib.GATE_IDS.includes(id))) { console.error(`gates: --only takes ids G1..G12, got ${arg('--only')}`); process.exit(2); }
+
+const outFile = path.resolve(arg('--out') || path.join(REPO, 'reports', 'status', 'gates.json'));
+const outDir = path.dirname(outFile);
+const git = (...a) => lib.sh(['git', ...a]).stdout.trim();
+const sha = git('rev-parse', 'HEAD');
+const dirty = git('status', '--porcelain', '--', ':!reports', ':!.tools').length > 0;
+
+// go: the toolchain this repo is built with, on PATH or where Zach installs it
+const goBin = fs.existsSync('/home/bam/.local/go/bin/go') ? '/home/bam/.local/go/bin/go' : 'go';
+const pathEnv = process.env.PATH + path.delimiter + path.dirname(goBin);
+
+const ctx = {
+  profile, soakProfile: profile, soakSeed: arg('--seed') || process.env.FOLDER_SYNC_SOAK_SEED || '1', outDir,
+  branch: git('rev-parse', '--abbrev-ref', 'HEAD'), defaultBranch: 'main', sha,
+  withWeb: flag('--with-web'), noGh: flag('--no-gh'), collect: arg('--collect'),
+  needs: arg('--needs') ? JSON.parse(fs.readFileSync(arg('--needs'), 'utf8')) : null,
+};
+
+const gates = lib.definitions(ctx);
+if (flag('--list')) {
+  for (const g of gates) {
+    console.log(`${g.id}  ${g.name}\n      target: ${g.target}`);
+    for (const p of g.proofs) {
+      const what = p.kind === 'go' ? `go ${p.pkg} ${p.all ? '(all tests)' : p.tests.join(', ')}` : p.kind === 'node' ? `node --test ${p.cwd}/${p.file}${p.pattern ? ` --test-name-pattern '${p.pattern}'` : ''}` : p.kind === 'cmd' ? p.argv.join(' ') : p.kind === 'missing' ? `NOT BUILT: ${p.name}` : `inline ${p.name}`;
+      console.log(`      ${p.advisory ? '(advisory) ' : ''}${what}`);
+    }
+  }
+  process.exit(0);
+}
+
+// --- running one proof ---------------------------------------------------------------------------------------------------
+
+function runProof(proof) {
+  const result = { tests: [], notBuilt: [], advisory: !!proof.advisory, evidence: proof.evidence || [] };
+  if (proof.kind === 'missing') {
+    result.tests.push(lib.entry(`not built: ${proof.name}`, 'skip', proof.reason));
+    result.notBuilt.push({ name: proof.name, reason: proof.reason });
+    return result;
+  }
+  if (proof.kind === 'inline') {
+    const r = proof.fn(ctx);
+    result.tests.push(...r.tests);
+    for (const m of r.notBuilt || []) {
+      result.tests.push(lib.entry(`not built: ${m.name}`, 'skip', m.reason));
+      result.notBuilt.push(m);
+    }
+    return result;
+  }
+  if (proof.kind === 'cmd') {
+    if (proof.needs === 'web' && !ctx.withWeb) {
+      result.tests.push(lib.entry(proof.name, 'skip', 'left out: run with --with-web (starts wrangler dev and the R2 stand-in on free ports)'));
+      return result;
+    }
+    const started = Date.now();
+    const r = lib.sh(proof.argv, { cwd: REPO, timeout: 15 * 60 * 1000, env: { PATH: pathEnv } });
+    const text = (r.stdout + r.stderr).split('\n');
+    result.tests.push(lib.entry(proof.name, r.status === 0 ? 'pass' : 'fail', r.status === 0 ? lib.tail(text, 3) : lib.tail(text, 40), Date.now() - started));
+    return result;
+  }
+  if (proof.kind === 'node') {
+    const args = ['--test', '--test-reporter=tap'];
+    if (proof.pattern) args.push(`--test-name-pattern=${proof.pattern}`);
+    args.push(proof.file);
+    const r = lib.sh([process.execPath, ...args], { cwd: path.join(REPO, proof.cwd), timeout: 15 * 60 * 1000 });
+    if (r.error && r.error.code === 'ENOENT') { result.tests.push(lib.entry(`${proof.cwd}/${proof.file}`, 'fail', String(r.error))); return result; }
+    const tests = lib.parseTap(r.stdout).map((t) => ({ ...t, name: `${proof.cwd}/${proof.file}: ${t.name}` }));
+    if (!tests.length) tests.push(lib.entry(`${proof.cwd}/${proof.file}`, 'fail', `no test ran${proof.pattern ? ` for the pattern ${proof.pattern}` : ''}:\n${lib.tail((r.stdout + r.stderr).split('\n'), 20)}`));
+    result.tests.push(...tests);
+    return result;
+  }
+  // go
+  const args = ['test', '-count=1', '-json', '-timeout', '40m'];
+  if (!proof.all) args.push('-run', `^(${proof.tests.join('|')})$`);
+  args.push(proof.pkg);
+  const env = { PATH: pathEnv, ...Object.fromEntries(Object.entries(proof.env || {}).filter(([, v]) => v !== '')) };
+  if (process.env.CI) env.FOLDER_SYNC_E2E_REQUIRE = '1';
+  // the files a test writes as evidence (a report, a timing) go in a folder that exists
+  for (const [key, value] of Object.entries(proof.env || {})) if (/_REPORT$|_OUT$/.test(key)) fs.mkdirSync(path.dirname(value), { recursive: true });
+  const r = lib.sh([goBin, ...args], { cwd: REPO, timeout: 45 * 60 * 1000, env });
+  const parsed = lib.parseGoJson(r.stdout);
+  const byName = new Map(parsed.tests.map((t) => [t.name, t]));
+  const wanted = proof.all ? parsed.tests.map((t) => t.name) : proof.tests;
+  for (const name of wanted) {
+    const t = byName.get(name);
+    if (!t || !t.status) {
+      const why = parsed.packageFailed || r.status ? `the package did not finish:\n${lib.tail([...parsed.output, ...(t ? t.lines : [])], 30)}` : 'no such test ran (renamed or deleted?)';
+      result.tests.push(lib.entry(`go ${proof.pkg} ${name}`, 'fail', why));
+      continue;
+    }
+    result.tests.push({
+      name: `go ${proof.pkg} ${t.name}`, status: t.status, duration_ms: t.duration_ms,
+      detail: t.status === 'pass' ? '' : lib.tail(t.lines, 30),
+    });
+  }
+  if (!wanted.length) result.tests.push(lib.entry(`go ${proof.pkg}`, 'fail', 'no test ran'));
+  return result;
+}
+
+// --- the run -----------------------------------------------------------------------------------------------------------------
+
+fs.mkdirSync(path.join(outDir, 'evidence'), { recursive: true });
+const out = [];
+for (const gate of gates) {
+  if (only && !only.includes(gate.id)) {
+    out.push({ id: gate.id, name: gate.name, status: 'skipped', summary: 'not run: left out by --only', tests: [], evidence: [], target: gate.target });
+    continue;
+  }
+  process.stderr.write(`${gate.id} ${gate.name} …\n`);
+  const results = gate.proofs.map(runProof);
+  const verdict = lib.aggregate(results);
+  const evidence = [...new Set(results.flatMap((r) => r.evidence))].filter((e) => fs.existsSync(path.join(outDir, e)));
+  out.push({ id: gate.id, name: gate.name, status: verdict.status, summary: verdict.summary, tests: results.flatMap((r) => r.tests), evidence, target: gate.target });
+  process.stderr.write(`   ${verdict.status.toUpperCase()}  ${verdict.summary.slice(0, 160)}\n`);
+}
+
+const doc = {
+  schema: lib.SCHEMA, run_at: new Date().toISOString(), code_sha: sha + (dirty ? '+dirty' : ''), branch: ctx.branch,
+  profile, host: `${os.platform()}/${os.arch()}`, gates: out,
+};
+const problems = lib.validate(doc);
+if (problems.length) { console.error(`gates: the document I built is invalid:\n  ${problems.join('\n  ')}`); process.exit(1); }
+
+function write(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, path.basename(outFile)), JSON.stringify(doc, null, 2) + '\n');
+}
+write(outDir);
+// the copy the tests read lives in the checkout; the dev view reads the main checkout's
+if (flag('--publish')) {
+  write(MAIN_CHECKOUT_STATUS);
+  const evidenceDir = path.join(outDir, 'evidence');
+  if (fs.existsSync(evidenceDir)) fs.cpSync(evidenceDir, path.join(MAIN_CHECKOUT_STATUS, 'evidence'), { recursive: true });
+  process.stderr.write(`published to ${MAIN_CHECKOUT_STATUS}/${path.basename(outFile)}\n`);
+}
+
+if (process.env.GITHUB_STEP_SUMMARY) {
+  const mark = { pass: 'pass', fail: '**FAIL**', not_built: 'not built', skipped: 'skipped' };
+  const rows = out.map((g) => `| ${g.id} | ${g.name} | ${mark[g.status]} | ${g.summary.replace(/\|/g, '\\|').slice(0, 300)} |`);
+  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n### Gates (${profile} profile, ${doc.code_sha.slice(0, 7)})\n\n| | gate | status | summary |\n|---|---|---|---|\n${rows.join('\n')}\n`);
+}
+
+const counts = out.reduce((c, g) => ({ ...c, [g.status]: (c[g.status] || 0) + 1 }), {});
+console.log(`${outFile}\n${out.map((g) => `${g.id.padEnd(4)}${g.status.padEnd(10)}${g.name}`).join('\n')}\n${Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(', ')}`);
+process.exit(out.some((g) => g.status === 'fail') ? 1 : 0);

@@ -359,6 +359,24 @@ func writeJSON(path string, value any) error {
 	return os.Rename(tmp, path)
 }
 
+// writeCompactJSON writes value as one line of JSON, no trailing newline: the bytes that are PUT as a change or pull
+// record. WHY compact (docs/peps/0009 §8): records count toward history in the quota, and the web host already writes
+// them compact; indented, the engine's were a quarter larger, and JSON readers ignore whitespace.
+func writeCompactJSON(path string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // Lock is a per-project lock so a manual `sync --once` and the service never run a round together.
 type Lock struct{ path string }
 

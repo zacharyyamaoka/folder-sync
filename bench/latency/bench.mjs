@@ -1,56 +1,63 @@
 #!/usr/bin/env node
-// folder-sync's latency KPI: how long a file takes from a machine's disk to being served online, and from an online
-// write to a machine's disk. A black box: it drives the folder-sync CLI exactly as a person runs it (`init`, then
-// `sync --watch` in the background) and watches only what a person would see, so a change to the CLI or the Worker
+// folder-sync's propagation KPI (Zach's objective O1): how long a change takes from one place to another, for every
+// direction and every kind of change. A black box: it drives the folder-sync CLI exactly as a person runs it (`init`,
+// then `sync --watch` in the background) and watches only what a person would see, so a change to the CLI or the Worker
 // (PEP 0004's push sync, say) moves the number without touching this file.
 //
 // Zach, 2026-10-28: "Please add a KPI for the folder sync project which is tracking the time to sync from local to
 // online and the time from online to local ... thats really kinda key performance indicator I want to continue to
-// work on."
+// work on." Zach, 2026-11-04 (objectives): "Fast: propagation p50 <= 1 s, p95 <= 3 s, save -> bytes on the other disk
+// and online; add/edit/delete/rename; machine<->machine and machine<->web", "in production as well as testing".
 //
-//   node bench/latency/bench.mjs run [--stack local|prod] [--trials 10] [--out DIR] [--no-kpi] [--cli PATH] [--json FILE]
-//   node bench/latency/bench.mjs install-timer      the hourly local-stack run, as a systemd --user timer (idempotent)
+//   node bench/latency/bench.mjs run [--stack local|prod] [--trials 6] [--out DIR] [--no-kpi] [--cli PATH] [--json FILE]
+//   node bench/latency/bench.mjs install-timer      the hourly local-stack run alone, as a systemd --user timer (idempotent;
+//                                                    bench/kpi/run-all.mjs install-timer is the one that runs everything)
 //
-// Two directions, each --trials times, each trial started at a random phase of the machine's sync interval:
-// - up:   write bench/<id>.txt into the synced folder, then GET /fs/v1/folders/<project>/files/<host>/bench/<id>.txt
-//         every 50 ms until it answers 200 with the same bytes: the moment a page (or anyone online) can read it.
-// - down: PUT /fs/v1/folders/<project>/web/bench/<id>.txt (the web host: the call a web page makes to save), then
-//         read <folder>/hosts/<web host>/bench/<id>.txt every 10 ms until it holds the same bytes.
-// Both clocks start just before the write and stop when the reader holds the bytes, so each is what a person waits.
+// Two writers, `--trials` samples each (default 6). A sample is a file taken through add, edit, rename, delete, each op
+// started at a random phase of the machine's sync interval, each op's clock started just before the write:
+// - machine A writes in its synced folder (add = write-then-rename as an editor saves; edit = the same path with new bytes;
+//   rename = mv; delete = rm). Two readers race the one write, so one write gives two directions:
+//     machine->web      GET /fs/v1/folders/<project>/files/<A>/<path> (every 50 ms): 200 with the same bytes, or for a delete
+//                       / the old name of a rename, 404
+//     machine->machine  machine B's disk <folder>/hosts/<A>/<path> (every 10 ms): the same bytes, or the path gone
+// - the web host writes (PUT /fs/v1/folders/<project>/web/<path>, the call a page makes; DELETE for delete; a web rename is
+//   what a page does, PUT the new name then DELETE the old, clock from before the PUT): web->machine, A's disk
+//   <folder>/hosts/<web host>/<path>.
+// A clock stops only when the reader holds the end state, so each number is what a person waits. After three ops in a
+// row that never arrive a sample stops waiting (the rest are recorded as timeouts), so a broken stack costs minutes, not hours.
 //
-// --stack local (the default, and the hourly run): accounts/scripts/dev.mjs stands up the whole stack on loopback
-// (rclone serve s3, the R2 stand-in, `wrangler dev` with a local D1) in a fresh temp dir, a test person signs in by
-// email code, a throwaway HOME runs `folder-sync login`, and everything is stopped and deleted afterwards. Ports
+// --stack local (env=test; the default and the hourly run): accounts/scripts/dev.mjs stands up the whole stack on
+// loopback (rclone serve s3, the R2 stand-in, `wrangler dev` with a local D1) in a fresh temp dir, a test person signs in
+// by email code, two throwaway HOMEs run `folder-sync login`, and everything is stopped and deleted afterwards. Ports
 // 4950-4953 unless FS_STANDIN_PORT / FS_STORE_PORT / FS_ACCOUNTS_PORT / FS_INSPECTOR_PORT say otherwise.
-// --stack prod: this machine's own signed-in session (~/.folder-sync/account.json, never printed or copied) and its
-// server, in one throwaway project, `bench-latency`, folder ~/.local/share/folder-sync-bench/bench-latency. It never
-// touches another project. The bench files are deleted at the end (folder-sync moves them to _trash/).
+// --stack prod (env=prod): this machine's own signed-in session (~/.folder-sync/account.json, never printed or copied;
+// the second machine reaches it through FOLDER_SYNC_ACCOUNT_PROCESS) and its server, in one throwaway project,
+// `bench-latency`. It never touches another project. If the account is over its storage quota, writes would be held, so
+// the run records failed points saying so instead of waiting out timeouts.
 //
 // Out (unless --no-kpi): Vibe Tracks producer files in --out (default ~/vt/zach/producers/folder-sync): kpi_catalog.json
-// (rewritten), kpi_series.jsonl and runs_table.jsonl (appended). The CLI is built from this checkout unless --cli.
+// (rewritten), kpi_series.jsonl and runs_table.jsonl (appended). The legacy sync_up_ms / sync_down_ms points (machine->web
+// add, web->machine add) are still written beside the propagation_* points. The CLI is built from this checkout unless --cli.
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, hostname, tmpdir } from "node:os";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { catalog } from "../kpi/catalog.mjs";
+import { appendPoints, codeSha, DEFAULT_OUT, percentile, sourceOf, stampOf } from "../kpi/lib.mjs";
+import { propagationPoints } from "../kpi/propagation.mjs";
+import { HOME, localStack, now, Online, prodStack, PROJECT, REPO, sleep } from "./harness.mjs";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO = resolve(HERE, "..", "..");
-const HOME = homedir();
-const PROJECT = "bench-latency";
-const BENCH_VERSION = "folder-sync-latency/1";
-const DEFAULT_OUT = join(HOME, "vt", "zach", "producers", "folder-sync");
-const PROD_FOLDER = join(HOME, ".local", "share", "folder-sync-bench", PROJECT);
-const BENCH_PORTS = { FS_STANDIN_PORT: "4950", FS_STORE_PORT: "4951", FS_ACCOUNTS_PORT: "4952", FS_INSPECTOR_PORT: "4953" };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const now = () => performance.timeOrigin + performance.now();
+export { percentile };
+const BENCH_VERSION = "folder-sync-latency/2";
+const LEGACY_VERSION = "folder-sync-latency/1";
 
 // ------------------------------------------------------------------------------------------------ options
 
 function options(argv) {
-	const o = { verb: argv[0] || "run", stack: "local", trials: 10, out: process.env.VT_PRODUCER_DIR || DEFAULT_OUT, kpi: true, cli: null, json: null, timeoutS: 120 };
+	const o = { verb: argv[0] || "run", stack: "local", trials: 6, out: DEFAULT_OUT, kpi: true, cli: null, json: null, timeoutS: 60 };
 	for (let i = 1; i < argv.length; i++) {
 		const a = argv[i];
 		const next = () => {
@@ -71,253 +78,6 @@ function options(argv) {
 	return o;
 }
 
-// ------------------------------------------------------------------------------------------------ tools
-
-function goBin() {
-	if (process.env.GO) return process.env.GO;
-	const local = join(HOME, ".local", "go", "bin", "go");
-	return existsSync(local) ? local : "go";
-}
-
-/** The pinned rclone: RCLONE, else this checkout's .tools/ (scripts/dev-tools), else the one `init` installed. */
-function rcloneBin() {
-	for (const candidate of [process.env.RCLONE, join(REPO, ".tools", "rclone"), join(HOME, ".folder-sync", "bin", "rclone")]) {
-		if (candidate && existsSync(candidate)) return resolve(candidate);
-	}
-	throw new Error("no rclone: run scripts/dev-tools, or set RCLONE");
-}
-
-function codeSha() {
-	const head = spawnSync("git", ["-C", REPO, "rev-parse", "--short=12", "HEAD"], { encoding: "utf8" });
-	const sha = head.status === 0 ? head.stdout.trim() : "unknown";
-	const status = spawnSync("git", ["-C", REPO, "status", "--porcelain", "--untracked-files=no"], { encoding: "utf8" });
-	const dirty = status.status === 0 && status.stdout.trim() !== "";
-	const branch = spawnSync("git", ["-C", REPO, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" });
-	return { sha, dirty, branch: branch.status === 0 ? branch.stdout.trim() : null };
-}
-
-function buildCli(dir, sha) {
-	const bin = join(dir, "folder-sync");
-	const built = spawnSync(goBin(), ["-C", REPO, "build", "-ldflags", `-X main.version=bench-${sha}`, "-o", bin, "./cmd/folder-sync"], { encoding: "utf8" });
-	if (built.status !== 0) throw new Error(`folder-sync build failed: ${built.stderr || built.error}`);
-	return bin;
-}
-
-// ------------------------------------------------------------------------------------------------ a machine
-
-/** One machine: a HOME and its folder-sync. `env` is what every CLI call runs with. */
-class Machine {
-	constructor({ cli, home, folder, env }) {
-		Object.assign(this, { cli, home, folder, env, watcher: null, log: "" });
-	}
-
-	run(args, timeout = 180_000) {
-		const done = spawnSync(this.cli, args, { cwd: this.home, env: this.env, encoding: "utf8", timeout });
-		return { code: done.status, out: done.stdout || "", err: done.stderr || "" };
-	}
-
-	must(args) {
-		const done = this.run(args);
-		if (done.code !== 0) throw new Error(`folder-sync ${args.join(" ")} exited ${done.code}: ${(done.out + done.err).trim().split("\n").slice(-3).join(" · ")}`);
-		return done;
-	}
-
-	hostId() {
-		return JSON.parse(readFileSync(join(this.home, ".folder-sync", "host.json"), "utf8")).id;
-	}
-
-	token() {
-		return JSON.parse(readFileSync(join(this.home, ".folder-sync", "account.json"), "utf8")).token;
-	}
-
-	/** The interval `sync --watch` runs at, from the folder's .folder-sync.toml (10 s when it names none). */
-	intervalMs() {
-		const toml = readFileSync(join(this.folder, ".folder-sync.toml"), "utf8");
-		const m = /^\s*interval\s*=\s*"(\d+(?:\.\d+)?)(ms|s|m)"/m.exec(toml);
-		if (!m) return 10_000;
-		return Number(m[1]) * { ms: 1, s: 1000, m: 60_000 }[m[2]];
-	}
-
-	/** `folder-sync sync --watch`, as a person leaves it running; resolves once it says it is watching. */
-	async watch() {
-		const child = spawn(this.cli, ["sync", "--watch", "--dir", this.folder], { cwd: this.home, env: this.env });
-		this.watcher = child;
-		child.stdout.on("data", (b) => { this.log += b; });
-		child.stderr.on("data", (b) => { this.log += b; });
-		const until = Date.now() + 60_000;
-		while (!/Watching /.test(this.log)) {
-			if (child.exitCode !== null) throw new Error(`sync --watch exited ${child.exitCode}: ${this.log.trim()}`);
-			if (Date.now() > until) throw new Error(`sync --watch did not start: ${this.log.trim()}`);
-			await sleep(50);
-		}
-	}
-
-	async stop() {
-		const child = this.watcher;
-		if (!child || child.exitCode !== null) return;
-		child.kill("SIGTERM");
-		const until = Date.now() + 15_000;
-		while (child.exitCode === null && child.signalCode === null && Date.now() < until) await sleep(50);
-		if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-	}
-}
-
-// ------------------------------------------------------------------------------------------------ online
-
-/** The online side, as a signed-in session sees it: a bearer token, never printed. */
-class Online {
-	constructor(server, token) {
-		this.server = server.replace(/\/+$/, "");
-		this.auth = { Authorization: `Bearer ${token}` };
-	}
-
-	url(path) {
-		return `${this.server}/fs/v1/folders/${PROJECT}${path}`;
-	}
-
-	async put(path, body) {
-		const answer = await fetch(this.url(`/web/${path}`), { method: "PUT", body, headers: { ...this.auth, "Content-Type": "text/plain" } });
-		const text = await answer.text();
-		if (answer.status !== 200) throw new Error(`PUT web/${path}: ${answer.status} ${text.slice(0, 200)}`);
-		return JSON.parse(text);
-	}
-
-	async remove(path) {
-		const answer = await fetch(this.url(`/web/${path}`), { method: "DELETE", headers: this.auth });
-		await answer.arrayBuffer();
-		return answer.status;
-	}
-
-	/** One read of a host's file: its bytes when it answers 200, else null. */
-	async read(host, path) {
-		try {
-			const answer = await fetch(this.url(`/files/${host}/${path}`), { headers: this.auth });
-			const bytes = Buffer.from(await answer.arrayBuffer());
-			return answer.status === 200 ? bytes : null;
-		} catch {
-			return null; // a dropped connection is "not yet", the next poll tries again
-		}
-	}
-
-	async view() {
-		const answer = await fetch(this.url(""), { headers: this.auth });
-		return answer.status === 200 ? answer.json() : null;
-	}
-}
-
-// ------------------------------------------------------------------------------------------------ the stacks
-
-/** A browser by hand on the local stack: just enough cookie jar to sign a test person in and approve a machine. */
-class Browser {
-	constructor(site) {
-		this.site = site;
-		this.jar = new Map();
-	}
-
-	async fetch(path, { method = "GET", body, headers = {} } = {}) {
-		const h = { ...headers };
-		if (this.jar.size) h.Cookie = [...this.jar].map(([k, v]) => `${k}=${v}`).join("; ");
-		if (body !== undefined) {
-			h["Content-Type"] = "application/json";
-			body = JSON.stringify(body);
-		}
-		const answer = await fetch(`${this.site}${path}`, { method, body, headers: h, redirect: "manual" });
-		for (const line of answer.headers.getSetCookie()) {
-			const [pair] = line.split(";");
-			const at = pair.indexOf("=");
-			const name = pair.slice(0, at).trim();
-			const value = pair.slice(at + 1).trim();
-			if (/max-age=0/i.test(line) || value === "") this.jar.delete(name);
-			else this.jar.set(name, value);
-		}
-		return answer;
-	}
-
-	write(path, init = {}) {
-		const user = this.userId ? { "X-Folder-Sync-User": this.userId } : {};
-		return this.fetch(path, { ...init, headers: { Origin: this.site, "X-Folder-Sync": "1", ...user, ...(init.headers || {}) } });
-	}
-}
-
-async function signIn(site, email) {
-	const browser = new Browser(site);
-	const sent = await browser.write("/fs/api/auth/email-otp/send-verification-otp", { method: "POST", body: { email, type: "sign-in" } });
-	if (!sent.ok) throw new Error(`send code: ${sent.status} ${await sent.text()}`);
-	const { code } = await (await fetch(`${site}/fs/dev/mailbox?email=${encodeURIComponent(email)}`)).json();
-	const signed = await browser.write("/fs/api/auth/sign-in/email-otp", { method: "POST", body: { email, otp: code } });
-	if (!signed.ok) throw new Error(`sign in: ${signed.status} ${await signed.text()}`);
-	browser.userId = (await (await browser.fetch("/fs/v1/me")).json()).user?.id;
-	return browser;
-}
-
-/** `folder-sync login` on the machine, approved by the test person's browser session (the device grant). */
-async function login(machine, browser) {
-	const child = spawn(machine.cli, ["login"], { cwd: machine.home, env: machine.env });
-	let out = "";
-	child.stdout.on("data", (b) => { out += b; });
-	child.stderr.on("data", (b) => { out += b; });
-	const exited = new Promise((r) => child.on("exit", (code) => r(code)));
-	const until = Date.now() + 30_000;
-	while (!/open (\S+) and approve the code (\S+)/.test(out) && Date.now() < until) await sleep(100);
-	const found = /open (\S+) and approve the code (\S+)/.exec(out);
-	if (!found) {
-		child.kill();
-		throw new Error(`folder-sync login printed no code: ${out.trim()}`);
-	}
-	const userCode = found[2].replace(/[^A-Z0-9]/gi, "").toUpperCase();
-	await browser.fetch(`/fs/api/auth/device?user_code=${encodeURIComponent(userCode)}`);
-	const approved = await browser.write("/fs/api/auth/device/approve", { method: "POST", body: { userCode } });
-	if (!approved.ok) throw new Error(`device approve: ${approved.status}`);
-	const code = await Promise.race([exited, sleep(60_000).then(() => "timeout")]);
-	if (code !== 0) {
-		child.kill();
-		throw new Error(`folder-sync login exited ${code}: ${out.trim()}`);
-	}
-}
-
-async function localStack(o, sha) {
-	const dev = await import(join(REPO, "accounts", "scripts", "dev.mjs"));
-	const scratch = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "folder-sync-latency-"));
-	const rclone = rcloneBin();
-	const env = { ...process.env, ...Object.fromEntries(Object.entries(BENCH_PORTS).map(([k, v]) => [k, process.env[k] || v])), RCLONE: rclone, GO: goBin() };
-	const stateDir = join(scratch, "stack");
-	const stack = await dev.up(stateDir, env);
-	const teardown = () => {
-		try { dev.down(stateDir); } catch { /* stopped */ }
-		rmSync(scratch, { recursive: true, force: true });
-	};
-	try {
-		const cli = o.cli || buildCli(join(scratch, "bin"), sha);
-		const home = join(scratch, "home");
-		const folder = join(home, PROJECT);
-		mkdirSync(folder, { recursive: true });
-		// WHY a bare PATH and HOME: the machine is a fresh computer with only folder-sync on it, nothing of this one's
-		const machine = new Machine({ cli, home, folder, env: { PATH: "/usr/bin:/bin", HOME: home, USERPROFILE: home, LANG: "C.UTF-8", FOLDER_SYNC_SERVER: stack.accounts, FOLDER_SYNC_RCLONE: rclone } });
-		const browser = await signIn(stack.accounts, "bench@example.com");
-		await login(machine, browser);
-		machine.must(["init", "--project", PROJECT, "--dir", folder]);
-		return { machine, server: stack.accounts, teardown, cleanup: async () => {} };
-	} catch (error) {
-		teardown();
-		throw error;
-	}
-}
-
-async function prodStack(o, sha) {
-	const accountPath = join(HOME, ".folder-sync", "account.json");
-	if (!existsSync(accountPath)) throw new Error("prod is unmeasured: this machine is not signed in (no ~/.folder-sync/account.json); run folder-sync login");
-	const account = JSON.parse(readFileSync(accountPath, "utf8"));
-	const scratch = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "folder-sync-latency-"));
-	const cli = o.cli || buildCli(scratch, sha);
-	mkdirSync(PROD_FOLDER, { recursive: true });
-	const machine = new Machine({ cli, home: HOME, folder: PROD_FOLDER, env: { ...process.env } });
-	if (!existsSync(join(PROD_FOLDER, ".folder-sync.toml"))) machine.must(["init", "--project", PROJECT, "--dir", PROD_FOLDER]);
-	const project = readFileSync(join(PROD_FOLDER, ".folder-sync.toml"), "utf8");
-	// WHY refuse: the bench deletes what it wrote; it must only ever run in its own project
-	if (!new RegExp(`^\\s*project\\s*=\\s*"${PROJECT}"`, "m").test(project)) throw new Error(`${PROD_FOLDER} is not the ${PROJECT} project; refusing`);
-	return { machine, server: account.server, teardown: () => rmSync(scratch, { recursive: true, force: true }), cleanup: async () => {} };
-}
-
 // ------------------------------------------------------------------------------------------------ the trials
 
 function body(id) {
@@ -332,149 +92,198 @@ function same(path, want) {
 	}
 }
 
-async function up(machine, online, host, id, timeoutMs) {
-	const rel = `bench/${id}.txt`;
-	const want = body(id);
-	const target = join(machine.folder, "bench", `${id}.txt`);
-	mkdirSync(dirname(target), { recursive: true });
-	const t0 = now();
-	// WHY write-then-rename: an editor's save; the watcher never sees a half-written file
-	writeFileSync(`${target}.tmp~`, want);
-	renameSync(`${target}.tmp~`, target);
-	const deadline = t0 + timeoutMs;
+/** Polls `probe` every `every` ms until it is true or `deadline`; the ms since t0, or null. */
+async function settle(probe, t0, deadline, every) {
 	while (now() < deadline) {
 		const started = now();
-		const got = await online.read(host, rel);
-		if (got && got.equals(want)) return { id, ms: Math.round(now() - t0), path: rel };
-		await sleep(Math.max(0, 50 - (now() - started)));
+		if (await probe()) return Math.round(now() - t0);
+		await sleep(Math.max(0, every - (now() - started)));
 	}
-	return { id, ms: null, path: rel, timeout: true };
+	return null;
 }
 
-async function down(machine, online, webHost, id, timeoutMs) {
+/** The end state a reader must hold: these paths have these bytes (`null` = the path is gone). */
+const holds = (check, states) => async () => {
+	for (const [path, bytes] of states) if (!(await check(path, bytes))) return false;
+	return true;
+};
+
+/** Runs one chain of ops; `ops` is [{op, act, readers: [{direction, probe, every}]}]. After three ops in a row nobody
+ *  received, the rest are recorded as timeouts without waiting. */
+async function chain(ops, id, interval, timeoutMs, onRow) {
+	let dead = 0;
+	for (const step of ops) {
+		const row = (reader, ms, extra = {}) => onRow({ direction: reader.direction, op: step.op, id, ms, ...(ms === null ? { timeout: true } : {}), ...extra });
+		if (dead >= 3) {
+			for (const reader of step.readers) row(reader, null, { skipped: "three earlier ops in this sample never arrived" });
+			continue;
+		}
+		// WHY a random wait across a whole interval: an op started at one fixed phase of the round timer would
+		// measure that phase, not what a person sees
+		await sleep(200 + Math.random() * interval);
+		const t0 = now();
+		let extra = {};
+		try {
+			extra = (await step.act()) || {};
+		} catch (error) {
+			for (const reader of step.readers) row(reader, null, { error: String(error.message || error).slice(0, 200) });
+			dead++;
+			continue;
+		}
+		const deadline = t0 + timeoutMs;
+		const results = await Promise.all(step.readers.map((reader) => settle(reader.probe, t0, deadline, reader.every)));
+		step.readers.forEach((reader, i) => row(reader, results[i], extra));
+		dead = results.every((ms) => ms === null) ? dead + 1 : 0;
+	}
+}
+
+/** Machine A's sample: one file through add, edit, rename, delete; machine->web and machine->machine race each write. */
+function machineChain(ctx, id) {
+	const { A, B, online, host } = ctx;
 	const rel = `bench/${id}.txt`;
-	const want = body(id);
-	const target = join(machine.folder, "hosts", webHost, "bench", `${id}.txt`);
+	const moved = `bench/${id}-renamed.txt`;
+	const v1 = body(`${id}-1`);
+	const v2 = body(`${id}-2`);
+	const put = (path, bytes) => {
+		const target = join(A.folder, path);
+		mkdirSync(dirname(target), { recursive: true });
+		// WHY write-then-rename: an editor's save; the watcher never sees a half-written file
+		writeFileSync(`${target}.tmp~`, bytes);
+		renameSync(`${target}.tmp~`, target);
+	};
+	const web = (states) => ({ direction: "machine->web", every: 50, probe: holds(async (path, bytes) => {
+		const got = await online.get(host, path);
+		return bytes ? got.status === 200 && got.bytes.equals(bytes) : got.status === 404;
+	}, states) });
+	const disk = (states) => ({ direction: "machine->machine", every: 10, probe: holds(async (path, bytes) => {
+		const file = join(B.folder, "hosts", host, path);
+		return bytes ? same(file, bytes) : !existsSync(file);
+	}, states) });
+	const readers = (states) => [web(states), ...(B ? [disk(states)] : [])];
+	return [
+		{ op: "add", act: () => put(rel, v1), readers: readers([[rel, v1]]) },
+		{ op: "edit", act: () => put(rel, v2), readers: readers([[rel, v2]]) },
+		{ op: "rename", act: () => renameSync(join(A.folder, rel), join(A.folder, moved)), readers: readers([[moved, v2], [rel, null]]) },
+		{ op: "delete", act: () => rmSync(join(A.folder, moved)), readers: readers([[moved, null]]) },
+	];
+}
+
+/** The web host's sample: PUT / PUT / PUT+DELETE / DELETE; web->machine is A's disk under hosts/<web host>/. */
+function webChain(ctx, id) {
+	const { A, online, webHost } = ctx;
+	const rel = `bench/${id}.txt`;
+	const moved = `bench/${id}-renamed.txt`;
+	const v1 = body(`${id}-1`);
+	const v2 = body(`${id}-2`);
+	const disk = (states) => ({ direction: "web->machine", every: 10, probe: holds(async (path, bytes) => {
+		const file = join(A.folder, "hosts", webHost, path);
+		return bytes ? same(file, bytes) : !existsSync(file);
+	}, states) });
+	return [
+		{ op: "add", act: async () => ({ put_ms: await timed(() => online.put(rel, v1)) }), readers: [disk([[rel, v1]])] },
+		{ op: "edit", act: async () => ({ put_ms: await timed(() => online.put(rel, v2)) }), readers: [disk([[rel, v2]])] },
+		{ op: "rename", act: async () => ({ put_ms: await timed(async () => { await online.put(moved, v2); await online.remove(rel); }) }), readers: [disk([[moved, v2], [rel, null]])] },
+		{ op: "delete", act: async () => ({ put_ms: await timed(() => online.remove(moved)) }), readers: [disk([[moved, null]])] },
+	];
+}
+
+async function timed(fn) {
 	const t0 = now();
-	const put = await online.put(rel, want);
-	const putMs = Math.round(now() - t0);
-	const deadline = t0 + timeoutMs;
-	while (now() < deadline) {
-		if (same(target, want)) return { id, ms: Math.round(now() - t0), put_ms: putMs, path: rel, seq: put.seq };
-		await sleep(10);
-	}
-	return { id, ms: null, put_ms: putMs, path: rel, timeout: true };
+	await fn();
+	return Math.round(now() - t0);
 }
 
-/** p-th percentile, linear between the closest ranks (numpy's default); null on no values. */
-export function percentile(values, p) {
-	const v = values.filter((x) => typeof x === "number").sort((a, b) => a - b);
-	if (!v.length) return null;
-	const rank = (p / 100) * (v.length - 1);
-	const lo = Math.floor(rank);
-	const hi = Math.ceil(rank);
-	return Math.round(v[lo] + (v[hi] - v[lo]) * (rank - lo));
-}
-
-function summary(trials) {
-	const ms = trials.map((t) => t.ms).filter((x) => typeof x === "number");
-	return { n: ms.length, timeouts: trials.length - ms.length, p50: percentile(ms, 50), p95: percentile(ms, 95), max: ms.length ? Math.max(...ms) : null, min: ms.length ? Math.min(...ms) : null };
+function summary(rows) {
+	const ms = rows.map((t) => t.ms).filter((x) => typeof x === "number");
+	return { n: ms.length, timeouts: rows.length - ms.length, p50: percentile(ms, 50), p95: percentile(ms, 95), max: ms.length ? Math.max(...ms) : null, min: ms.length ? Math.min(...ms) : null };
 }
 
 async function measure(o) {
 	const code = codeSha();
 	const sha = code.dirty ? `${code.sha}+dirty` : code.sha;
 	const started = new Date();
-	const stack = o.stack === "local" ? await localStack(o, code.sha) : await prodStack(o, code.sha);
-	const { machine } = stack;
-	const online = new Online(stack.server, machine.token());
-	const result = { stack: o.stack, server: stack.server, code: { ...code, label: sha }, started: started.toISOString(), up: [], down: [] };
+	const result = { stack: o.stack, env: o.stack === "local" ? "test" : "prod", server: null, code: { ...code, label: sha }, started: started.toISOString(), trials: [], samples: o.trials, refused: null };
+	if (o.stack === "prod") {
+		if (!existsSync(join(HOME, ".folder-sync", "account.json"))) throw new Error("prod is unmeasured: this machine is not signed in (no ~/.folder-sync/account.json); run folder-sync login");
+		const account = JSON.parse(readFileSync(join(HOME, ".folder-sync", "account.json"), "utf8"));
+		result.server = account.server;
+		const usage = await new Online(account.server, account.token).usage();
+		// WHY not try anyway: over its quota the account holds every upload, so each op would wait out its timeout and say
+		// nothing the quota does not say better (and nothing is initialised or written online before this check)
+		if (usage.over) {
+			result.refused = `account is over its storage quota, so writes are held: ${usage.over}`.slice(0, 300);
+			console.error(`prod refused: ${result.refused}`);
+			return finish(result);
+		}
+	}
+	const stack = o.stack === "local" ? await localStack({ cli: o.cli, sha: code.sha, machines: 2 }) : prodStack({ cli: o.cli, sha: code.sha, second: true });
+	result.server = stack.server;
+	const [A, B] = stack.machines;
+	const online = new Online(stack.server, stack.token || A.token());
 	try {
-		const host = machine.hostId();
+		const host = A.hostId();
 		// WHY a file that stays: deleting every bench file would leave the folder empty, and folder-sync's
 		// empty-folder guard (rightly) refuses to push a round that deletes everything, so the tidy would never land
-		const keep = join(machine.folder, "README.txt");
-		if (!existsSync(keep)) writeFileSync(keep, "folder-sync's latency bench (bench/latency/bench.mjs) writes and deletes its trial files here.\n");
-		// Set-up, never timed: the web host exists and this machine knows it (else the first down trial would wait
-		// for host discovery, every 5 min, which is the "new machine" path, not this one)
+		const keep = join(A.folder, "README.txt");
+		if (!existsSync(keep)) writeFileSync(keep, "folder-sync's propagation bench (bench/latency/bench.mjs) writes and deletes its trial files here.\n");
+		// Set-up, never timed: A has pushed once, the web host exists, and both machines know every host (else the first
+		// trial would wait for host discovery, every 5 min, which is the "new machine" path, not this one)
+		A.must(["sync", "--once", "--dir", A.folder]);
 		const warm = `warmup-${Date.now()}`;
 		const made = await online.put(`bench/${warm}.txt`, body(warm));
 		const webHost = made.host;
-		machine.must(["sync", "--once", "--discover", "--dir", machine.folder]);
-		await machine.watch();
-		const interval = machine.intervalMs();
+		A.must(["sync", "--once", "--discover", "--dir", A.folder]);
+		B.must(["sync", "--once", "--discover", "--dir", B.folder]);
+		await A.watch();
+		await B.watch();
+		const interval = A.intervalMs();
 		result.interval_ms = interval;
 		result.web_host = webHost;
-		await sleep(1500); // its first round (a reconcile) runs now; trials start after it
+		await sleep(1500); // each machine's first round (a reconcile) runs now; trials start after it
 		const stamp = Date.now().toString(36);
+		const ctx = { A, B, online, host, webHost };
+		const timeoutMs = o.timeoutS * 1000;
 		for (let n = 0; n < o.trials; n++) {
-			// WHY a random wait across a whole interval: a trial started at one fixed phase of the round timer would
-			// measure that phase, not what a person sees
-			await sleep(200 + Math.random() * interval);
-			const trial = await up(machine, online, host, `up-${stamp}-${n}`, o.timeoutS * 1000);
-			result.up.push(trial);
-			console.error(`up   ${n + 1}/${o.trials}: ${trial.ms ?? "timeout"} ms`);
+			await chain(machineChain(ctx, `m-${stamp}-${n}`), `m-${stamp}-${n}`, interval, timeoutMs, (row) => result.trials.push(row));
+			console.error(`machine sample ${n + 1}/${o.trials}: ${result.trials.slice(-8).map((t) => `${t.direction.split("->")[1][0]}:${t.op}=${t.ms ?? "x"}`).join(" ")}`);
 		}
 		for (let n = 0; n < o.trials; n++) {
-			await sleep(200 + Math.random() * interval);
-			const trial = await down(machine, online, webHost, `down-${stamp}-${n}`, o.timeoutS * 1000);
-			result.down.push(trial);
-			console.error(`down ${n + 1}/${o.trials}: ${trial.ms ?? "timeout"} ms (PUT ${trial.put_ms} ms)`);
+			await chain(webChain(ctx, `w-${stamp}-${n}`), `w-${stamp}-${n}`, interval, timeoutMs, (row) => result.trials.push(row));
+			console.error(`web sample ${n + 1}/${o.trials}: ${result.trials.slice(-4).map((t) => `${t.op}=${t.ms ?? "x"}`).join(" ")}`);
 		}
-		// tidy (prod: the bench's own files only; folder-sync moves them to _trash/)
-		if (o.stack === "prod") {
-			for (const t of result.up) rmSync(join(machine.folder, t.path), { force: true });
-			for (const t of [...result.down, { path: `bench/${warm}.txt` }]) await online.remove(t.path);
-			await sleep(interval + 3000);
-		}
+		// tidy: the chains delete their own files; the warm-up file is the one left (prod: folder-sync moves it to history)
+		await online.remove(`bench/${warm}.txt`);
+		if (o.stack === "prod") await sleep(interval + 3000);
 	} finally {
-		await machine.stop();
+		await A.stop();
+		await B.stop();
 		stack.teardown();
 	}
+	return finish(result);
+}
+
+function finish(result) {
 	result.finished = new Date().toISOString();
+	// the legacy shapes: sync_up_ms = machine->web add, sync_down_ms = web->machine add
+	result.up = result.trials.filter((t) => t.direction === "machine->web" && t.op === "add");
+	result.down = result.trials.filter((t) => t.direction === "web->machine" && t.op === "add");
 	result.summary = { up: summary(result.up), down: summary(result.down) };
 	return result;
 }
 
 // ------------------------------------------------------------------------------------------------ Vibe Tracks
 
-/** RFC 3339 with this machine's offset, as the other producers write it. */
-function stampOf(date) {
-	const off = -date.getTimezoneOffset();
-	const pad = (n) => String(Math.trunc(Math.abs(n))).padStart(2, "0");
-	const local = new Date(date.getTime() + off * 60_000).toISOString().slice(0, 19);
-	return `${local}${off >= 0 ? "+" : "-"}${pad(off / 60)}:${pad(off % 60)}`;
-}
-
-export function catalog(generatedAt) {
-	const common = { unit: "ms", direction: "lower", facets: ["stack", "code_sha"], aggregate: null, computed_from: "runs", scale: "linear", cadence_s: 3600, lines_by: "stack", line_values: ["local", "prod"] };
-	const how = "folder-sync bench/latency/bench.mjs: 10 trials per run, each at a random phase of `sync --watch`'s interval. The headline is the local stack (rclone serve s3 + the R2 stand-in + wrangler dev on loopback), hourly; the prod line is this machine's signed-in session against the deployed Worker and R2, run by hand.";
-	return {
-		schema: "vt-kpi-catalog/1",
-		generated_at: generatedAt,
-		unit_of_iteration: "run",
-		title: "folder-sync latency: a machine's disk <-> online",
-		producer: { name: "folder-sync bench/latency/bench.mjs", bench_version: BENCH_VERSION, repo: "/home/bam/folder-sync", doc: "README.md#latency-kpi" },
-		cadence_s: 3600,
-		kpis: [
-			{ id: "sync_up_ms", title: "Disk to online (p50)", level: 0, parent: null, ...common, description: `A file saved into a synced folder, until GET /fs/v1/folders/<project>/files/<host>/<path> serves its bytes: what anyone reading it online waits. ${how}`, formula: "p50 over the run's trials of (first 200 with the same bytes, polled every 50 ms) - (the write)" },
-			{ id: "sync_down_ms", title: "Online to disk (p50)", level: 0, parent: null, ...common, description: `A file saved online through the web host (PUT /fs/v1/folders/<project>/web/<path>, the call a page makes), until it is on the machine's disk at <folder>/hosts/<web host>/<path>. ${how}`, formula: "p50 over the run's trials of (file on disk with the same bytes, polled every 10 ms) - (the PUT sent)" },
-			{ id: "sync_up_ms_p95", title: "Disk to online (p95)", level: 1, parent: "sync_up_ms", ...common, description: "The slow tail of sync_up_ms: the 95th percentile of the same trials.", formula: "p95 (linear between ranks) over the run's trials" },
-			{ id: "sync_down_ms_p95", title: "Online to disk (p95)", level: 1, parent: "sync_down_ms", ...common, description: "The slow tail of sync_down_ms: the 95th percentile of the same trials.", formula: "p95 (linear between ranks) over the run's trials" },
-		],
-	};
-}
-
+/** The legacy points: sync_up_ms / sync_down_ms and their p95, exactly as the bench has always written them. */
 export function points(result, runId, t) {
 	const out = [];
 	const host = hostname();
-	const source = { code_sha: result.code.label, bench_version: BENCH_VERSION, run_ids: [runId], dirty: result.code.dirty };
+	const source = { code_sha: result.code.label, bench_version: LEGACY_VERSION, run_ids: [runId], dirty: result.code.dirty };
 	for (const [dir, s] of [["up", result.summary.up], ["down", result.summary.down]]) {
 		for (const [kpi, value] of [[`sync_${dir}_ms`, s.p50], [`sync_${dir}_ms_p95`, s.p95]]) {
 			const labels = { stack: result.stack, n: s.n, p50: s.p50, p95: s.p95, max: s.max, timeouts: s.timeouts, interval_ms: result.interval_ms, host, branch: result.code.branch, code_sha: result.code.label };
 			const base = { schema: "vt-kpi-point/1", kpi, t, value, n: s.n, status: value === null ? "not_measured" : "measured", labels, source };
 			// WHY the unsliced (headline) point is the local stack only: it runs every hour on the same machine, so
-			// its trend is the code's; prod runs by hand over the internet and is its own line, never mixed in
+			// its trend is the code's; prod is its own line, never mixed in
 			// (and the code_sha slice too, so one version's local numbers are never averaged with prod's)
 			out.push({ ...base, slice: { stack: result.stack } });
 			if (result.stack === "local") out.push(base, { ...base, slice: { code_sha: result.code.label } });
@@ -484,29 +293,39 @@ export function points(result, runId, t) {
 }
 
 export function runRow(result, runId, t) {
+	const by = (direction, op) => summary(result.trials.filter((x) => x.direction === direction && (op === "mixed" || x.op === op)));
+	const metrics = { samples: result.samples, duration_s: Math.round((Date.parse(result.finished) - Date.parse(result.started)) / 100) / 10 };
+	for (const [tag, direction] of [["m2m", "machine->machine"], ["m2w", "machine->web"], ["w2m", "web->machine"]]) {
+		const s = by(direction, "mixed");
+		Object.assign(metrics, { [`${tag}_n`]: s.n, [`${tag}_p50_ms`]: s.p50, [`${tag}_p95_ms`]: s.p95, [`${tag}_max_ms`]: s.max, [`${tag}_timeouts`]: s.timeouts });
+	}
 	return {
 		schema: "vt-run/1",
 		run_id: runId,
 		t,
-		facets: { stack: result.stack, code_sha: result.code.label, branch: result.code.branch, dirty: result.code.dirty, host: hostname(), server: result.server, interval_ms: result.interval_ms },
-		metrics: {
-			trials: result.up.length,
-			up_n: result.summary.up.n, up_p50_ms: result.summary.up.p50, up_p95_ms: result.summary.up.p95, up_max_ms: result.summary.up.max, up_timeouts: result.summary.up.timeouts,
-			down_n: result.summary.down.n, down_p50_ms: result.summary.down.p50, down_p95_ms: result.summary.down.p95, down_max_ms: result.summary.down.max, down_timeouts: result.summary.down.timeouts,
-			duration_s: Math.round((Date.parse(result.finished) - Date.parse(result.started)) / 100) / 10,
-		},
-		trials: { up: result.up.map((x) => x.ms), down: result.down.map((x) => x.ms) },
+		facets: { stack: result.stack, env: result.env, code_sha: result.code.label, branch: result.code.branch, dirty: result.code.dirty, host: hostname(), server: result.server, interval_ms: result.interval_ms ?? null, refused: result.refused },
+		metrics,
+		trials: Object.fromEntries(["machine->machine", "machine->web", "web->machine"].map((d) => [d, result.trials.filter((x) => x.direction === d).map((x) => ({ op: x.op, ms: x.ms }))])),
 	};
 }
 
-function writeKpi(dir, result) {
+export function writeKpi(dir, result) {
 	mkdirSync(dir, { recursive: true });
 	const t = stampOf(new Date(result.finished));
 	const runId = `latency-${result.stack}-${result.finished.replace(/[-:]/g, "").slice(0, 15)}-${result.code.label}`;
 	const tmp = join(dir, `.kpi_catalog.json.${process.pid}`);
 	writeFileSync(tmp, `${JSON.stringify(catalog(t), null, 1)}\n`);
 	renameSync(tmp, join(dir, "kpi_catalog.json"));
-	appendFileSync(join(dir, "kpi_series.jsonl"), points(result, runId, t).map((p) => JSON.stringify(p)).join("\n") + "\n");
+	const source = sourceOf(BENCH_VERSION, runId, { sha: result.code.sha, dirty: result.code.dirty });
+	const labels = { stack: result.stack, host: hostname(), branch: result.code.branch, interval_ms: result.interval_ms ?? null, samples: result.samples, bench: "bench/latency/bench.mjs" };
+	const rows = result.refused
+		? ["machine->machine", "machine->web", "web->machine"].flatMap((direction) => ["add", "edit", "delete", "rename"].map((op) => ({ direction, op, ms: null, timeout: true })))
+		: result.trials;
+	const fresh = [
+		...(result.refused ? [] : points(result, runId, t)),
+		...propagationPoints(rows, { env: result.env, t, source, labels, failReason: result.refused }),
+	];
+	appendPoints(dir, fresh);
 	appendFileSync(join(dir, "runs_table.jsonl"), `${JSON.stringify(runRow(result, runId, t))}\n`);
 	return runId;
 }
@@ -516,7 +335,7 @@ function writeKpi(dir, result) {
 function installTimer() {
 	const units = join(HOME, ".config", "systemd", "user");
 	mkdirSync(units, { recursive: true });
-	const go = goBin();
+	const go = process.env.GO || join(HOME, ".local", "go", "bin", "go");
 	// WHY the system node when there is one: the timer must not depend on whichever node this shell found first
 	const node = process.env.NODE || (existsSync("/usr/bin/node") ? "/usr/bin/node" : process.execPath);
 	const service = `[Unit]
@@ -556,6 +375,14 @@ WantedBy=timers.target
 
 // ------------------------------------------------------------------------------------------------ main
 
+/** One run: measure, write the KPI files, return what run-all.mjs and the CLI print. */
+export async function run(o) {
+	const result = await measure(o);
+	if (o.json) writeFileSync(o.json, JSON.stringify(result, null, 1));
+	if (o.kpi) result.run_id = writeKpi(o.out, result);
+	return result;
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 	let code = 0;
 	try {
@@ -563,10 +390,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
 		if (o.verb === "install-timer") {
 			installTimer();
 		} else if (o.verb === "run") {
-			const result = await measure(o);
-			if (o.json) writeFileSync(o.json, JSON.stringify(result, null, 1));
-			if (o.kpi) result.run_id = writeKpi(o.out, result);
-			console.log(JSON.stringify({ stack: result.stack, code_sha: result.code.label, interval_ms: result.interval_ms, run_id: result.run_id ?? null, up: result.summary.up, down: result.summary.down }));
+			const result = await run(o);
+			const cell = (d) => summary(result.trials.filter((t) => t.direction === d));
+			console.log(JSON.stringify({ stack: result.stack, code_sha: result.code.label, interval_ms: result.interval_ms ?? null, run_id: result.run_id ?? null, refused: result.refused, "machine->machine": cell("machine->machine"), "machine->web": cell("machine->web"), "web->machine": cell("web->machine") }));
 		} else {
 			throw new Error("usage: node bench/latency/bench.mjs run|install-timer [options]");
 		}

@@ -1,0 +1,169 @@
+{
+ "schema": "folder-sync-prices/1",
+ "date_accessed": "2026-11-04",
+ "currency": "USD",
+ "about": "List prices, pay-as-you-go, from each vendor's own pricing page. Every numeric price has a `sources` entry (url, the quoted text, date_accessed). No free tier is applied by the cost model unless asked (a free tier is per account, a per-person cost at scale is not). bench/cost/model.test.mjs fails if a price has no source.",
+ "month_days": 30,
+ "providers": {
+  "r2": {
+   "name": "Cloudflare R2 (Standard)",
+   "storage_per_gb_month": 0.015,
+   "class_a_per_million": 4.5,
+   "class_b_per_million": 0.36,
+   "egress_per_gb": 0,
+   "min_monthly_usd": 0,
+   "free_tier": { "storage_gb": 10, "class_a_million": 1, "class_b_million": 10 },
+   "notes": "Deletes are free. Egress is free.",
+   "sources": {
+    "storage_per_gb_month": { "url": "https://developers.cloudflare.com/r2/pricing/", "quote": "Storage: \"$0.015 / GB-month\" (Standard)", "date_accessed": "2026-11-04" },
+    "class_a_per_million": { "url": "https://developers.cloudflare.com/r2/pricing/", "quote": "Class A operations: \"$4.50 / million requests\"", "date_accessed": "2026-11-04" },
+    "class_b_per_million": { "url": "https://developers.cloudflare.com/r2/pricing/", "quote": "Class B operations: \"$0.36 / million requests\"", "date_accessed": "2026-11-04" },
+    "egress_per_gb": { "url": "https://developers.cloudflare.com/r2/pricing/", "quote": "Egress: \"Free\"", "date_accessed": "2026-11-04" },
+    "min_monthly_usd": { "url": "https://developers.cloudflare.com/r2/pricing/", "quote": "no minimum is stated on the pricing page", "date_accessed": "2026-11-04" }
+   }
+  },
+  "s3": {
+   "name": "AWS S3 Standard (us-east-1)",
+   "storage_per_gb_month": 0.023,
+   "class_a_per_million": 5,
+   "class_b_per_million": 0.4,
+   "egress_per_gb": null,
+   "min_monthly_usd": 0,
+   "notes": "Internet egress is billed per GB after the account's first 100 GB a month, but the per-GB rate was not readable from the fetched page text, so it is left null and the model reports S3 as a lower bound. The us-east-1 request and storage rates were confirmed through AWS documentation and blog text; the price-list JSON read directly was us-west-2 (identical figures).",
+   "sources": {
+    "storage_per_gb_month": { "url": "https://aws.amazon.com/s3/pricing/", "quote": "S3 Standard \"Standard Storage First 50 TB per GB Mo\" price 0.0230000000 (us-west-2 in https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/s3/USD/current/s3.json; us-east-1 $0.023 per AWS docs)", "date_accessed": "2026-11-04" },
+    "class_a_per_million": { "url": "https://aws.amazon.com/s3/pricing/", "quote": "\"PUT COPY/POST or LIST requests per Requests\" 0.0000050000 = $0.005 per 1,000", "date_accessed": "2026-11-04" },
+    "class_b_per_million": { "url": "https://aws.amazon.com/s3/pricing/", "quote": "\"GET and all other requests per Requests\" 0.0000004000 = $0.0004 per 1,000", "date_accessed": "2026-11-04" },
+    "egress_per_gb": { "url": "https://aws.amazon.com/s3/pricing/", "quote": "not quoted: only \"Data transferred out to the internet for the first 100GB per month\" is free was readable", "date_accessed": "2026-11-04" },
+    "min_monthly_usd": { "url": "https://aws.amazon.com/s3/pricing/", "quote": "no minimum charge on S3 Standard", "date_accessed": "2026-11-04" }
+   }
+  },
+  "gcs": {
+   "name": "Google Cloud Storage Standard (single region)",
+   "storage_per_gb_month": 0.02,
+   "class_a_per_million": 5,
+   "class_b_per_million": 0.4,
+   "egress_per_gb": null,
+   "min_monthly_usd": 0,
+   "notes": "Egress rate not readable from the fetched pages (tiered by destination), so null and GCS is reported as a lower bound. Storage and operation rates are from Google's pricing and pricing-examples pages as returned by search; the pricing page body itself did not render in the fetch tool.",
+   "sources": {
+    "storage_per_gb_month": { "url": "https://cloud.google.com/storage/pricing-examples", "quote": "\"Standard storage in a single region\" $0.020 per GB per month (pricing examples, us-east1)", "date_accessed": "2026-11-04" },
+    "class_a_per_million": { "url": "https://cloud.google.com/storage/pricing", "quote": "Standard Class A operations $0.005 per 1,000 (flat namespace)", "date_accessed": "2026-11-04" },
+    "class_b_per_million": { "url": "https://cloud.google.com/storage/pricing", "quote": "Standard Class B operations $0.0004 per 1,000", "date_accessed": "2026-11-04" },
+    "egress_per_gb": { "url": "https://cloud.google.com/vpc/network-pricing", "quote": "not readable in the fetched page text", "date_accessed": "2026-11-04" },
+    "min_monthly_usd": { "url": "https://cloud.google.com/storage/pricing", "quote": "no minimum charge on Standard storage", "date_accessed": "2026-11-04" }
+   }
+  },
+  "b2": {
+   "name": "Backblaze B2",
+   "storage_per_gb_month": 0.00695,
+   "class_a_per_million": 0,
+   "class_b_per_million": 0,
+   "egress_per_gb": 0.01,
+   "egress_free_multiple_of_stored": 3,
+   "min_monthly_usd": 0,
+   "free_tier": { "storage_gb": 10 },
+   "notes": "$6.95 per TB per month (decimal TB: $0.00695 per GB). Egress is free up to 3x the average stored data, $0.01 per GB beyond. Class A, B and C calls are free; no minimum storage duration.",
+   "sources": {
+    "storage_per_gb_month": { "url": "https://www.backblaze.com/cloud-storage/pricing", "quote": "B2 standard: \"$6.95 / TB / mo\"", "date_accessed": "2026-11-04" },
+    "class_a_per_million": { "url": "https://www.backblaze.com/cloud-storage/pricing", "quote": "\"Class A, B, and C API calls are free\"", "date_accessed": "2026-11-04" },
+    "class_b_per_million": { "url": "https://www.backblaze.com/cloud-storage/pricing", "quote": "\"Class A, B, and C API calls are free\"", "date_accessed": "2026-11-04" },
+    "egress_per_gb": { "url": "https://www.backblaze.com/cloud-storage/pricing", "quote": "free egress \"up to 3x\" average monthly stored data; overage \"$0.01/GB\"", "date_accessed": "2026-11-04" },
+    "egress_free_multiple_of_stored": { "url": "https://www.backblaze.com/cloud-storage/pricing", "quote": "free egress \"up to 3x\" average monthly stored data", "date_accessed": "2026-11-04" },
+    "min_monthly_usd": { "url": "https://www.backblaze.com/cloud-storage/pricing", "quote": "\"No minimum file size fees\" and \"No minimum storage duration fees\"", "date_accessed": "2026-11-04" }
+   }
+  },
+  "wasabi": {
+   "name": "Wasabi (Pay as You Go)",
+   "storage_per_gb_month": 0.00799,
+   "class_a_per_million": 0,
+   "class_b_per_million": 0,
+   "egress_per_gb": 0,
+   "min_monthly_usd": 7.99,
+   "min_storage_days": 90,
+   "notes": "$7.99 per TB per month. The minimum monthly charge is tied to 1 TB of active storage per account (so $7.99 a month whatever is stored), and a deleted object is billed for 90 days. Both hurt a history store that deletes often.",
+   "sources": {
+    "storage_per_gb_month": { "url": "https://wasabi.com/pricing", "quote": "Pay as You Go \"Starting at\" \"$7.99\" per TB/month", "date_accessed": "2026-11-04" },
+    "class_a_per_million": { "url": "https://wasabi.com/pricing", "quote": "\"No charge for egress or API requests\"", "date_accessed": "2026-11-04" },
+    "class_b_per_million": { "url": "https://wasabi.com/pricing", "quote": "\"No charge for egress or API requests\"", "date_accessed": "2026-11-04" },
+    "egress_per_gb": { "url": "https://wasabi.com/pricing", "quote": "\"No charge for egress or API requests\"; egress $0", "date_accessed": "2026-11-04" },
+    "min_monthly_usd": { "url": "https://wasabi.com/pricing", "quote": "Minimum monthly charge: \"Yes, tied to 1 TB active storage per account\" (1 TB x $7.99)", "date_accessed": "2026-11-04" },
+    "min_storage_days": { "url": "https://wasabi.com/pricing", "quote": "Minimum storage duration: \"90 days\" for Pay as You Go", "date_accessed": "2026-11-04" }
+   }
+  }
+ },
+ "platform": {
+  "workers": {
+   "base_usd_month": 5,
+   "requests_included_million": 10,
+   "per_million": 0.3,
+   "sources": {
+    "base_usd_month": { "url": "https://developers.cloudflare.com/workers/platform/pricing/", "quote": "Workers Paid: \"$5 USD per month\" minimum", "date_accessed": "2026-11-04" },
+    "requests_included_million": { "url": "https://developers.cloudflare.com/workers/platform/pricing/", "quote": "\"10 million included per month\"", "date_accessed": "2026-11-04" },
+    "per_million": { "url": "https://developers.cloudflare.com/workers/platform/pricing/", "quote": "\"+$0.30 per additional million\"", "date_accessed": "2026-11-04" }
+   }
+  },
+  "durable_objects": {
+   "requests_included_million": 1,
+   "per_million": 0.15,
+   "websocket_incoming_ratio": 20,
+   "sqlite_rows_read_per_million": 0.001,
+   "sqlite_rows_written_per_million": 1,
+   "sqlite_storage_per_gb_month": 0.2,
+   "sources": {
+    "requests_included_million": { "url": "https://developers.cloudflare.com/durable-objects/platform/pricing/", "quote": "Requests: \"1 million / month, + $0.15/million\"", "date_accessed": "2026-11-04" },
+    "per_million": { "url": "https://developers.cloudflare.com/durable-objects/platform/pricing/", "quote": "Requests: \"1 million / month, + $0.15/million\"", "date_accessed": "2026-11-04" },
+    "websocket_incoming_ratio": { "url": "https://developers.cloudflare.com/durable-objects/platform/pricing/", "quote": "\"a 20:1 ratio is applied to incoming WebSocket messages\"; outgoing messages are free", "date_accessed": "2026-11-04" },
+    "sqlite_rows_read_per_million": { "url": "https://developers.cloudflare.com/durable-objects/platform/pricing/", "quote": "Rows read: \"First 25 billion / month included + $0.001 / million rows\"", "date_accessed": "2026-11-04" },
+    "sqlite_rows_written_per_million": { "url": "https://developers.cloudflare.com/durable-objects/platform/pricing/", "quote": "Rows written: \"First 50 million / month included + $1.00 / million rows\"", "date_accessed": "2026-11-04" },
+    "sqlite_storage_per_gb_month": { "url": "https://developers.cloudflare.com/durable-objects/platform/pricing/", "quote": "Stored data: \"5 GB-month, + $0.20/ GB-month\"", "date_accessed": "2026-11-04" }
+   }
+  },
+  "d1": {
+   "rows_read_per_million": 0.001,
+   "rows_written_per_million": 1,
+   "storage_per_gb_month": 0.75,
+   "sources": {
+    "rows_read_per_million": { "url": "https://developers.cloudflare.com/d1/platform/pricing/", "quote": "Rows read: \"First 25 billion / month included + $0.001 / million rows\"", "date_accessed": "2026-11-04" },
+    "rows_written_per_million": { "url": "https://developers.cloudflare.com/d1/platform/pricing/", "quote": "Rows written: \"First 50 million / month included + $1.00 / million rows\"", "date_accessed": "2026-11-04" },
+    "storage_per_gb_month": { "url": "https://developers.cloudflare.com/d1/platform/pricing/", "quote": "Storage: \"First 5 GB included + $0.75 / GB-mo\"", "date_accessed": "2026-11-04" }
+   }
+  }
+ },
+ "competitors": {
+  "obsidian_sync_standard": {
+   "name": "Obsidian Sync Standard",
+   "usd_per_month_billed_annually": 4,
+   "usd_per_month_billed_monthly": 5,
+   "storage_gb": 1,
+   "version_history": "1 month",
+   "max_file_mb": 5,
+   "sources": {
+    "usd_per_month_billed_annually": { "url": "https://obsidian.md/sync", "quote": "\"$4 USD\" per user per month, billed annually; 1 GB total storage; 1 month version history; 5 MB maximum file size", "date_accessed": "2026-11-04" },
+    "usd_per_month_billed_monthly": { "url": "https://obsidian.md/pricing", "quote": "\"$5 USD\" per user per month, billed monthly", "date_accessed": "2026-11-04" }
+   }
+  },
+  "obsidian_sync_plus": {
+   "name": "Obsidian Sync Plus",
+   "usd_per_month_billed_annually": 8,
+   "usd_per_month_billed_monthly": 10,
+   "storage_gb": 10,
+   "version_history": "12 months",
+   "max_file_mb": 200,
+   "sources": {
+    "usd_per_month_billed_annually": { "url": "https://obsidian.md/sync", "quote": "\"$8 USD\" monthly equivalent billed annually; 10 GB total storage; 12 month version history; 200 MB maximum file size", "date_accessed": "2026-11-04" },
+    "usd_per_month_billed_monthly": { "url": "https://obsidian.md/sync", "quote": "Month-to-month \"$10 USD\"", "date_accessed": "2026-11-04" }
+   }
+  },
+  "dropbox_plus": {
+   "name": "Dropbox Plus",
+   "usd_per_month": 9.99,
+   "storage_gb": 2000,
+   "version_history": "30 days to restore deleted files",
+   "notes": "The individual-plans page lists Plus at $9.99 / month for 1 person with a billed monthly / billed yearly toggle; the fetched text does not say which toggle the figure belongs to (probably yearly). The page fetched from this machine's location showed CA$12.99.",
+   "sources": {
+    "usd_per_month": { "url": "https://www.dropbox.com/individual", "quote": "Plus: \"$9.99 / month\" for 1 person, 2 TB of storage, 30 days to restore deleted files", "date_accessed": "2026-11-04" }
+   }
+  }
+ }
+}

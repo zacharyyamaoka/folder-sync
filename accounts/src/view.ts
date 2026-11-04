@@ -14,15 +14,17 @@
 // purpose), and a reader or the public gets the same 404 as an unknown folder. Every key read here is under the
 // owner's own root, with a credential R2 scopes to it.
 
+import { createHash } from "node:crypto";
 import type { App } from "./apps.ts";
 import { ACTIVE, bucketFor, csrfOk, decide, fail, headers, json, READ_TTL_S, session, settledFirst, stillSignedIn, TYPES, usageFigure, webHostOf, type Deps, type Env, type Person, type Via } from "./app.ts";
 import { activity } from "./activity.ts";
 import { userRoot } from "./creds.ts";
 import { deviceOf } from "./devices.ts";
-import { historyKey, historyPath, historyPrefix, KEEP_DAYS, parseVersion } from "./history.ts";
+import { anchorOf, historyPath, historyPrefix, KEEP_DAYS, listedObject, parseName, parsePrefixBody, parseVersion, preferred, readOrder, type ListedObject } from "./history.ts";
 import { RESTORE, waitingRequests, writeRequest, type RestoreRequest } from "./requests.ts";
 import { Project, type Manifest } from "../../readers/worker/src/folder-sync-read.ts";
 import type { S3Bucket } from "./s3-bucket.ts";
+import { decompress } from "./vendor/fzstd.js";
 
 const HOST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 /** docs/API.md: a POST body over this is 413 too_large. */
@@ -33,6 +35,9 @@ const VERSIONS_MAX = 1000;
 /** One host's history listed at most for deleted files (docs/API.md "deleted": `more` past it). */
 const DELETED_LISTING_MAX = 10_000;
 const DAY_MS = 24 * 3600_000;
+/** The most bytes the Worker holds to open a version it has to decode or check (a keyframe, a pointer): a Worker has 128 MB
+ *  and no streaming zstd or SHA-256 to check as it goes (PEP 0009 §4.3). A bigger one is restored from a machine. */
+const CHECKED_MAX = 32 * 1024 * 1024;
 const UI_TYPES: Record<string, string> = { ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
 
 const notFound = () => fail(404, "not_found", "No such folder.");
@@ -78,7 +83,7 @@ async function body(request: Request): Promise<Record<string, unknown> | Respons
 
 /** The owner's root, read-only (or read-write for a restore request): every key here is under it. */
 function rootBucket(env: Env, deps: Deps, ownerId: string, scope: "object-read-only" | "object-read-write" = "object-read-only"): Promise<S3Bucket> {
-	return bucketFor(env, deps, userRoot(ownerId), scope, READ_TTL_S);
+	return bucketFor(env, deps, userRoot(ownerId, env), scope, READ_TTL_S);
 }
 
 interface HostInfo {
@@ -91,7 +96,7 @@ interface HostInfo {
 async function hostsOf(env: Env, deps: Deps, bucket: S3Bucket, ownerId: string, project: string): Promise<HostInfo[] | Response> {
 	const unsettled = await settledFirst(env, deps, ownerId, project);
 	if (unsettled) return unsettled;
-	const reader = new Project(bucket, project, userRoot(ownerId));
+	const reader = new Project(bucket, project, userRoot(ownerId, env));
 	const out: HostInfo[] = [];
 	for (const id of await reader.hosts()) out.push({ id, manifest: await reader.manifest(id) });
 	return out;
@@ -116,7 +121,7 @@ export async function status(request: Request, env: Env, deps: Deps, app: App | 
 	if (decided instanceof Response) return decided.status === 404 ? notFound() : decided;
 	const isOwner = decided.role === "owner";
 	// WHY a folder-scoped key for a reader's or the public's status: they see only what its manifests say
-	const bucket = isOwner ? await rootBucket(env, deps, decided.owner) : await bucketFor(env, deps, `${userRoot(decided.owner)}${project}/`, "object-read-only", READ_TTL_S);
+	const bucket = isOwner ? await rootBucket(env, deps, decided.owner) : await bucketFor(env, deps, `${userRoot(decided.owner, env)}${project}/`, "object-read-only", READ_TTL_S);
 	const hosts = await hostsOf(env, deps, bucket, decided.owner, project);
 	if (hosts instanceof Response) return hosts;
 	const web = await deps.store.webHost(decided.owner, project);
@@ -129,7 +134,7 @@ export async function status(request: Request, env: Env, deps: Deps, app: App | 
 		return json(200, { ...base, role: decided.role, state, headline: devices.length ? "Synced" : "Nothing synced yet", devices }, { "Cache-Control": "private, no-store" });
 	}
 	const names = new Map(devices.map((d) => [d.id, d]));
-	const waiting = (await waitingRequests(bucket, userRoot(decided.owner), project)).map((r) => ({ request: r.id, host: r.host, host_name: names.get(r.host)?.name ?? "", at: r.at, items: r.items.length }));
+	const waiting = (await waitingRequests(bucket, userRoot(decided.owner, env), project)).map((r) => ({ request: r.id, host: r.host, host_name: names.get(r.host)?.name ?? "", at: r.at, items: r.items.length }));
 	const warnings: Record<string, unknown>[] = [];
 	const storage = await usageFigure(env, deps, decided.owner);
 	if (storage?.over) {
@@ -175,7 +180,7 @@ export async function activityRoute(request: Request, env: Env, deps: Deps, app:
 	if (hosts instanceof Response) return hosts;
 	// hosts with records but no manifest (a machine that only pulls): one delimiter listing of the folder's records
 	const known = new Map(hosts.filter((h) => h.manifest).map((h) => [h.id, { id: h.id, name: h.manifest!.host_name, seq: h.manifest!.seq }]));
-	const root = userRoot(ownerId);
+	const root = userRoot(ownerId, env);
 	let cursor: string | undefined;
 	do {
 		const page = await bucket.objects(`${root}_changes/${project}/`, { delimiter: "/", cursor });
@@ -199,17 +204,17 @@ function keptVersion(id: string, leftAt: number, size: number): Record<string, u
 	return v.unlisted ? { id, unlisted: true, left_at: new Date(leftAt).toISOString(), size } : { id, written_at: v.written_at, sha16: v.sha16, left_at: new Date(leftAt).toISOString(), size };
 }
 
-/** Every version object directly under `prefix` (a delimiter listing: deeper paths are prefixes, never versions). */
-async function versionsUnder(bucket: S3Bucket, prefix: string, cap: number): Promise<{ versions: { id: string; left_at: number; size: number }[]; more: boolean }> {
-	const versions: { id: string; left_at: number; size: number }[] = [];
+/** Every object directly under `prefix` (a delimiter listing: deeper paths are prefixes, never versions), in any form. */
+async function objectsUnder(bucket: S3Bucket, prefix: string, cap: number): Promise<{ objects: ListedObject[]; more: boolean }> {
+	const objects: ListedObject[] = [];
 	let cursor: string | undefined;
 	let pages = 0;
 	let more = false;
 	do {
 		const page = await bucket.objects(prefix, { delimiter: "/", cursor });
 		for (const o of page.objects) {
-			const id = o.key.slice(prefix.length);
-			if (parseVersion(id)) versions.push({ id, left_at: o.lastModified, size: o.size });
+			const listed = listedObject(prefix, o);
+			if (listed) objects.push(listed);
 		}
 		cursor = page.truncated ? page.cursor : undefined;
 		if (cursor && ++pages >= Math.ceil(cap / 1000) + 50) {
@@ -217,7 +222,13 @@ async function versionsUnder(bucket: S3Bucket, prefix: string, cap: number): Pro
 			break;
 		}
 	} while (cursor);
-	return { versions, more };
+	return { objects, more };
+}
+
+/** One version per id with its own size, whatever form it is stored in. */
+async function versionsUnder(bucket: S3Bucket, prefix: string, cap: number): Promise<{ versions: { id: string; left_at: number; size: number }[]; more: boolean }> {
+	const { objects, more } = await objectsUnder(bucket, prefix, cap);
+	return { versions: preferred(objects).map((o) => ({ id: o.id, left_at: o.left_at, size: o.size })), more };
 }
 
 const newestFirst = (a: { id: string; left_at: number }, b: { id: string; left_at: number }) => b.left_at - a.left_at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
@@ -233,7 +244,7 @@ export async function history(request: Request, env: Env, deps: Deps, app: App |
 	const version = query.get("version");
 	if (version !== null && !parseVersion(version)) return fail(400, "bad_version", "A version is <written_at>_<sha16>, as the history lists it.");
 	const ownerId = who.person.userId;
-	const root = userRoot(ownerId);
+	const root = userRoot(ownerId, env);
 	const bucket = await rootBucket(env, deps, ownerId);
 	if (version !== null) return versionBytes(bucket, root, project, host, path, version, deps.now(), head);
 	const hosts = await hostsOf(env, deps, bucket, ownerId, project);
@@ -252,24 +263,100 @@ export async function history(request: Request, env: Env, deps: Deps, app: App |
 	}, { "Cache-Control": "private, no-store" });
 }
 
-/** One version's bytes (Download), streamed, typed by suffix as the files route is: never this site's page. */
+/** One version's bytes (Download), typed by suffix as the files route is: never this site's page. A whole copy is
+ *  streamed; a keyframe is decoded (fzstd) and a pointer is read from what it rests on, each checked against the
+ *  version's name before a byte is sent (PEP 0009 §4.3). */
 async function versionBytes(bucket: S3Bucket, root: string, project: string, host: string, path: string, version: string, now: number, head: boolean): Promise<Response> {
-	const key = historyKey(root, project, host, path, version);
-	const seen = await bucket.head(key);
-	if (!seen) {
+	const prefix = historyPrefix(root, project, host, path);
+	const gone = () => {
 		const at = Date.parse(version.slice(0, version.lastIndexOf("_")));
 		return fail(410, "pruned", now - at >= KEEP_DAYS * DAY_MS ? "That version is older than 30 days and is gone." : "That version was thinned out of the history and is gone.");
-	}
+	};
+	const { objects } = await objectsUnder(bucket, prefix, VERSIONS_MAX);
+	const forms = readOrder(objects.filter((o) => o.id === version));
+	if (!forms.length) return gone();
+	const form = forms[0];
 	const name = path.slice(path.lastIndexOf("/") + 1);
 	const dot = name.lastIndexOf(".");
 	const suffix = dot > 0 ? name.slice(dot).toLowerCase() : "";
-	const out: Record<string, string> = { "Content-Type": TYPES[suffix] || "application/octet-stream", "Cache-Control": "private, no-store", "X-Folder-Sync-Version": version, "Content-Length": String(seen.size) };
+	const out: Record<string, string> = { "Content-Type": TYPES[suffix] || "application/octet-stream", "Cache-Control": "private, no-store", "X-Folder-Sync-Version": version, "Content-Length": String(form.size) };
 	// WHY sandboxed: an old .html or .svg is someone's file, never this site's page
 	if (ACTIVE.has(suffix)) out["Content-Security-Policy"] = "sandbox";
-	if (head || seen.size === 0) return new Response(null, { status: 200, headers: headers(out) });
-	const ranged = await bucket.getRange(key, 0, seen.size, seen.etag || undefined);
-	if (!ranged) return fail(410, "pruned", "That version is gone.");
-	return new Response(ranged.body, { status: 200, headers: headers(out) });
+	if (form.kind === "full") {
+		const seen = await bucket.head(form.key);
+		if (!seen) return gone();
+		out["Content-Length"] = String(seen.size);
+		if (head || seen.size === 0) return new Response(null, { status: 200, headers: headers(out) });
+		const ranged = await bucket.getRange(form.key, 0, seen.size, seen.etag || undefined);
+		if (!ranged) return fail(410, "pruned", "That version is gone.");
+		return new Response(ranged.body, { status: 200, headers: headers(out) });
+	}
+	if (head) return new Response(null, { status: 200, headers: headers(out) });
+	if (form.size > CHECKED_MAX) return fail(413, "too_large", "That version is too large to open in the browser (over 32 MiB); restore it from a machine, which checks it.");
+	const opened = await openStored(bucket, root, project, host, path, form, objects);
+	if (opened === "gone") return gone();
+	if (opened === "too_large") return fail(413, "too_large", "That version is too large to open in the browser (over 32 MiB); restore it from a machine, which checks it.");
+	if (opened === "corrupt") return fail(502, "corrupt", "The stored bytes are not that version's: something outside folder-sync changed the history.");
+	return new Response(opened, { status: 200, headers: headers(out) });
+}
+
+const sha256Hex = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
+
+/** A keyframe's or a pointer's bytes, checked: the version's own bytes, or why not. */
+async function openStored(bucket: S3Bucket, root: string, project: string, host: string, path: string, form: ListedObject, all: ListedObject[]): Promise<Uint8Array | "gone" | "too_large" | "corrupt"> {
+	const sha16 = parseVersion(form.id)?.sha16 ?? "";
+	const decode = async (zst: ListedObject, limit: number): Promise<Uint8Array | "gone" | "too_large" | "corrupt"> => {
+		if (zst.stored > CHECKED_MAX || zst.size > CHECKED_MAX) return "too_large";
+		const got = await bucket.getBounded(zst.key, zst.stored);
+		if (!got) return "gone";
+		try {
+			const plain = decompress(new Uint8Array(got.data));
+			return plain.byteLength === zst.size ? plain.subarray(0, limit) : "corrupt";
+		} catch {
+			return "corrupt";
+		}
+	};
+	if (form.kind === "zst") {
+		const plain = await decode(form, form.size);
+		if (typeof plain === "string") return plain;
+		return sha256Hex(plain).startsWith(sha16) ? plain : "corrupt";
+	}
+	const object = await bucket.get(form.key);
+	if (!object || !("arrayBuffer" in object)) return "gone";
+	const body = parsePrefixBody(new TextDecoder().decode(await object.arrayBuffer()));
+	if (!body || body.size !== form.size || !body.sha256.startsWith(sha16)) return "corrupt";
+	const anchor = anchorOf(all, form.id);
+	let bytes: Uint8Array | "gone" | "too_large" | "corrupt";
+	if (!anchor) {
+		// the live file: read with its manifest's object_etag when it has one, so a file rewritten since is noticed
+		const etag = await liveETag(bucket, root, project, host, path);
+		bytes = await rangeOf(bucket, `${root}${project}/hosts/${host}/${path}`, body.size, etag);
+		if (bytes === "gone" && etag) bytes = await rangeOf(bucket, `${root}${project}/hosts/${host}/${path}`, body.size, undefined);
+	} else if (anchor.kind === "zst") bytes = await decode(anchor, body.size);
+	else bytes = await rangeOf(bucket, anchor.key, body.size, undefined);
+	if (typeof bytes === "string") return bytes;
+	return sha256Hex(bytes) === body.sha256 ? bytes : "corrupt";
+}
+
+/** The first `size` bytes of `key`, read whole into one buffer; "gone" when there is no such object (or another version). */
+async function rangeOf(bucket: S3Bucket, key: string, size: number, ifMatch: string | undefined): Promise<Uint8Array | "gone" | "corrupt"> {
+	const ranged = await bucket.getRange(key, 0, size, ifMatch);
+	if (!ranged || !ranged.body) return "gone";
+	const data = new Uint8Array(await new Response(ranged.body).arrayBuffer());
+	return data.byteLength === size ? data : "corrupt";
+}
+
+/** The object_etag a host's manifest lists for `path`, or undefined. */
+async function liveETag(bucket: S3Bucket, root: string, project: string, host: string, path: string): Promise<string | undefined> {
+	try {
+		const got = await bucket.get(`${root}${project}/hosts/${host}/manifest.json`);
+		if (!got || !("arrayBuffer" in got)) return undefined;
+		const doc = JSON.parse(new TextDecoder().decode(await got.arrayBuffer())) as { files?: { path?: string; object_etag?: string }[] };
+		const etag = doc.files?.find((e) => e.path === path)?.object_etag;
+		return typeof etag === "string" && /^[0-9A-Za-z-]{1,128}$/.test(etag) ? etag : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 // ------------------------------------------------------------------------------------------------ deleted
@@ -282,7 +369,7 @@ export async function deleted(request: Request, env: Env, deps: Deps, app: App |
 	const only = new URL(request.url).searchParams.get("host");
 	if (only !== null && !HOST_ID.test(only)) return fail(400, "bad_host", "A host is its lowercase UUID.");
 	const ownerId = who.person.userId;
-	const root = userRoot(ownerId);
+	const root = userRoot(ownerId, env);
 	const bucket = await rootBucket(env, deps, ownerId);
 	const hosts = await hostsOf(env, deps, bucket, ownerId, project);
 	if (hosts instanceof Response) return hosts;
@@ -312,10 +399,10 @@ export async function deleted(request: Request, env: Env, deps: Deps, app: App |
 			const page = await bucket.objects(prefix, { cursor: listing });
 			for (const o of page.objects) {
 				const cut = o.key.lastIndexOf("/");
-				const id = o.key.slice(cut + 1);
+				const name = parseName(o.key.slice(cut + 1));
 				const path = o.key.slice(prefix.length, cut);
-				if (!parseVersion(id) || !historyPath(path) || live.has(path)) continue;
-				const v = { id, left_at: o.lastModified, size: o.size };
+				if (!name || !historyPath(path) || live.has(path)) continue;
+				const v = { id: name.id, left_at: o.lastModified, size: name.size ?? o.size };
 				const best = newest.get(path);
 				if (!best || newestFirst(v, best) < 0) newest.set(path, v);
 			}
@@ -370,7 +457,7 @@ export async function restore(request: Request, env: Env, deps: Deps, app: App |
 		if (typeof item.version !== "string" || !parseVersion(item.version)) return fail(400, "bad_version", "A version is <written_at>_<sha16>, as the history lists it.");
 	}
 	const ownerId = who.person.userId;
-	const root = userRoot(ownerId);
+	const root = userRoot(ownerId, env);
 	// WHY again after the body: a device revoked while it sent this writes nothing (judge r2 #5)
 	if (!(await stillSignedIn(deps, who.person))) return fail(401, "signed_out", "This device was signed out before its restore could start.");
 	const reading = await rootBucket(env, deps, ownerId);

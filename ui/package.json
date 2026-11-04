@@ -2,7 +2,7 @@
   "name": "folder-sync-ui",
   "private": true,
   "type": "module",
-  "description": "<folder-sync-status> (PEP 0007 §5.1, docs/API.md \"The element\"): one plain ES module, served at /fs/ui/v1/ by the accounts Worker and by `folder-sync serve`. Its tests drive it over testdata/view-api/ through a stub server.",
+  "description": "Part ui (PARTS.md): <folder-sync-status> (PEP 0007 §5.1, docs/API.md \"The element\"): one plain ES module, served at /fs/ui/v1/ by the accounts Worker and by `folder-sync serve`. Its tests drive it over testdata/view-api/ through a stub server.",
   "scripts": {
     "test": "playwright test",
     "stub": "node test/stub.mjs",

@@ -1,0 +1,443 @@
+{
+	"owner": "AbC123zz9yX8",
+	"measured_at": "2026-10-28T21:15:00.000Z",
+	"used": {
+		"bytes": 964415870,
+		"objects": 296
+	},
+	"quota": {
+		"bytes": 10737418240,
+		"objects": 100000
+	},
+	"over": null,
+	"partial": false,
+	"kinds": [
+		{
+			"kind": "live",
+			"bytes": 24665950,
+			"objects": 18,
+			"oldest": "2026-10-21T09:00:00.000Z",
+			"newest": "2026-10-28T21:10:00.000Z",
+			"clock": "modified"
+		},
+		{
+			"kind": "history",
+			"bytes": 30627180,
+			"objects": 27,
+			"oldest": "2026-10-04T14:03:00.000Z",
+			"newest": "2026-10-27T14:03:00.000Z",
+			"clock": "key"
+		},
+		{
+			"kind": "trash",
+			"bytes": 909000000,
+			"objects": 250,
+			"oldest": "2026-10-03T21:15:00.000Z",
+			"newest": "2026-10-28T17:15:00.000Z",
+			"clock": "key"
+		},
+		{
+			"kind": "changes",
+			"bytes": 122320,
+			"objects": 120,
+			"oldest": "2026-10-03T21:15:00.000Z",
+			"newest": "2026-10-28T16:15:00.000Z",
+			"clock": "modified"
+		},
+		{
+			"kind": "requests",
+			"bytes": 420,
+			"objects": 1,
+			"oldest": "2026-10-28T20:47:00.000Z",
+			"newest": "2026-10-28T20:47:00.000Z",
+			"clock": "modified"
+		}
+	],
+	"projects": [
+		{
+			"project": "robotparts",
+			"bytes": 964394363,
+			"objects": 412,
+			"kinds": [
+				{
+					"kind": "live",
+					"bytes": 24652343,
+					"objects": 15,
+					"oldest": "2026-10-27T18:00:00.000Z",
+					"newest": "2026-10-28T21:10:00.000Z",
+					"clock": "modified",
+					"hosts": [
+						{
+							"host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+							"host_name": "bam-laptop",
+							"bytes": 15000193,
+							"objects": 5
+						},
+						{
+							"host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+							"host_name": "bam-GPU",
+							"bytes": 9651490,
+							"objects": 7
+						},
+						{
+							"host": "e2a0b1c2-d3e4-4f50-9a1b-2c3d4e5f6a7b",
+							"host_name": "web",
+							"bytes": 660,
+							"objects": 3
+						}
+					]
+				},
+				{
+					"kind": "history",
+					"bytes": 30619280,
+					"objects": 26,
+					"oldest": "2026-10-04T14:03:00.000Z",
+					"newest": "2026-10-27T14:03:00.000Z",
+					"clock": "key",
+					"hosts": [
+						{
+							"host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+							"host_name": "bam-laptop",
+							"bytes": 19500000,
+							"objects": 3
+						},
+						{
+							"host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+							"host_name": "bam-GPU",
+							"bytes": 11119280,
+							"objects": 23
+						}
+					]
+				},
+				{
+					"kind": "trash",
+					"bytes": 909000000,
+					"objects": 250,
+					"oldest": "2026-10-03T21:15:00.000Z",
+					"newest": "2026-10-28T17:15:00.000Z",
+					"clock": "key",
+					"hosts": [
+						{
+							"host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+							"host_name": "bam-GPU",
+							"bytes": 909000000,
+							"objects": 250
+						}
+					]
+				},
+				{
+					"kind": "changes",
+					"bytes": 122320,
+					"objects": 120,
+					"oldest": "2026-10-03T21:15:00.000Z",
+					"newest": "2026-10-28T16:15:00.000Z",
+					"clock": "modified",
+					"hosts": [
+						{
+							"host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+							"host_name": "bam-GPU",
+							"bytes": 122320,
+							"objects": 120
+						}
+					]
+				},
+				{
+					"kind": "requests",
+					"bytes": 420,
+					"objects": 1,
+					"oldest": "2026-10-28T20:47:00.000Z",
+					"newest": "2026-10-28T20:47:00.000Z",
+					"clock": "modified",
+					"hosts": [
+						{
+							"host": "e2a0b1c2-d3e4-4f50-9a1b-2c3d4e5f6a7b",
+							"host_name": "web",
+							"bytes": 420,
+							"objects": 1
+						}
+					]
+				}
+			]
+		},
+		{
+			"project": "notes",
+			"bytes": 21507,
+			"objects": 4,
+			"kinds": [
+				{
+					"kind": "live",
+					"bytes": 13607,
+					"objects": 3,
+					"oldest": "2026-10-21T09:00:00.000Z",
+					"newest": "2026-10-28T19:00:00.000Z",
+					"clock": "modified",
+					"hosts": [
+						{
+							"host": "0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d",
+							"host_name": "mac-mini",
+							"bytes": 13607,
+							"objects": 3
+						}
+					]
+				},
+				{
+					"kind": "history",
+					"bytes": 7900,
+					"objects": 1,
+					"oldest": "2026-10-27T10:00:00.000Z",
+					"newest": "2026-10-27T10:00:00.000Z",
+					"clock": "key",
+					"hosts": [
+						{
+							"host": "0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d",
+							"host_name": "mac-mini",
+							"bytes": 7900,
+							"objects": 1
+						}
+					]
+				}
+			]
+		}
+	],
+	"folders": [
+		{
+			"project": "robotparts",
+			"host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+			"host_name": "bam-GPU",
+			"folder": "logs",
+			"bytes": 917200000,
+			"objects": 252,
+			"live_bytes": 8200000,
+			"old_bytes": 909000000
+		},
+		{
+			"project": "robotparts",
+			"host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+			"host_name": "bam-laptop",
+			"folder": "cad",
+			"bytes": 26200000,
+			"objects": 4,
+			"live_bytes": 6700000,
+			"old_bytes": 19500000
+		},
+		{
+			"project": "robotparts",
+			"host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+			"host_name": "bam-GPU",
+			"folder": "src/parts",
+			"bytes": 12508000,
+			"objects": 11,
+			"live_bytes": 1438000,
+			"old_bytes": 11070000
+		},
+		{
+			"project": "robotparts",
+			"host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+			"host_name": "bam-laptop",
+			"folder": "photos/2026/lab",
+			"bytes": 5900000,
+			"objects": 2,
+			"live_bytes": 5900000,
+			"old_bytes": 0
+		},
+		{
+			"project": "robotparts",
+			"host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+			"host_name": "bam-laptop",
+			"folder": "photos/2026/trip",
+			"bytes": 2400000,
+			"objects": 1,
+			"live_bytes": 2400000,
+			"old_bytes": 0
+		},
+		{
+			"project": "robotparts",
+			"host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+			"host_name": "bam-GPU",
+			"folder": "docs/notes",
+			"bytes": 62580,
+			"objects": 16,
+			"live_bytes": 13300,
+			"old_bytes": 49280
+		},
+		{
+			"project": "notes",
+			"host": "0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d",
+			"host_name": "mac-mini",
+			"folder": "ideas",
+			"bytes": 21321,
+			"objects": 3,
+			"live_bytes": 13421,
+			"old_bytes": 7900
+		},
+		{
+			"project": "robotparts",
+			"host": "e2a0b1c2-d3e4-4f50-9a1b-2c3d4e5f6a7b",
+			"host_name": "web",
+			"folder": "hearts",
+			"bytes": 474,
+			"objects": 2,
+			"live_bytes": 474,
+			"old_bytes": 0
+		},
+		{
+			"project": "robotparts",
+			"host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+			"host_name": "bam-laptop",
+			"folder": "",
+			"bytes": 193,
+			"objects": 1,
+			"live_bytes": 193,
+			"old_bytes": 0
+		},
+		{
+			"project": "robotparts",
+			"host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+			"host_name": "bam-GPU",
+			"folder": "",
+			"bytes": 190,
+			"objects": 1,
+			"live_bytes": 190,
+			"old_bytes": 0
+		}
+	],
+	"files": [
+		{
+			"project": "robotparts",
+			"host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+			"host_name": "bam-GPU",
+			"path": "logs/agent.log",
+			"bytes": 573800000,
+			"live_bytes": 4300000,
+			"old_bytes": 569500000,
+			"copies": 150
+		},
+		{
+			"project": "robotparts",
+			"host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+			"host_name": "bam-GPU",
+			"path": "logs/sim.log",
+			"bytes": 343400000,
+			"live_bytes": 3900000,
+			"old_bytes": 339500000,
+			"copies": 100
+		},
+		{
+			"project": "robotparts",
+			"host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+			"host_name": "bam-laptop",
+			"path": "cad/bracket-v3.step",
+			"bytes": 26200000,
+			"live_bytes": 6700000,
+			"old_bytes": 19500000,
+			"copies": 3
+		},
+		{
+			"project": "robotparts",
+			"host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+			"host_name": "bam-GPU",
+			"path": "src/parts/catalog.json",
+			"bytes": 12470000,
+			"live_bytes": 1400000,
+			"old_bytes": 11070000,
+			"copies": 9
+		},
+		{
+			"project": "robotparts",
+			"host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+			"host_name": "bam-laptop",
+			"path": "photos/2026/lab/IMG_2232.jpg",
+			"bytes": 3100000,
+			"live_bytes": 3100000,
+			"old_bytes": 0,
+			"copies": 0
+		},
+		{
+			"project": "robotparts",
+			"host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+			"host_name": "bam-laptop",
+			"path": "photos/2026/lab/IMG_2231.jpg",
+			"bytes": 2800000,
+			"live_bytes": 2800000,
+			"old_bytes": 0,
+			"copies": 0
+		},
+		{
+			"project": "robotparts",
+			"host": "7c1d2e3f-0a1b-4c2d-8e3f-405162738495",
+			"host_name": "bam-laptop",
+			"path": "photos/2026/trip/IMG_0007.jpg",
+			"bytes": 2400000,
+			"live_bytes": 2400000,
+			"old_bytes": 0,
+			"copies": 0
+		},
+		{
+			"project": "robotparts",
+			"host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+			"host_name": "bam-GPU",
+			"path": "docs/notes/plan.md",
+			"bytes": 53480,
+			"live_bytes": 4200,
+			"old_bytes": 49280,
+			"copies": 14
+		},
+		{
+			"project": "robotparts",
+			"host": "b55e9683-7854-4121-a56a-9bae7c3ab1da",
+			"host_name": "bam-GPU",
+			"path": "src/parts/mcmaster.py",
+			"bytes": 38000,
+			"live_bytes": 38000,
+			"old_bytes": 0,
+			"copies": 0
+		},
+		{
+			"project": "notes",
+			"host": "0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d",
+			"host_name": "mac-mini",
+			"path": "ideas/wrist.md",
+			"bytes": 16200,
+			"live_bytes": 8300,
+			"old_bytes": 7900,
+			"copies": 1
+		}
+	],
+	"suggestions": [
+		{
+			"id": "trash-old",
+			"title": "Empty trash older than 7 days",
+			"bytes": 629280000,
+			"objects": 180,
+			"why": "Copies of replaced and deleted files from before version history; nothing lists them any more, and they go 30 days after their date anyway."
+		},
+		{
+			"id": "log:robotparts/b55e9683-7854-4121-a56a-9bae7c3ab1da/logs/agent.log",
+			"title": "logs/agent.log is an append-only log replaced 150 times",
+			"bytes": 565206667,
+			"objects": 149,
+			"why": "Its 150 old copies use 543.1 MiB; keeping only the newest copy frees 539 MiB."
+		},
+		{
+			"id": "log:robotparts/b55e9683-7854-4121-a56a-9bae7c3ab1da/logs/sim.log",
+			"title": "logs/sim.log is an append-only log replaced 100 times",
+			"bytes": 335610000,
+			"objects": 99,
+			"why": "Its 100 old copies use 323.8 MiB; keeping only the newest copy frees 320.1 MiB."
+		},
+		{
+			"id": "history-old",
+			"title": "Delete history older than 7 days",
+			"bytes": 27090080,
+			"objects": 17,
+			"why": "Earlier versions of files that left their folders over 7 days ago; the last 7 days stay restorable."
+		},
+		{
+			"id": "file:robotparts/b55e9683-7854-4121-a56a-9bae7c3ab1da/src/parts/catalog.json",
+			"title": "src/parts/catalog.json has 9 old copies",
+			"bytes": 9920000,
+			"objects": 8,
+			"why": "Its 9 old copies use 10.6 MiB; keeping only the newest copy frees 9.5 MiB."
+		}
+	]
+}

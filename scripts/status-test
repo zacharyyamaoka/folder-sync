@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# The dev view's tests: the generator (node --test) and the page in Chromium (Playwright from ui/node_modules: npm --prefix ui ci).
+# DEV_VIEW_SHOTS=<dir> also writes the light / dark / phone screenshots.
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+node --test "$root/tests/dev-view/status.test.mjs"
+"$root/ui/node_modules/.bin/playwright" test --config "$root/tests/dev-view/playwright.config.mjs"

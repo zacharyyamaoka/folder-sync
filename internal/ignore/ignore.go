@@ -24,6 +24,10 @@ import (
 )
 
 // Defaults are added to every project (docs/peps/0001 "init").
+//
+// WHY the OS junk (gate G9, Zach 2026-11-04: ".DS_Store, Thumbs.db ignored by default"): a file manager writes these into
+// every folder it opens, no one chose them, and a synced copy of one machine's is noise (and churn) on every other. They
+// come first, so a project's own "!Thumbs.db" re-includes one: the last matching rule wins.
 var Defaults = []string{
 	".git/",
 	"node_modules/",
@@ -31,6 +35,10 @@ var Defaults = []string{
 	"*.pem",
 	"id_*",
 	"*.key",
+	".DS_Store",   // macOS Finder
+	"._*",         // macOS AppleDouble: the resource fork and metadata a non-HFS/APFS disk holds beside a file
+	"Thumbs.db",   // Windows Explorer's thumbnail cache
+	"desktop.ini", // Windows Explorer's folder settings
 }
 
 // Rule is one parsed gitignore line.

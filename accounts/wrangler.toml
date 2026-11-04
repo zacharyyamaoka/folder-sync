@@ -4,6 +4,8 @@
 # Deploying is Zach's call (never from an agent):
 #   npx --prefix accounts wrangler d1 migrations apply DB --remote --config accounts/wrangler.toml
 #   npx --prefix accounts wrangler deploy --config accounts/wrangler.toml
+# One deployment per app (docs/NEW-APP.md): everything above and below is the top-level deployment, vibetracks.dev's. Every
+# other app is one [env.<app>] block at the end of this file; `--env <app>` selects it.
 name = "folder-sync-accounts"
 main = "src/index.ts"
 compatibility_date = "2026-10-01"
@@ -66,6 +68,7 @@ PUBLIC_URL = "https://folder-sync-accounts.zach-yamaoka.workers.dev"
 # account id at deploy.
 R2_ACCOUNT_ID = "c2747ee6a8842e150e38acc3d044adde"
 SYNC_BUCKET = "folder-sync"
+# ROOT_PREFIX (unset here: keys are users/<id>/) is each other app's own root in the bucket, apps/<app>/; see [env.*] below
 # Empty: https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com (a local stand-in in the proof)
 R2_ENDPOINT = ""
 # How long a machine's storage keys live: a revoked (or over-quota) machine stops within this (and refreshes a third
@@ -89,3 +92,49 @@ EMAIL_FROM = "Robot Parts <signin@robotparts.dev>"
 # RESEND_API_KEY, R2_PARENT_ACCESS_KEY_ID, R2_PARENT_SECRET_ACCESS_KEY, and SIGN_UP_EMAILS (who may create an account, comma-separated;
 # unset means nobody new, "*" anyone; it holds real emails, so it is a secret). Until they are set, sign-in answers 503
 # and nothing is served.
+
+# ------------------------------------------------------------------------------------------------ one block per app
+# WHY a block per app and not one shared deployment (Zach, 2026-11-04: "Robotparts and veibtracks should be split and as
+# well as anything going forward"): each app gets its own D1 (its own users, sessions, folder rows), its own BETTER_AUTH_SECRET,
+# its own Durable Object namespaces (a Worker's classes are namespaced by the Worker's name) and its own root in the one bucket
+# (ROOT_PREFIX), so one app's ids, outage or sign-up list never touch another's. wrangler inherits only some keys into an
+# [env.*] block: the bindings, vars and migrations below are all repeated on purpose, or the block would deploy without them.
+# The R2 parent key, Google client and the rest are secrets, set per env: `wrangler secret put <NAME> --env <app>`.
+
+[env.robotparts]
+name = "folder-sync-accounts-robotparts"
+# the Worker's own host (the CLI's default server and the account pages); robotparts.dev/fs reaches it through the service binding
+vars = { ENVIRONMENT = "production", PUBLIC_URL = "https://folder-sync-accounts-robotparts.zach-yamaoka.workers.dev", R2_ACCOUNT_ID = "c2747ee6a8842e150e38acc3d044adde", SYNC_BUCKET = "folder-sync", R2_ENDPOINT = "", SYNC_CREDENTIAL_TTL_S = "300", QUOTA_BYTES = "1073741824", QUOTA_OBJECTS = "100000", QUOTA_RECHECK_S = "300", QUOTA_MAX_AGE_S = "3600", QUOTA_BY_OWNER = "", EMAIL_FROM = "Robot Parts <signin@robotparts.dev>", ROOT_PREFIX = "apps/robotparts/" }
+
+[env.robotparts.assets]
+directory = "./site"
+binding = "ASSETS"
+run_worker_first = true
+
+# Its own database: wrangler d1 create folder-sync-accounts-robotparts, then its id here
+[[env.robotparts.d1_databases]]
+binding = "DB"
+database_name = "folder-sync-accounts-robotparts"
+database_id = "3f9eb26f-0164-4089-b662-6669f89b5524"
+migrations_dir = "migrations"
+
+# The installers bucket is shared and read-only here (served at /fs/download); CI uploads to it once, whichever app serves it
+[[env.robotparts.r2_buckets]]
+binding = "DOWNLOADS"
+bucket_name = "folder-sync-downloads"
+
+[[env.robotparts.durable_objects.bindings]]
+name = "WEB_HOST"
+class_name = "WebHostObject"
+
+[[env.robotparts.durable_objects.bindings]]
+name = "HUB"
+class_name = "FolderHub"
+
+[[env.robotparts.migrations]]
+tag = "v1"
+new_sqlite_classes = ["WebHostObject"]
+
+[[env.robotparts.migrations]]
+tag = "v2"
+new_sqlite_classes = ["FolderHub"]
