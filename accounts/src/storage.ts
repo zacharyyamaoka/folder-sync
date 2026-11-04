@@ -301,7 +301,7 @@ export async function storageBreakdown(request: Request, env: Env, deps: Deps, a
 	const names = await namesOf(bucket, root, listed.items);
 	const now = deps.now();
 	const answer = breakdownOf(listed.items, names, now);
-	const quota = quotaOf(env);
+	const quota = quotaOf(env, owner);
 	return json(200, {
 		owner,
 		measured_at: new Date(now).toISOString(),

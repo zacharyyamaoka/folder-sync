@@ -233,3 +233,14 @@ test("the realistic account: about 90% old copies, and the UI's test reads exact
 	if (process.env.UPDATE_GOLDEN) writeFileSync(GOLDEN, `${JSON.stringify(body, null, "\t")}\n`);
 	assert.deepEqual(body, JSON.parse(readFileSync(GOLDEN, "utf8")), "ui/test/fixtures/storage-breakdown.json is out of date: UPDATE_GOLDEN=1 npm --prefix accounts test");
 });
+
+test("the breakdown's quota is the owner's own ceiling (QUOTA_BY_OWNER), everyone else's is the default", async () => {
+	const { s3, store } = accounts();
+	tiny(s3);
+	const granted = { QUOTA_BYTES: "100000000", QUOTA_BY_OWNER: JSON.stringify({ [OWNER.userId]: { bytes: 10 * 1024 ** 3 } }) };
+	const own = await ask(s3, store, OWNER, { env: granted });
+	assert.deepEqual(own.body.quota, { bytes: 10 * 1024 ** 3, objects: 100_000 }, "the person granted more sees their own ceiling");
+	assert.equal(own.body.over, null);
+	const other = await ask(s3, store, OTHER, { env: granted });
+	assert.deepEqual(other.body.quota, { bytes: 100_000_000, objects: 100_000 }, "someone not named keeps the default");
+});
