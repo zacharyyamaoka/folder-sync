@@ -340,28 +340,28 @@
       <p class="lede">The objectives are measured every hour, in a test rig and in production: how <b>fast</b> a save arrives, how <b>efficiently</b> old versions are stored, and what a gigabyte <b>costs</b>. The gates are yes-or-no checks, each backed by a test that runs on every change. Everything below is generated from the latest runs, so a missed target is shown as missed.</p>
       <!-- status:begin -->
 <div class="status">
-<p class="asof">Latest measurements: test 2026-11-04 21:14 UTC, production 2026-11-04 21:14 UTC. Gates last run 2026-11-04 20:56 UTC on bb601e2.</p>
+<p class="asof">Latest measurements: test 2026-11-04 22:11 UTC, production 2026-11-04 22:11 UTC. Gates last run 2026-11-04 20:56 UTC on bb601e2.</p>
 <div class="objectives">
 <article class="objective" data-objective="O1">
 <h3><span class="oid">O1</span> Fast</h3>
 <p class="blurb">Save to bytes on the other disk and online</p>
 <table class="kpis"><thead><tr><th scope="col">Measure</th><th scope="col">Target</th><th scope="col">Test</th><th scope="col">Production</th></tr></thead><tbody>
-<tr><th scope="row">Save to the bytes on the other disk and online, median (p50)</th><td class="target">≤ 1 s</td><td class="cell met" data-env="test">400 ms<span class="verdict">met</span></td><td class="cell missed" data-env="prod">3.4 s<span class="verdict">missed</span></td></tr>
-<tr><th scope="row">The same, 95th percentile (p95)</th><td class="target">≤ 3 s</td><td class="cell met" data-env="test">492 ms<span class="verdict">met</span></td><td class="cell missed" data-env="prod">4.6 s<span class="verdict">missed</span></td></tr>
+<tr><th scope="row">Save to the bytes on the other disk and online, median (p50)</th><td class="target">≤ 1 s</td><td class="cell met" data-env="test">375 ms<span class="verdict">met</span></td><td class="cell missed" data-env="prod">3.4 s<span class="verdict">missed</span></td></tr>
+<tr><th scope="row">The same, 95th percentile (p95)</th><td class="target">≤ 3 s</td><td class="cell met" data-env="test">450 ms<span class="verdict">met</span></td><td class="cell missed" data-env="prod">4.5 s<span class="verdict">missed</span></td></tr>
 </tbody></table></article>
 <article class="objective" data-objective="O2">
 <h3><span class="oid">O2</span> Storage efficient</h3>
 <p class="blurb">History bytes / live bytes, 30-day max</p>
 <table class="kpis"><thead><tr><th scope="col">Measure</th><th scope="col">Target</th><th scope="col">Test</th><th scope="col">Production</th></tr></thead><tbody>
 <tr><th scope="row">History bytes ÷ live bytes (H), worst of the last 30 days</th><td class="target">≤ 1.0 (stretch ≤ 0.25)</td><td class="cell missed" data-env="test">1.51<span class="verdict">missed</span></td><td class="cell missed" data-env="prod">68<span class="verdict">missed</span></td></tr>
-<tr><th scope="row">H, latest sample</th><td class="target">none (the 30-day worst is the target)</td><td class="cell none" data-env="test">1.51</td><td class="cell none" data-env="prod">0.05</td></tr>
+<tr><th scope="row">H, latest sample</th><td class="target">none (the 30-day worst is the target)</td><td class="cell none" data-env="test">1.51</td><td class="cell none" data-env="prod">0.06</td></tr>
 </tbody></table></article>
 <article class="objective" data-objective="O3">
 <h3><span class="oid">O3</span> Cost per GB</h3>
 <p class="blurb">Per GB-month and per person-month at 10 GB; idle near zero</p>
 <table class="kpis"><thead><tr><th scope="col">Measure</th><th scope="col">Target</th><th scope="col">Test</th><th scope="col">Production</th></tr></thead><tbody>
-<tr><th scope="row">Cost per GB-month, cheapest provider</th><td class="target">no number set; the cheapest provider</td><td class="cell none" data-env="test">$0.017</td><td class="cell none" data-env="prod">$0.92</td></tr>
-<tr><th scope="row">Cost per person-month at 10 GB, cheapest provider</th><td class="target">≤ $0.50</td><td class="cell met" data-env="test">$0.22<span class="verdict">met</span></td><td class="cell met" data-env="prod">$0.32<span class="verdict">met</span></td></tr>
+<tr><th scope="row">Cost per GB-month on the provider that holds the folders</th><td class="target">no number set; lower is better</td><td class="cell none" data-env="test">$0.17</td><td class="cell none" data-env="prod">$28.35</td></tr>
+<tr><th scope="row">Cost per person-month at 10 GB, on the provider that holds the folders</th><td class="target">≤ $0.50</td><td class="cell missed" data-env="test">$1.69<span class="verdict">missed</span></td><td class="cell missed" data-env="prod">$4.73<span class="verdict">missed</span></td></tr>
 <tr><th scope="row">CPU when idle</th><td class="target">&lt; 0.1 %</td><td class="cell met" data-env="test">0.089 %<span class="verdict">met</span></td><td class="cell failed" data-env="prod">could not be measured</td></tr>
 <tr><th scope="row">Storage requests an hour when idle</th><td class="target">none (idle cost should be about $0)</td><td class="cell none" data-env="test">123</td><td class="cell none" data-env="prod">not measured yet</td></tr>
 </tbody></table></article>
