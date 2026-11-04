@@ -58,6 +58,17 @@ export class MemoryStore implements Store {
 		return this.webHosts.get(this.k(owner, project)) ?? null;
 	}
 
+	readonly sharedTrees = new Map<string, string>();
+
+	async sharedTree(owner: string, project: string) {
+		return this.sharedTrees.get(this.k(owner, project)) ?? null;
+	}
+
+	async ensureSharedTree(owner: string, project: string, candidate: string) {
+		if (!this.sharedTrees.has(this.k(owner, project))) this.sharedTrees.set(this.k(owner, project), candidate);
+		return this.sharedTrees.get(this.k(owner, project))!;
+	}
+
 	readonly usageRows = new Map<string, { bytes: number; objects: number; measured_at: string; partial?: boolean; stale?: boolean; history?: { bytes: number; objects: number } }>();
 	readonly mutations = new Map<string, number>();
 	/** What writes charged since the current claim (review r6 #2): stored on top of the claim's listing. */

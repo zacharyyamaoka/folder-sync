@@ -1,0 +1,15 @@
+{
+  "schema": "folder-sync-manifest/1",
+  "project": "notes",
+  "host_id": "5d0f6c8e-2b1a-4e7d-9c3f-8a6b5e4d3c2b",
+  "host_name": "shared",
+  "seq": 1,
+  "generated_at": "2026-11-04T08:00:00.000Z",
+  "files": [],
+  "shared": {
+    "private": [
+      "events/",
+      "*.sqlite"
+    ]
+  }
+}

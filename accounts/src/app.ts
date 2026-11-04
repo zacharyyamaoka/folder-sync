@@ -18,6 +18,9 @@
 //   GET  /fs/v1/folders/:project/bundle?prefix=   a folder's small UTF-8 files in one answer
 //   GET  /fs/v1/folders/:project/files/:host/<p>  one file's bytes, sha256-checked; Range: one range -> 206 (ranges.ts)
 //   PUT|DELETE /fs/v1/folders/:project/web/<p>    the folder's web host (§3.4); X-Folder-Sync-Keep-Newest: <field>
+//   POST /fs/v1/folders/:project/share {private}   the owner opts the folder into a shared tree (PEP 0010); idempotent
+//   POST /fs/v1/folders/:project/shared {changes}  a device's commit to the shared tree: accepted, merged, conflict or edit_won per path
+//   PUT|DELETE /fs/v1/folders/:project/shared/<p>  a page's write to the shared tree; X-Folder-Sync-Base: <version>, X-Folder-Sync-Merge: never
 //   GET  /fs/v1/folders/:project/events           WebSocket upgrade: the folder's hub says "host H is at seq N" (PEP 0005)
 //   PATCH /fs/v1/folders/:project {visibility}    public or private
 //   POST /fs/v1/folders/:project/readers {email}, DELETE …/readers/:email
@@ -46,11 +49,13 @@ import { Measuring, overQuota, quotaOf, TooOld, usageOf, type QuotaEnv } from ".
 import { Denied, S3Bucket, type FetchLike } from "./s3-bucket.ts";
 import type { Store, Visibility } from "./store.ts";
 import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhost.ts";
+import { checkPrivate, type SharedChange } from "./shared.ts";
 import type { EmailEnv } from "./email.ts";
 import { accountRoute, devicesApi, signInReturn, type GrantRow, type SessionRow } from "./devices.ts";
 import { downloadRoute, type DownloadsBucket } from "./download.ts";
 import { handoffRoute } from "./handoff.ts";
 import { servedFile } from "./ranges.ts";
+import { parseVersion } from "./history.ts";
 import type { CloseOrder } from "./hub.ts";
 import { activityRoute, browserOf, deleted, history, purge, restore, status, ui } from "./view.ts";
 import { storageBreakdown } from "./storage.ts";
@@ -343,7 +348,9 @@ async function wake(env: Env, deps: Deps, owner: string, projects: Set<string>):
  *  (a page, a machine's pull through /fs/) never waits for another write to see the file again (review r2 #2). A
  *  folder that cannot be settled yet is a 503 recovering, never a snapshot with the file missing (review r3 #4). */
 export async function settledFirst(env: Env, deps: Deps, owner: string, project: string): Promise<Response | null> {
-	const hostId = await deps.store.webHost(owner, project);
+	// WHY either host: the folder's object journals a cut-off change of the web host or of the shared tree (PEP 0010) in one
+	// place, and settles whichever it finds
+	const hostId = (await deps.store.webHost(owner, project)) ?? (await deps.store.sharedTree(owner, project));
 	if (!hostId) return null;
 	const answer = await webHostOf(env, deps)({ method: "SETTLE", owner, project, hostId, path: "" });
 	return answer.status === 200 ? null : json(answer.status, answer.body, answer.headers ?? {});
@@ -640,6 +647,177 @@ async function web(request: Request, env: Env, deps: Deps, app: App | null, proj
 	return json(answer.status, answer.body, answer.headers ?? {});
 }
 
+
+// ------------------------------------------------------------------------------------------------ the shared tree (PEP 0010)
+
+/** The most a commit holds, and the most bytes it carries inline (a bigger file is staged by the machine, PEP 0010 §5). */
+const COMMIT_CHANGES_MAX = 100;
+const INLINE_FILE_MAX = 1024 * 1024;
+const COMMIT_BYTES_MAX = 8 * 1024 * 1024;
+const COMMIT_BODY_MAX = 14 * 1024 * 1024;
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+
+function fromBase64(text: string): Uint8Array | null {
+	if (!BASE64.test(text) || text.length % 4 === 1) return null;
+	try {
+		const binary = atob(text);
+		const out = new Uint8Array(binary.length);
+		for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+		return out;
+	} catch {
+		return null;
+	}
+}
+
+/** Tells the hub that the shared tree moved, after the answer, as a web write does. */
+async function announce(env: Env, deps: Deps, owner: string, project: string, answer: WebAnswer): Promise<void> {
+	if (answer.status !== 200) return;
+	const told = notifyHub(env, owner, project, answer.body);
+	if (deps.waitUntil) deps.waitUntil(told);
+	else await told;
+}
+
+/** POST …/share {private?}: the owner opts the folder into a shared tree (PEP 0010 §7). Idempotent: the tree's id is minted
+ *  once, and asking again returns it (a different `private` rule is a 409: it cannot change after the share in v1). */
+async function share(request: Request, env: Env, deps: Deps, app: App | null, project: string): Promise<Response> {
+	const who = await writer(request, deps, app);
+	if (who instanceof Response) return who;
+	const owner = who.person.userId; // the session's, never a body's
+	const raw = await request.arrayBuffer();
+	if (raw.byteLength > 64 * 1024) return fail(413, "too_large", "a share is a list of patterns, at most 64 KiB");
+	let doc: Record<string, unknown> = {};
+	if (raw.byteLength) {
+		try {
+			doc = JSON.parse(new TextDecoder().decode(raw));
+		} catch {
+			return fail(400, "bad_request", "the body is not JSON");
+		}
+		if (!doc || typeof doc !== "object" || Array.isArray(doc) || Object.keys(doc).some((k) => k !== "private")) return fail(400, "bad_request", "the body is { private: [pattern, …] } or empty");
+	}
+	let priv: string[] | undefined;
+	try {
+		priv = doc.private === undefined ? undefined : checkPrivate(doc.private);
+	} catch {
+		return fail(400, "bad_private", "private is a list of up to 200 single-line gitignore patterns");
+	}
+	if (!(await stillSignedIn(deps, who.person))) return fail(401, "signed_out", "this device was signed out before its share could start");
+	const hostId = await deps.store.ensureSharedTree(owner, project, deps.uuid(), new Date(deps.now()).toISOString());
+	const answer = await webHostOf(env, deps)({ method: "SHARE", owner, project, hostId, path: "", private: priv, sessionId: who.person.sessionId });
+	if (answer.status === 200 && (answer.body as { created?: boolean }).created) await announce(env, deps, owner, project, { status: 200, body: { host: hostId, seq: (answer.body as { seq: number }).seq } });
+	return json(answer.status, answer.body, answer.headers ?? {});
+}
+
+/** POST …/shared: a device's commit (PEP 0010 §5). `{ device, host?, max_delete?, changes: [{ path, base: {version, sha256?} | null,
+ *  sha256, size, body (base64) | staged | delete: true, at_local }] }`. The folder's object answers each path: accepted, merged,
+ *  conflict or edit_won. WHY owner only: a reader may read the tree, never write it. */
+async function sharedCommitRoute(request: Request, env: Env, deps: Deps, app: App | null, project: string): Promise<Response> {
+	const receivedAt = deps.now();
+	const who = await writer(request, deps, app);
+	if (who instanceof Response) return who;
+	const owner = who.person.userId;
+	if (Number(request.headers.get("Content-Length") || 0) > COMMIT_BODY_MAX) return fail(413, "too_large", "a commit carries at most 8 MiB of files; stage the big ones");
+	const raw = await request.arrayBuffer();
+	if (raw.byteLength > COMMIT_BODY_MAX) return fail(413, "too_large", "a commit carries at most 8 MiB of files; stage the big ones");
+	let doc: Record<string, unknown>;
+	try {
+		doc = JSON.parse(new TextDecoder().decode(raw));
+	} catch {
+		return fail(400, "bad_request", "the body is not JSON");
+	}
+	if (!doc || typeof doc !== "object" || Array.isArray(doc) || Object.keys(doc).some((k) => !["device", "host", "max_delete", "changes"].includes(k))) {
+		return fail(400, "bad_request", "the body is { device, host?, max_delete?, changes: [...] } and nothing else");
+	}
+	const list = doc.changes;
+	if (!Array.isArray(list) || !list.length || list.length > COMMIT_CHANGES_MAX) return fail(400, "bad_request", `changes is a list of 1 to ${COMMIT_CHANGES_MAX} paths`);
+	const host = doc.host;
+	if (host !== undefined && (typeof host !== "string" || !HOST_ID.test(host))) return fail(400, "bad_host", "host is the committing machine's lowercase UUID");
+	const device = typeof doc.device === "string" && doc.device.trim() ? doc.device.slice(0, 128) : (browserOf(request, who.via) ?? "a machine");
+	const maxDelete = doc.max_delete === undefined ? 50 : doc.max_delete;
+	if (typeof maxDelete !== "number" || !Number.isInteger(maxDelete) || maxDelete < 0) return fail(400, "bad_request", "max_delete is a whole number");
+	const changes: SharedChange[] = [];
+	let carried = 0;
+	for (const item of list) {
+		if (!item || typeof item !== "object" || Array.isArray(item) || Object.keys(item).some((k) => !["path", "base", "sha256", "size", "body", "staged", "delete", "at_local"].includes(k))) {
+			return fail(400, "bad_request", "each change is { path, base, sha256, size, body | staged | delete, at_local }");
+		}
+		const c = item as Record<string, unknown>;
+		if (typeof c.path !== "string" || filePath(c.path.split("/")) === null) return fail(400, "bad_path", "the path breaks the contract's path rules");
+		let base: SharedChange["base"] = null;
+		if (c.base !== null && c.base !== undefined) {
+			const b = c.base as Record<string, unknown>;
+			if (typeof b !== "object" || typeof b.version !== "string" || !parseVersion(b.version) || (b.sha256 !== undefined && (typeof b.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(b.sha256)))) return fail(400, "bad_base", "base is null or { version, sha256? }");
+			base = { version: b.version, ...(b.sha256 ? { sha256: b.sha256 } : {}) };
+		}
+		if (c.sha256 !== undefined && (typeof c.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(c.sha256))) return fail(400, "bad_request", "sha256 is lowercase hex");
+		if (c.at_local !== undefined && (typeof c.at_local !== "string" || c.at_local.length > 40)) return fail(400, "bad_request", "at_local is the device's local time, RFC 3339");
+		const change: SharedChange = { path: c.path, base, sha256: c.sha256 as string | undefined, at_local: c.at_local as string | undefined };
+		const kinds = [c.body !== undefined, c.staged !== undefined, c.delete === true].filter(Boolean).length;
+		if (kinds !== 1 || (c.delete !== undefined && c.delete !== true)) return fail(400, "bad_request", `${c.path}: exactly one of body, staged, delete: true`);
+		if (c.delete === true) change.delete = true;
+		else if (c.staged !== undefined) {
+			if (typeof c.staged !== "string" || !HOST_ID.test(c.staged) || !host) return fail(400, "bad_staged", "staged is the uuid of an object uploaded to _incoming/<project>/<host>/, and host says whose");
+			change.staged = c.staged;
+		} else {
+			const data = typeof c.body === "string" ? fromBase64(c.body) : null;
+			if (!data) return fail(400, "bad_request", `${c.path}: body is base64`);
+			if (data.byteLength > INLINE_FILE_MAX) return fail(413, "too_large", `${c.path}: a file over 1 MiB is staged, not sent inline`);
+			carried += data.byteLength;
+			if (carried > COMMIT_BYTES_MAX) return fail(413, "too_large", "a commit carries at most 8 MiB of files; stage the big ones");
+			change.data = data;
+		}
+		changes.push(change);
+	}
+	const hostId = await deps.store.sharedTree(owner, project);
+	if (!hostId) return fail(409, "not_shared", "this folder has no shared tree: run folder-sync share");
+	// WHY again after the body (judge r2 #5): a device revoked while it sent this writes nothing
+	if (!(await stillSignedIn(deps, who.person))) return fail(401, "signed_out", "this device was signed out while it sent this commit");
+	const answer = await webHostOf(env, deps)({
+		method: "SHARED_COMMIT", owner, project, hostId, path: "", sessionId: who.person.sessionId, via: browserOf(request, who.via), receivedAt,
+		commit: { device, host: host as string | undefined, via: browserOf(request, who.via), maxDelete, changes, receivedAt },
+	});
+	if (answer.status === 200 && (answer.body as { changed?: boolean }).changed) await announce(env, deps, owner, project, answer);
+	return json(answer.status, answer.body, answer.headers ?? {});
+}
+
+/** PUT|DELETE …/shared/<path>: a page's write to the shared tree, through the same commit. The version it was made from
+ *  is `X-Folder-Sync-Base` (absent for a new file; a delete needs it); `X-Folder-Sync-Merge: never` makes a mismatch a 412
+ *  for an app that merges its own data. */
+async function sharedPage(request: Request, env: Env, deps: Deps, app: App | null, project: string, rest: string[], method: string): Promise<Response> {
+	const receivedAt = deps.now();
+	const who = await writer(request, deps, app);
+	if (who instanceof Response) return who;
+	const path = filePath(rest);
+	if (path === null) return fail(400, "bad_path", "the path breaks the contract's path rules");
+	const owner = who.person.userId;
+	const version = request.headers.get("X-Folder-Sync-Base");
+	if (version !== null && !parseVersion(version)) return fail(400, "bad_base", "X-Folder-Sync-Base is a version id, <written_at>_<sha16>, as the history lists it");
+	const never = request.headers.get("X-Folder-Sync-Merge");
+	if (never !== null && never !== "never") return fail(400, "bad_header", "X-Folder-Sync-Merge is never, or absent");
+	const hostId = await deps.store.sharedTree(owner, project);
+	if (!hostId) return fail(409, "not_shared", "this folder has no shared tree: run folder-sync share");
+	const change: SharedChange = { path, base: version ? { version } : null, ...(never ? { never: true } : {}) };
+	if (method === "PUT") {
+		const declared = Number(request.headers.get("Content-Length") || 0);
+		if (declared > WEB_FILE_MAX) return fail(413, "too_large", `the shared tree takes a page's files up to ${WEB_FILE_MAX >> 20} MiB`);
+		const data = new Uint8Array(await request.arrayBuffer());
+		if (data.byteLength > WEB_FILE_MAX) return fail(413, "too_large", `the shared tree takes a page's files up to ${WEB_FILE_MAX >> 20} MiB`);
+		change.data = data;
+	} else {
+		if (!version) return fail(400, "bad_base", "a delete names the version it was made from in X-Folder-Sync-Base");
+		change.delete = true;
+	}
+	if (!(await stillSignedIn(deps, who.person))) return fail(401, "signed_out", "this device was signed out while it sent this file");
+	const via = browserOf(request, who.via);
+	const answer = await webHostOf(env, deps)({
+		method: "SHARED_COMMIT", owner, project, hostId, path: "", sessionId: who.person.sessionId, via, receivedAt,
+		commit: { device: via ?? "a browser", via, maxDelete: 50, changes: [change], receivedAt },
+	});
+	if (answer.status !== 200) return json(answer.status, answer.body, answer.headers ?? {});
+	await announce(env, deps, owner, project, answer);
+	const done = answer.body as { host: string; seq: number; results: unknown[] };
+	return json(200, { host: done.host, seq: done.seq, ...(done.results[0] as object) });
+}
+
 /** The largest body POST …/hosts/<host>/delete takes: a list of paths, nothing else. */
 const DELETE_BODY_MAX = 256 * 1024;
 
@@ -658,6 +836,7 @@ async function machineDelete(request: Request, env: Env, deps: Deps, app: App | 
 	const raw = await request.arrayBuffer();
 	if (raw.byteLength > DELETE_BODY_MAX) return fail(413, "too_large", "a delete is a list of paths, at most 256 KiB");
 	if ((await deps.store.webHost(person.userId, project)) === host) return fail(400, "web_host", "the web host's files are deleted with DELETE …/web/<path>");
+	if ((await deps.store.sharedTree(person.userId, project)) === host) return fail(400, "shared_tree", "the shared tree's files are deleted with a commit (POST …/shared) or DELETE …/shared/<path>");
 	let body: Record<string, unknown>;
 	try {
 		body = JSON.parse(new TextDecoder().decode(raw));
@@ -961,7 +1140,7 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 		if (!allowed["Access-Control-Allow-Origin"]) return fail(403, "cors", "this origin is not a registered app");
 		return new Response(null, {
 			status: 204,
-			headers: headers({ ...allowed, "Access-Control-Allow-Methods": "GET, HEAD, PUT, PATCH, POST, DELETE", "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Folder-Sync, X-Folder-Sync-User, X-Folder-Sync-Keep-Newest, X-Folder-Sync-Tie-Prefers", "Access-Control-Max-Age": "600" }),
+			headers: headers({ ...allowed, "Access-Control-Allow-Methods": "GET, HEAD, PUT, PATCH, POST, DELETE", "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Folder-Sync, X-Folder-Sync-User, X-Folder-Sync-Keep-Newest, X-Folder-Sync-Tie-Prefers, X-Folder-Sync-Base, X-Folder-Sync-Merge", "Access-Control-Max-Age": "600" }),
 		});
 	}
 	if (first === "api" && rest[0] === "auth") {
@@ -1020,6 +1199,11 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 	if (sub === "files" && more.length >= 2) return read ? file(request, env, deps, app, project, more[0], more.slice(1), head) : fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 	if (sub === "web" && more.length >= 1) {
 		return method === "PUT" || method === "DELETE" ? web(request, env, deps, app, project, more, method) : fail(405, "method", "PUT or DELETE", { Allow: "PUT, DELETE" });
+	}
+	if (sub === "share" && more.length === 0) return method === "POST" ? share(request, env, deps, app, project) : fail(405, "method", "POST only", { Allow: "POST" });
+	if (sub === "shared" && more.length === 0) return method === "POST" ? sharedCommitRoute(request, env, deps, app, project) : fail(405, "method", "POST only", { Allow: "POST" });
+	if (sub === "shared" && more.length >= 1) {
+		return method === "PUT" || method === "DELETE" ? sharedPage(request, env, deps, app, project, more, method) : fail(405, "method", "PUT or DELETE", { Allow: "PUT, DELETE" });
 	}
 	if (sub === "readers") return readers(request, env, deps, app, project, more, method);
 	if (sub === "web-trash" && more.length === 1 && more[0] === "purge") {
