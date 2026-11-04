@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -137,4 +137,84 @@ test("CLI: --kpi --gates --out writes index.html and status.json; missing source
 	execFileSync(join(root, "scripts/status"), ["--kpi", "/nope", "--gates", "/nope", "--out", out2]);
 	assert.ok(existsSync(join(out2, "index.html")));
 	assert.throws(() => execFileSync(join(root, "scripts/status"), ["--bogus"], { stdio: "pipe" }));
+});
+
+// ---- O3 shows the cost on the provider each folder is actually on; the cheapest provider is the second line ---------------
+
+const NAMES = { r2: "Cloudflare R2 (Standard)", s3: "AWS S3 Standard (us-east-1)", b2: "Backblaze B2" };
+/** One cost_per_gb_month_usd line, the way bench/cost/cost.mjs writes it (labels.is_store_provider says where the folder is). */
+function costLine(provider, value, labels = {}, kpi = "cost_per_gb_month_usd", slice = {}) {
+	return JSON.stringify({
+		schema: "vt-kpi-point/1", kpi, t: "2026-11-04T12:00:00Z", value, n: 1, status: "measured",
+		labels: { provider_name: NAMES[provider], ...labels }, source: { code_sha: "abc", bench_version: "t", run_ids: ["r"], dirty: false },
+		slice: { env: "prod", provider, profile: "average", ...slice },
+	});
+}
+function costModel(lines) {
+	const dir = mkdtempSync(join(tmpdir(), "devview-cost-"));
+	const kpi = join(dir, "kpi.jsonl");
+	writeFileSync(kpi, lines.join("\n") + "\n");
+	return model(kpi, "/nonexistent/gates.json");
+}
+const perGb = (m) => metric(m, "O3", "cost_per_gb_month_usd").env.prod;
+
+test("O3: the headline is the cost on the provider the folder is on, the cheapest provider is a separate line", () => {
+	const cell = perGb(costModel([
+		costLine("r2", 0.015, { is_store_provider: true, folders: ["notes"] }),
+		costLine("s3", 0.023, { is_store_provider: false }),
+		costLine("b2", 0.007, { is_store_provider: false }),
+	]));
+	assert.equal(cell.value, 0.015);
+	assert.equal(cell.provider, NAMES.r2);
+	assert.deepEqual(cell.folders, ["notes"]);
+	assert.deepEqual(cell.cheapest, { value: 0.007, provider: NAMES.b2 });
+});
+
+test("O3: folders on two providers show the dearer one as the headline (a cost is only met if every folder meets it)", () => {
+	const cell = perGb(costModel([
+		costLine("r2", 0.015, { is_store_provider: true, folders: ["notes"] }),
+		costLine("s3", 0.023, { is_store_provider: true, folders: ["photos"] }),
+		costLine("b2", 0.007, { is_store_provider: false }),
+	]));
+	assert.equal(cell.value, 0.023);
+	assert.match(cell.provider, /AWS S3/);
+	assert.match(cell.provider, /Cloudflare R2/);
+	assert.deepEqual(cell.cheapest, { value: 0.007, provider: NAMES.b2 });
+});
+
+test("O3: a store nobody prices has no headline value, and says so; the cheapest provider is still shown", () => {
+	const cell = perGb(costModel([
+		costLine("r2", 0.015, { is_store_provider: false, store_unpriced: true }),
+		costLine("b2", 0.007, { is_store_provider: false, store_unpriced: true }),
+	]));
+	assert.equal(cell.value, null);
+	assert.equal(cell.unpriced, true);
+	assert.deepEqual(cell.cheapest, { value: 0.007, provider: NAMES.b2 });
+	const html = renderPage(costModel([costLine("r2", 0.015, { is_store_provider: false, store_unpriced: true })]));
+	assert.match(html, /no price for this store/);
+});
+
+test("O3: person-month is judged on the folder's own provider, not on the cheapest", () => {
+	const line = (provider, value, labels) => costLine(provider, value, labels, "cost_per_person_month_usd");
+	const cell = metric(costModel([line("s3", 0.6, { is_store_provider: true, folders: ["notes"] }), line("b2", 0.1, { is_store_provider: false })]), "O3", "cost_per_person_month_usd").env.prod;
+	assert.equal(cell.value, 0.6);
+	assert.equal(cell.status, "amber", "over the $0.50 target on S3, though B2 would meet it");
+	assert.deepEqual(cell.cheapest, { value: 0.1, provider: NAMES.b2 });
+});
+
+test("O3: points written before the store labels existed still read as the cheapest provider", () => {
+	const cell = perGb(costModel([costLine("r2", 0.015), costLine("s3", 0.023)]));
+	assert.equal(cell.value, 0.015);
+	assert.equal(cell.cheapest, null);
+});
+
+test("the page names the provider under the cost and the cheapest one beside it", () => {
+	const html = renderPage(costModel([
+		costLine("s3", 0.023, { is_store_provider: true, folders: ["notes"] }),
+		costLine("b2", 0.007, { is_store_provider: false }),
+	]));
+	const cell = html.slice(html.indexOf('data-cell="cost_per_gb_month_usd:prod"'));
+	const text = cell.slice(0, cell.indexOf("</div>")).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+	assert.match(text, /on AWS S3 Standard/);
+	assert.match(text, /cheapest provider: Backblaze B2/);
 });

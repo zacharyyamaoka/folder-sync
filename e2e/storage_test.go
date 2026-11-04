@@ -125,7 +125,7 @@ func TestStorageJourneyFileDirectory(t *testing.T) {
 	hub := filepath.Join(t.TempDir(), "hub")
 	os.MkdirAll(hub, 0o755)
 	runJourney(t, rcloneBin, journeyStore{
-		name: "file", url: "file://" + filepath.ToSlash(hub),
+		name: "file", url: testtools.FileURL(hub),
 		objects: &store.FileStore{Root: hub},
 		bucket:  hub,
 	})
@@ -196,18 +196,25 @@ func waitHTTP(t *testing.T, url string, within time.Duration, log func() string)
 	t.Fatalf("%s did not answer within %s:\n%s", url, within, log())
 }
 
-// makeBucket creates a bucket with a signed PUT (the engine never does: a store's bucket is its owner's).
+// makeBucket creates a bucket with a signed PUT (the engine never does: a store's bucket is its owner's). A 503 is a store that
+// is still starting (MinIO answers it for a moment after /minio/health/ready first says 200), so it is asked again for up to 30 s.
 func makeBucket(t *testing.T, endpoint, key, secret, name string) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodPut, endpoint+"/"+name, nil)
-	s3.Sign(req, key, secret, "us-east-1", time.Now(), s3.EmptySHA256)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("create bucket %s: %s", name, resp.Status)
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		req, _ := http.NewRequest(http.MethodPut, endpoint+"/"+name, nil)
+		s3.Sign(req, key, secret, "us-east-1", time.Now(), s3.EmptySHA256)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusServiceUnavailable && time.Now().Before(deadline) {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("create bucket %s: %s", name, resp.Status)
+		}
+		return
 	}
 }
 

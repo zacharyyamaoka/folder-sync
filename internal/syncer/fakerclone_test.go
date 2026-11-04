@@ -27,6 +27,9 @@ import (
 
 const fakeRcloneEnv = "FOLDER_SYNC_FAKE_RCLONE"
 
+// fakeRcloneArgsEnv names a file the fake appends each call's arguments to.
+const fakeRcloneArgsEnv = "FOLDER_SYNC_FAKE_RCLONE_ARGS"
+
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeRcloneEnv) != "" {
 		if err := runFakeRclone(os.Args[1:], os.Stdout); err != nil {
@@ -44,6 +47,13 @@ var valueFlags = map[string]bool{"--config": true, "--cache-dir": true, "--temp-
 
 func runFakeRclone(args []string, stdout io.Writer) error {
 	command := args[0]
+	// a test that wants to see the command line rclone was given names a file; one line per call
+	if path := os.Getenv(fakeRcloneArgsEnv); path != "" {
+		if f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			fmt.Fprintln(f, strings.Join(args, " "))
+			f.Close()
+		}
+	}
 	flags := map[string]string{}
 	var positional []string
 	for i := 1; i < len(args); i++ {
@@ -84,6 +94,10 @@ func runFakeRclone(args []string, stdout io.Writer) error {
 		sort.Slice(items, func(i, j int) bool { return items[i].Path < items[j].Path })
 		return json.NewEncoder(stdout).Encode(items)
 	case "copy":
+		// a pull (the remote is the source): the fake lands no files; the e2e suite's pulls do (names_test.go)
+		if strings.HasPrefix(positional[0], rclone.Remote+":") {
+			return nil
+		}
 		// a test that rewrites a file between the engine's hash and this upload says so in the environment
 		if target := os.Getenv("FAKE_RCLONE_REWRITE_PATH"); target != "" {
 			if with, err := os.ReadFile(os.Getenv("FAKE_RCLONE_REWRITE_WITH")); err == nil {

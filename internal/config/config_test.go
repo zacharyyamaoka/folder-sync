@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"folder-sync/internal/testtools"
 )
 
 func TestRenderLoadRoundTrip(t *testing.T) {
@@ -195,7 +197,7 @@ func TestNoStoreMeansR2(t *testing.T) {
 func TestFileStoreConfig(t *testing.T) {
 	dir := t.TempDir()
 	hub := filepath.ToSlash(filepath.Join(dir, "hub"))
-	if err := os.WriteFile(filepath.Join(dir, FileName), []byte("project = \"demo\"\nstore = \"file://"+hub+"\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte("project = \"demo\"\nstore = \""+testtools.FileURL(hub)+"\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c, err := Load(dir)

@@ -6,6 +6,9 @@ import { existsSync, readFileSync } from "node:fs";
 export const WINDOW_DAYS = 30;
 const DAY_MS = 864e5;
 
+// `headline: "store"` (the cost metrics): the headline is the cost on the provider each folder is actually on (the cost points'
+// labels.is_store_provider, bench/cost/store.mjs), the dearer one when folders are on two; the cheapest provider is a second line.
+// Points without those labels (written before they existed) fall back to the cheapest, as `agg: "best"` says.
 // Zach's objectives (Nov 4 2026). Targets are the numbers in PROJECT - Folder Sync; "primary" rows are on the at-a-glance card.
 // WHY amber/red only for a miss: a calm page (Zach: Notion/Obsidian restraint), so a value that meets its target has no colour but green.
 export const OBJECTIVES = [
@@ -26,8 +29,8 @@ export const OBJECTIVES = [
 	{
 		id: "O3", name: "Cost per GB", blurb: "Per GB-month and per person-month at 10 GB; idle near zero",
 		metrics: [
-			{ kpi: "cost_per_gb_month_usd", label: "per GB-month", title: "Cost per GB-month", unit: "usd", agg: "best", primary: true, note: "cheapest provider" },
-			{ kpi: "cost_per_person_month_usd", label: "per person-month, 10 GB", title: "Cost per person-month", unit: "usd", target: 0.5, agg: "best", primary: true, note: "cheapest provider, 10 GB profile", prefer: { key: "profile", re: /\b10\s*-?gb\b/i } },
+			{ kpi: "cost_per_gb_month_usd", label: "per GB-month", title: "Cost per GB-month", unit: "usd", agg: "best", headline: "store", primary: true },
+			{ kpi: "cost_per_person_month_usd", label: "per person-month, 10 GB", title: "Cost per person-month", unit: "usd", target: 0.5, agg: "best", headline: "store", primary: true, note: "10 GB profile", prefer: { key: "profile", re: /\b10\s*-?gb\b/i } },
 			{ kpi: "idle_cpu_pct", label: "idle CPU", title: "Idle CPU", unit: "pct", target: 0.1, agg: "worst", primary: true },
 			{ kpi: "idle_ops_per_hour", label: "idle ops/hour", title: "Idle operations per hour", unit: "ops", agg: "worst", primary: false },
 		],
@@ -138,7 +141,7 @@ function parsePoints(source, warnings) {
 			continue;
 		}
 		seen.add(key);
-		points.push({ kpi, env: slice.env, slice, t, v: p.status === "measured" ? p.value : null, failed: p.status === "failed", n: p.n });
+		points.push({ kpi, env: slice.env, slice, t, v: p.status === "measured" ? p.value : null, failed: p.status === "failed", n: p.n, labels: p.labels && typeof p.labels === "object" ? p.labels : {} });
 	}
 	const say = (n, text) => n && warnings.push(`${n} ${text}`);
 	say(skipped.badJson, "KPI lines skipped: not valid JSON or not vt-kpi-point/1");
@@ -185,7 +188,13 @@ function buildSeries(points, metric, now) {
 		const values = inWindow.map((p) => p.v);
 		const slice = { ...list[0].slice };
 		delete slice.env;
+		const labels = lastMeasured?.labels ?? {};
 		series.push({
+			// where the folders are (cost points only): null = the point does not say
+			onStore: typeof labels.is_store_provider === "boolean" ? labels.is_store_provider : null,
+			unpriced: labels.store_unpriced === true,
+			providerName: typeof labels.provider_name === "string" ? labels.provider_name : String(slice.provider ?? ""),
+			folders: Array.isArray(labels.folders) ? labels.folders.map(String) : [],
 			env: list[0].env,
 			slice,
 			label: sliceLabel(list[0].slice),
@@ -214,28 +223,40 @@ function buildCell(metric, env, points, series, now) {
 	}
 	const withValue = chosen.filter((s) => s.latest !== null);
 	const pick = metric.agg === "best" ? Math.min : Math.max;
-	const value = withValue.length ? pick(...withValue.map((s) => s.latest)) : null;
+	// the cost headline: the providers that hold a folder, when the points say which
+	const storeAware = metric.headline === "store" && withValue.some((s) => s.onStore !== null);
+	const held = storeAware ? withValue.filter((s) => s.onStore === true) : withValue;
+	const unpriced = storeAware && held.length === 0;
+	const value = held.length ? (storeAware ? Math.max : pick)(...held.map((s) => s.latest)) : null;
+	const cheapestSeries = storeAware && withValue.length ? withValue.reduce((a, b) => (b.latest < a.latest ? b : a)) : null;
 	const lastRunFailed = chosen.some((s) => s.lastRunFailed);
-	const last = withValue.length ? withValue.map((s) => s.latestAt).sort().at(-1) : null;
+	const last = held.length ? held.map((s) => s.latestAt).sort().at(-1) : null;
 
-	const wanted = new Set(chosen.map((s) => sliceId(s.slice)));
+	const wanted = new Set((storeAware ? held : chosen).map((s) => sliceId(s.slice)));
 	const events = points.filter((p) => !p.failed && p.env === env && wanted.has(sliceId(p.slice))).sort((a, b) => a.t - b.t);
 	const state = new Map();
 	const line = [];
 	for (const e of events) {
 		state.set(sliceId(e.slice), e.v);
 		if (e.t < now - WINDOW_DAYS * DAY_MS) continue;
-		const v = pick(...state.values());
+		const v = (storeAware ? Math.max : pick)(...state.values());
 		if (line.length && line.at(-1).ms === e.t) line.pop(); // several slices measured in the same run: keep the last aggregate
 		line.push({ ms: e.t, t: iso(e.t), v });
 	}
 	const status = value === null ? (lastRunFailed ? "red" : "none") : classify(metric, value);
-	return {
+	const cell = {
 		value, status, t: last, lastRunFailed,
 		stale: last !== null && Date.parse(last) < now - WINDOW_DAYS * DAY_MS,
 		nSeries: chosen.length,
 		sparkline: line.map(({ t, v }) => ({ t, v })),
 	};
+	if (metric.headline === "store") {
+		cell.provider = storeAware ? [...new Set(held.map((s) => s.providerName))].join(", ") : null;
+		cell.folders = storeAware ? [...new Set(held.flatMap((s) => s.folders))].sort() : [];
+		cell.unpriced = unpriced;
+		cell.cheapest = cheapestSeries ? { value: cheapestSeries.latest, provider: cheapestSeries.providerName } : null;
+	}
+	return cell;
 }
 
 function buildGates(source, warnings) {

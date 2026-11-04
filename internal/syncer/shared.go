@@ -182,12 +182,8 @@ func (p *Project) AdoptShared(host string, private []string) error {
 // noteShared looks at a host this machine just met: when its manifest is a shared tree's, the folder is shared. One GET,
 // only for a host met for the first time (Discover).
 func (p *Project) noteShared(id string) {
-	got, err := p.S3.GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(id)+"/"+manifest.FileName, "")
-	if err != nil || got.NotFound || got.NotModified {
-		return
-	}
-	m, err := manifest.Parse(got.Body)
-	if err != nil || m.HostID != id || m.Shared == nil {
+	got, m, err := getManifest(p.Objects(), p.Config.Bucket, p.HostPrefix(id)+"/"+manifest.FileName, "")
+	if err != nil || got.NotFound || got.NotModified || m.HostID != id || m.Shared == nil {
 		return
 	}
 	if err := p.AdoptShared(id, m.Shared.Private); err != nil {

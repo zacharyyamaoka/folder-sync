@@ -10,6 +10,7 @@ import (
 	"folder-sync/internal/s3"
 	"folder-sync/internal/store"
 	"folder-sync/internal/store/storetest"
+	"folder-sync/internal/testtools"
 )
 
 // openWith opens a folder whose config names storeURL, with env as the environment.
@@ -53,7 +54,7 @@ func TestObjectsIsTheS3ClientUntilAStoreIsSet(t *testing.T) {
 
 func TestOpenAFileStoreNeedsNoKeyAndUsesTheLocalRemote(t *testing.T) {
 	hub := filepath.ToSlash(t.TempDir())
-	p := openWith(t, "file://"+hub, map[string]string{})
+	p := openWith(t, testtools.FileURL(hub), map[string]string{})
 	if _, ok := p.Objects().(*store.FileStore); !ok {
 		t.Fatalf("Objects = %T", p.Objects())
 	}

@@ -40,10 +40,14 @@ type memStore struct {
 	written map[string]int64
 	puts    int
 	copies  int
+	// short makes the next N whole-object GETs of a key answer 200 with the first half of the body, correctly framed (Content-Length
+	// is the short length) and carrying the full object's ETag: what a store that serves an object while it is being replaced does.
+	// A real S3 or R2 never does this; rclone serve s3 over a directory, the e2e stand-in, can.
+	short map[string]int
 }
 
 func newMemStore(t *testing.T, bucket string, now func() time.Time) (*memStore, *httptest.Server) {
-	m := &memStore{bucket: bucket, objects: map[string]*memObject{}, now: now, written: map[string]int64{}}
+	m := &memStore{bucket: bucket, objects: map[string]*memObject{}, now: now, written: map[string]int64{}, short: map[string]int{}}
 	server := httptest.NewServer(m)
 	t.Cleanup(server.Close)
 	return m, server
@@ -128,6 +132,10 @@ func (m *memStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, to, len(data)))
 			data, status = data[from:to+1], http.StatusPartialContent
+		}
+		if m.short[key] > 0 && r.Method == http.MethodGet && status == http.StatusOK {
+			m.short[key]--
+			data = data[:len(data)/2]
 		}
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		w.WriteHeader(status)
