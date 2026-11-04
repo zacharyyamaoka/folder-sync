@@ -63,7 +63,7 @@ test("O2 and O3 rows carry the numbers of the series, the verdict only where a t
 	assert.deepEqual([h.test.text, h.test.verdict, h.prod.text, h.prod.verdict], ["1.51", "missed", "68", "missed"]);
 	assert.equal(row(v, "storage_efficiency_h").prod.verdict, "");
 	const perGb = row(v, "cost_per_gb_month_usd");
-	assert.deepEqual([perGb.test.text, perGb.prod.text, perGb.target], ["$0.017", "$0.92", "no number set; the cheapest provider"]);
+	assert.deepEqual([perGb.test.text, perGb.prod.text, perGb.target], ["$0.017", "$0.92", "no number set; lower is better"]);
 	const person = row(v, "cost_per_person_month_usd");
 	assert.deepEqual([person.test.text, person.test.verdict, person.prod.text, person.prod.verdict], ["$0.22", "met", "$0.32", "met"]);
 	const cpu = row(v, "idle_cpu_pct");

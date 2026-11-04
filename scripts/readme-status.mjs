@@ -27,8 +27,8 @@ const METRIC_TEXT = {
 	propagation_p95_ms: { what: "The same, 95th percentile (p95)", target: "≤ 3 s" },
 	storage_efficiency_h_30d_max: { what: "History bytes ÷ live bytes (H), worst of the last 30 days", target: "≤ 1.0 (stretch ≤ 0.25)" },
 	storage_efficiency_h: { what: "H, latest sample", target: "none (the 30-day worst is the target)" },
-	cost_per_gb_month_usd: { what: "Cost per GB-month, cheapest provider", target: "no number set; the cheapest provider" },
-	cost_per_person_month_usd: { what: "Cost per person-month at 10 GB, cheapest provider", target: "≤ $0.50" },
+	cost_per_gb_month_usd: { what: "Cost per GB-month on the provider that holds the folders", target: "no number set; lower is better" },
+	cost_per_person_month_usd: { what: "Cost per person-month at 10 GB, on the provider that holds the folders", target: "≤ $0.50" },
 	idle_cpu_pct: { what: "CPU when idle", target: "< 0.1 %" },
 	idle_ops_per_hour: { what: "Storage requests an hour when idle", target: "none (idle cost should be about $0)" },
 };
