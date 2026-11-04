@@ -297,7 +297,7 @@ def h_chart():
   <div class="legend"><span><i class="dot s2 inline"></i>production</span><span><i class="dot s1 inline"></i>test</span><span><i class="dot s3 inline"></i>PEP 0009's 30-day run</span><span><i class="gate-key"></i>target ≤ 1.0</span><span><i class="stretch-key"></i>stretch ≤ 0.25</span></div>
   {''.join(rows)}
   {ticks}
-  <figcaption>H = history bytes ÷ live bytes, log scale; lower is better. The three production samples are every one taken so far.{cite(3, 6)}</figcaption>
+  <figcaption>H = history bytes ÷ live bytes, log scale; lower is better. The {sum(1 for p in h_samples() if p['slice']['env'] == 'prod')} production samples are every one taken so far.{cite(3, 6)}</figcaption>
 </figure>"""
 
 
@@ -656,7 +656,6 @@ def build():
     runs_today = [(t, r) for t, r in runs if local(t).date() == datetime(2026, 11, 4).date()]
     failed_run = next((t, r) for t, r in runs_today if r["failed"])
     measured = [(t, r) for t, r in runs_today if r["p50"]]
-    first_run, last_run = measured[0], measured[-1]
 
     hs = h_samples()
     h_prod = [p for p in hs if p["slice"]["env"] == "prod"]
@@ -686,6 +685,8 @@ def build():
     dev_at = datetime.fromtimestamp(os.path.getmtime(f"{A.dev_shots}/dev-top.png"), LOCAL).strftime("%H:%M")
     live = ", ".join(f"<code>{path}</code> {code or 'unreachable'}" for path, code in LIVE.items())
     prod_range = f"{ms(best_prod[1])}–{ms(worst_prod[1])}"
+    arrow = lambda d: d.replace("->", " → ")
+    prod95_ok = [f"{arrow(d)} {o}" for d in DIRECTIONS for o in OPS if slices.get(("prod", d, o), {}).get("propagation_p95_ms", 1e9) < 3000]
 
     page = f"""<!doctype html>
 <html lang="en">
@@ -710,7 +711,7 @@ def build():
   <p class="verdict">Everything in your Nov 4 brief is built. Waves 1 and 2 are on <code>claude/folder-sync-v0</code> @ <code>29b6e83</code>, pushed, and live on vibetracks.dev as Worker <code>0a0f5357</code>. Wave 3 (the README, the landing page, the CI fixes and this report) sits on four lanes, not merged. {summary['pass']} of 12 gates pass; G4 and G11 wait for a green macOS and Windows CI run.{cite(1, 2, 9, 10)}</p>
   <ul>
     <li><b>O1 Fast:</b> <span class="ok">met in test</span> (p50 {ms(o1p50t['value'])}, p95 {ms(o1p95t['value'])}), <span class="miss">missed in production</span> (p50 {ms(o1p50p['value'])}, p95 {ms(o1p95p['value'])}, targets 1 s and 3 s). Production had never been measured on this bench before today's quota fix: the {hhmm(failed_run[0])} run timed out on all {failed_run[1]['failed'] // 2} slices.{cite(3)}</li>
-    <li><b>O2 Storage efficient:</b> production's H is <b>{hlatest['value']:.2f}</b> now; it was {h_first['value']:.0f} while the legacy trash existed. But the target is the worst of 30 days, so production reads <span class="miss">{h30p['value']:.0f}</span> until that sample ages out around {age_out}. Test reads <span class="miss">{h30t['value']:.2f}</span> on a 5-round CI workload; PEP 0009's 30-day run is 0.21.{cite(3, 5)}</li>
+    <li><b>O2 Storage efficient:</b> production's H is <b>{hlatest['value']:.2f}</b> now; it was {h_first['value']:.0f} while the legacy trash existed. But the target is the worst of 30 days, so production reads <span class="miss">{h30p['value']:.0f}</span> until that sample ages out around {age_out}. Test reads <span class="miss">{h30t['value']:.2f}</span> on a {h_test['labels']['rounds']}-round CI workload; PEP 0009's 30-day run is 0.21.{cite(3, 5)}</li>
     <li><b>O3 Cost per GB:</b> <span class="ok">met only on Backblaze B2</span> (${b2t:.2f} test, ${b2p:.2f} production, per person-month). On R2, where your folders are, it is <span class="miss">${pm_t['value']:.2f}</span> and <span class="miss">${pm_p['value']:.2f}</span> against $0.50. The cost there is request charges, not stored bytes.{cite(3, 4)}</li>
     <li><b>Your own syncs:</b> <code>zach</code>, <code>vibetracks</code> and <code>bam</code> {"all finished their last round ok" if all_ok else "did NOT all finish their last round ok"} (the oldest of the three at {synced_at}), on CLI <code>v0-29b6e83</code>. The account held {h_last['labels']['used_bytes'] / 1e6:.0f} MB against its 12 GiB at {hhmm(h_last['t'])}.{cite(11)}</li>
   </ul>
@@ -790,18 +791,17 @@ def build():
   {o1_chart()}
   <ul>
     <li><b>Test:</b> all 15 slices are at or under {ms(max(test50))} at p50 (from {ms(min(test50))}).</li>
-    <li><b>Production:</b> from {ms(best_prod[1])} ({best_prod[0][0].replace('->', ' → ')} {best_prod[0][1]}) to {ms(worst_prod[1])} ({worst_prod[0][0].replace('->', ' → ')} {worst_prod[0][1]}). Only the production p95 of machine → web add and delete, and machine → machine add and delete, are under 3 s.</li>
+    <li><b>Production:</b> from {ms(best_prod[1])} ({best_prod[0][0].replace('->', ' → ')} {best_prod[0][1]}) to {ms(worst_prod[1])} ({worst_prod[0][0].replace('->', ' → ')} {worst_prod[0][1]}). At p95, {len(prod95_ok)} of 15 production slices are under 3 s: {', '.join(prod95_ok) or 'none'}.</li>
     <li><b>Production's first day:</b>
       <ul>
         <li>{hhmm(failed_run[0])}: every slice timed out. The account was over quota, so every push was held.</li>
-        <li>{hhmm(first_run[0])}: the first measurement. Worst p50 {ms(max(first_run[1]['p50']))}, worst p95 {ms(max(first_run[1]['p95']))}.</li>
-        <li>{hhmm(last_run[0])}: worst p50 {ms(max(last_run[1]['p50']))}, worst p95 {ms(max(last_run[1]['p95']))}.</li>
-        <li>Two measured runs are not yet a trend.{cite(3)}</li>
+        {''.join(f"<li>{hhmm(t)}: {'the first measurement. Worst' if i == 0 else 'worst'} p50 {ms(max(r['p50']))}, worst p95 {ms(max(r['p95']))}.</li>" for i, (t, r) in enumerate(measured))}
+        <li>{len(measured)} measured runs are not yet a trend.{cite(3)}</li>
       </ul></li>
-    <li><b>Not broken down yet:</b> where the 2–3 s go in production (R2 round trips, the Worker's push, the poll). That is O1's next step.</li>
+    <li><b>Not broken down yet:</b> where the seconds go in production (R2 round trips, the Worker's push, the poll). That is O1's next step.</li>
   </ul>
 
-  <h3>O2 Storage efficient: 0.05 today, but the 30-day worst still remembers the trash</h3>
+  <h3>O2 Storage efficient: {hlatest['value']:.2f} now, but the 30-day worst still remembers the trash</h3>
   {h_chart()}
   <ul>
     <li><b>What moved it:</b> the R2 expiry rule on your legacy <code>_trash/</code>, set when you said go at about 10:28. History went from {h_first['labels']['history_bytes'] / 1e9:.1f} GB ({hhmm(h_first['t'])}) to {h_prod[1]['labels']['history_bytes'] / 1e6:.1f} MB ({hhmm(h_prod[1]['t'])}) and {h_last['labels']['history_bytes'] / 1e6:.1f} MB ({hhmm(h_last['t'])}), against about {h_last['labels']['live_bytes'] / 1e6:.0f} MB of live files.{cite(3, 12)}</li>
@@ -1007,13 +1007,14 @@ plan (Conflicted copy bam-laptop-2 202611040908) 2.md</pre>
   <ol class="decisions">
     <li><h3>Merged Wave 1 into v0: <code>track/finish</code> as <code>3ff5e9f</code> (12:17)</h3>
       <p>The Files page, the parts, the Storage view, per-app accounts, PEP 0009 built, the KPIs, the gates and the dev view.</p>
-      <p>One test change rode along: a UI test now waits for the preview before reading its colours (<code>01244d4</code>). It had raced; it then passed 3 of 3 full runs.</p>
+      <p>One test change rode along: a UI test now waits for the preview before reading its colours (<code>01244d4</code>). It had raced; it then passed 3 of 3 full runs.{cite(12)}</p>
       <p class="undo">Undo: <code>git revert -m1 3ff5e9f</code></p></li>
     <li><h3>Accepted PEP 0010 with its four recommended defaults (<code>bee12bb</code>, 12:16), then built it</h3>
       <p>The tree lives at <code>hosts/&lt;shared-id&gt;/</code>; conflict copies use Obsidian's name; v1 needs the accounts server; nothing is private by default.</p>
       <p class="undo">Undo: <code>git revert bee12bb</code> reverts the status line. The build itself came in with <code>29b6e83</code>.</p></li>
     <li><h3>Merged Wave 2 into v0: <code>track/wave2</code> as <code>29b6e83</code> (13:57)</h3>
       <p>After the merge: the Go suite with e2e green, 333 of 333 accounts tests, and the core-alone check green.{cite(12)}</p>
+      <p>Re-run for this report on the same code (this lane adds only the report's builder): <code>go build</code>, <code>go vet</code>, <code>go test ./...</code> with e2e required and nothing quarantined, <code>check-core-alone</code>, 70 of 70 schema fixtures, 333 of 333 accounts tests, and 84 UI tests passed with 14 skipped. All green.{cite(21)}</p>
       <p class="undo">Undo: <code>git revert -m1 29b6e83</code></p></li>
     <li><h3>Deployed the accounts Worker three times: <code>678d7532</code> and <code>abb82d50</code> at 12:19, then <code>0a0f5357</code> at 14:00</h3>
       <p>The first two went out 36 s apart (Wave 1, then the 12 GiB quota); the third is Wave 2. Before the session, the live version was <code>05a6d0b1</code> (08:46).</p>
@@ -1044,7 +1045,7 @@ plan (Conflicted copy bam-laptop-2 202611040908) 2.md</pre>
         <li>the new Google OAuth client's ID and secret;</li>
         <li>a Cloudflare R2 token pair.</li>
       </ul>
-      <p>Until then the robotparts Worker has 3 of its 5 secrets, and robotparts.dev is not switched over.{cite(18)}</p>
+      <p>Until then the robotparts Worker has 3 of its 5 secrets, and robotparts.dev is not switched over.{cite(12, 18)}</p>
       <p class="undo">Recommendation: do it when you have five minutes. A watcher picks it up and has robotparts.dev switched over and sign-in tested. Nothing else waits on it.</p></li>
     <li><h3>Stripe test keys, only if you want payments on</h3>
       <p>Payments are off for every app (<code>FEATURE_PAYMENTS = "off"</code>). The flow is proven against a Stripe fixture, not against Stripe.{cite(19)}</p>
@@ -1128,6 +1129,7 @@ plan (Conflicted copy bam-laptop-2 202611040908) 2.md</pre>
     <li id="s18"><code>accounts/wrangler.toml</code> (line 92 <code>EMAIL_FROM</code>; <code>QUOTA_BY_OWNER</code> from <code>git show 2118ca0</code>); <code>ps</code> at 15:00: <code>set-secrets.py --env robotparts</code> running since about 11:00; <code>127.0.0.1:33163</code> answered {SECRETS_PAGE} at {CHECKED_AT}.</li>
     <li id="s19"><code>accounts/migrations/0011_billing.sql</code>, <code>0012_byo_store.sql</code>, <code>0013_shared_tree.sql</code>; <code>~/.local/share/folder-sync-backups/</code>; <code>accounts/test/account-journey.mjs</code> header; <code>FEATURE_PAYMENTS</code> / <code>FEATURE_BYO</code> in <code>wrangler.toml</code>.</li>
     <li id="s20">The 10:29 version of this page, <a href="folder-sync-2026-11-04-1029.html">folder-sync-2026-11-04-1029.html</a> (option B's seam tests and their red runs, the Files page journey, the PEP drafts); <code>PARTS.md</code>.</li>
+    <li id="s21">The full gate on <code>lane/final-report</code>'s base <code>29b6e83</code>, run 14:58–15:07 for this report: every step exit 0; <code># pass 70</code> (schema), <code># pass 333 # fail 0</code> (accounts), <code>84 passed, 14 skipped</code> (ui). The lane's own commit adds only <code>docs/report/build_nov4.py</code> and <code>shoot_dev_view.mjs</code>, which no test reads.</li>
   </ol>
 </section>
 
