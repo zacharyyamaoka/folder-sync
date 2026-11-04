@@ -23,6 +23,12 @@
       "http://127.0.0.1:4973",
       "http://localhost:4973"
     ],
+    "loopback": [
+      "http://127.0.0.1:4470",
+      "http://localhost:4470",
+      "http://127.0.0.1:4471",
+      "http://localhost:4471"
+    ],
     "project": "robotparts"
   },
   "vibetracks": {

@@ -16,7 +16,7 @@
 
 import { betterAuth } from "better-auth";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
-import { bearer, deviceAuthorization, emailOTP } from "better-auth/plugins";
+import { bearer, deviceAuthorization, emailOTP, oneTimeToken } from "better-auth/plugins";
 import type { App } from "./apps.ts";
 import type { Deps, Env, Person, Via } from "./app.ts";
 import { emailSender } from "./email.ts";
@@ -161,6 +161,8 @@ export function createAuth(env: Env, origin: string) {
 				validateClient: (clientId: string) => clientId === CLIENT_ID,
 			}),
 			bearer(),
+			// A loopback channel's sign-in (PEP 0003 §3.10). WHY disableClientRequest: only the /fs/handoff route mints one
+			oneTimeToken({ expiresIn: 1, storeToken: "hashed", disableClientRequest: true }),
 			...(dev || mail
 				? [emailOTP({
 					otpLength: 6,
@@ -251,6 +253,15 @@ export function liveDeps(env: Env): Deps | null {
 				sessionId: found.session.id,
 				sessionToken: found.session.token,
 			};
+		},
+		async handoffToken(request, app) {
+			const headers = sent(request, "cookie");
+			if (!headers) return null;
+			return (await instance(request, app).api.generateOneTimeToken({ headers })).token;
+		},
+		async handoffRedeem(request, app, token) {
+			const answer = await instance(request, app).api.verifyOneTimeToken({ body: { token }, asResponse: true });
+			return answer.ok ? answer.headers.getSetCookie() : null;
 		},
 		async signOut(request, via, app, person): Promise<string[]> {
 			const auth = instance(request, app);

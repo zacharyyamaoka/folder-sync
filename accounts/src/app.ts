@@ -4,6 +4,7 @@
 //   *    /fs/api/auth/*                           Better Auth: Google sign-in, sessions, the device grant, sign-out
 //   GET  /fs/signin?return=<path>                 the sign-in page; back to <path> signed in
 //   GET  /fs/device[?user_code=…]                 approve a machine that ran `folder-sync login` (RFC 8628)
+//   GET  /fs/handoff?to=<url>                     a listed loopback channel's sign-in (§3.10); then /fs/handoff/redeem
 //   GET  /fs/dev/mailbox?email=                   dev + loopback only: the last sign-in code
 //   GET  /fs/v1/me                                the session's person, root and app
 //   GET  /fs/v1/usage                             the session's storage, its quota, and whether it is over
@@ -46,6 +47,7 @@ import { localWebHost, NEWEST_FIELD, type WebAnswer, type WebOp } from "./webhos
 import type { EmailEnv } from "./email.ts";
 import { accountRoute, devicesApi, signInReturn, type GrantRow, type SessionRow } from "./devices.ts";
 import { downloadRoute, type DownloadsBucket } from "./download.ts";
+import { handoffRoute } from "./handoff.ts";
 import { servedFile } from "./ranges.ts";
 import type { CloseOrder } from "./hub.ts";
 import { activityRoute, browserOf, deleted, history, purge, restore, status, ui } from "./view.ts";
@@ -90,6 +92,10 @@ export interface Deps {
 	auth(request: Request, app: App): Promise<Response>;
 	/** The person whose session this request carries: by its cookie (a browser) or its bearer token (a machine). */
 	person(request: Request, via: Via, app: App | null): Promise<Person | null>;
+	/** A one-minute, one-use token for this browser's session; null when it has none (§3.10). */
+	handoffToken?(request: Request, app: App): Promise<string | null>;
+	/** That token's session as Set-Cookie headers for whoever redeems it; null when it is used, forged or expired. */
+	handoffRedeem?(request: Request, app: App, token: string): Promise<string[] | null>;
 	/** Ends that session; the Set-Cookie headers that clear a browser's cookie. */
 	signOut(request: Request, via: Via, app: App | null, person: Person): Promise<string[]>;
 	store: Store;
@@ -861,7 +867,7 @@ export function returnPath(value: string | null): string {
 	return value;
 }
 
-function page(env: Env, app: App, title: string, script: string, back: string, head: boolean): Response {
+function page(env: Env, app: App, origin: string, title: string, script: string, back: string, head: boolean): Response {
 	const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -871,6 +877,7 @@ function page(env: Env, app: App, title: string, script: string, back: string, h
 <link rel="icon" href="data:,">
 <meta name="fs-signin" content="${signInMethod(env)}">${env.ENVIRONMENT === "dev" ? '\n<meta name="fs-local" content="1">' : ""}
 <meta name="fs-app" content="${escapeAttr(app.name)}">
+<meta name="fs-origin" content="${escapeAttr(origin)}">
 <meta name="fs-return" content="${escapeAttr(back)}">
 <link rel="stylesheet" href="/fs/site/account.css">
 </head>
@@ -959,8 +966,10 @@ async function route(request: Request, env: Env, deps: Deps | null, registered: 
 		if (!read) return fail(405, "method", "GET only", { Allow: "GET, HEAD" });
 		if (!app) return fail(404, "unknown_origin", "this origin is not a registered app: no sign-in here");
 		const back = first === "signin" ? signInReturn(app, returnPath(new URL(request.url).searchParams.get("return"))) : "/fs/device";
-		return first === "signin" ? page(env, app, "Sign in", "", back, head) : page(env, app, "Sign in a machine", "device.js", back, head);
+		const origin = new URL(request.url).origin;
+		return first === "signin" ? page(env, app, origin, "Sign in", "", back, head) : page(env, app, origin, "Sign in a machine", "device.js", back, head);
 	}
+	if (first === "handoff") return handoffRoute(request, deps, app, rest, method);
 	if (first === "account") return accountRoute(request, env, deps, app, rest, method);
 	// public, no session: the desktop installers (PEP 0006), on every app's /fs/ and this Worker's own host
 	if (first === "download") return downloadRoute(request, env, app, rest, method);
