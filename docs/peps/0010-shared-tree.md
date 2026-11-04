@@ -1,9 +1,10 @@
 # 0010 · A shared tree: every device edits every file; the folder's object orders changes and merges the rare collision
 
 - **Date:** 2026-11-04
-- **Status:** Draft, 2026-11-04, on `lane/peps-0009-0010` (cut from `claude/folder-sync-v0` at 6e1baf3). Nothing is
-  built. Zach accepted the direction on 2026-11-04 (below); this PEP is the design, for him to accept or amend. Until
-  then the contract's "two-way folders are v1" stands.
+- **Status:** Accepted, 2026-11-04 (Zach, relayed: "go with the recommendations"), with every §13 default: the tree
+  lives at `<project>/hosts/<shared-id>/` (L2); shared folders need the accounts server in v1; conflict copies are
+  named `(Conflicted copy <device> <YYYYMMDDHHMM>)`; nothing is private unless named at `share` time. Not built yet;
+  the build is Wave 2. Until it lands, the contract's "two-way folders are v1" stands.
 - **Source:** Zach, 2026-11-04, in `PROJECT - Folder Sync`, on the `C - Single Writer Principle` bullet:
   1. "I am not sure if this is the design we want to take here though? Are there other options? I think the goal is
      to have something more like obsidian sync, github..."
@@ -385,7 +386,7 @@ conflict copy or history. 0 lost versions. The shared cases:
 
 ## 13. Open questions for Zach
 
-Each one has a recommendation, and the default that holds if he says nothing.
+Accepted 2026-11-04: every recommendation below is the decision.
 
 1. **Where the shared tree lives (the bucket contract).**
    - **Recommendation and default:** L2, `<project>/hosts/<shared-id>/`, with the reserved `shared/` and `_leases/`
