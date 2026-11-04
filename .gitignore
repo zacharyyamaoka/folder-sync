@@ -12,3 +12,5 @@ node_modules/
 /app/src-tauri/target/
 /app/src-tauri/binaries/
 /app/src-tauri/gen/
+# gates.json and its evidence (scripts/gates): rewritten on every run
+/reports/status/

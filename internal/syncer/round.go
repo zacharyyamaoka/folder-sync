@@ -951,16 +951,24 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 		}
 	}
 	// two names this disk folds into one file (NFC and NFD on APFS, or case twins) hold one file's bytes between them: neither
-	// lands, and each says why (twins.go)
-	for _, group := range twinGroups(localRoot, fetch) {
-		for _, path := range group {
-			os.Remove(filepath.Join(localRoot, filepath.FromSlash(path)))
-			result.Skipped = append(result.Skipped, names.Skipped{Path: peerID + "/" + path,
-				Reason: fmt.Sprintf("this disk keeps %s and %s as one file (names that differ only in Unicode normalization or case)", group[0], group[1])})
-			pr.Skipped++
-			delete(newIndex, path)
+	// lands, and each says why (twins.go). Every name in the manifest is checked, not just this round's fetches: a twin that
+	// arrives later overwrites the file of the one that came before.
+	if len(fetch) > 0 {
+		listed := make([]string, 0, len(newIndex))
+		for path := range newIndex {
+			listed = append(listed, path)
 		}
-		fetch = withoutPaths(fetch, setOf(group))
+		sort.Strings(listed)
+		for _, group := range twinGroups(localRoot, listed) {
+			for _, path := range group {
+				os.Remove(filepath.Join(localRoot, filepath.FromSlash(path)))
+				result.Skipped = append(result.Skipped, names.Skipped{Path: peerID + "/" + path,
+					Reason: fmt.Sprintf("this disk keeps %s and %s as one file (names that differ only in Unicode normalization or case)", group[0], group[1])})
+				pr.Skipped++
+				delete(newIndex, path)
+			}
+			fetch = withoutPaths(fetch, setOf(group))
+		}
 	}
 	consistent := true
 	for _, path := range fetch {
