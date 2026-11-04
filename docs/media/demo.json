@@ -1,0 +1,9 @@
+{
+  "recorded_at": "2026-11-04T21:23:25.446Z",
+  "seconds": 29.6,
+  "measured_ms": {
+    "toBrowser": 782,
+    "toDisk": 252
+  },
+  "note": "recorded by ui/scripts/record-demo.mjs from the local stack; times are polled in that run"
+}

@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// The README / landing page status block generator (README.md "Objectives & Gates"); the code is in readme-status.mjs.
+import("./readme-status.mjs").then((m) => { process.exitCode = m.main(process.argv.slice(2)); });
