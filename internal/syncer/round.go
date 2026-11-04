@@ -73,6 +73,13 @@ type Result struct {
 	Restore *history.Outcome `json:"restore,omitempty"`
 }
 
+// exactNames makes rclone's copy treat a name as its bytes. WHY (gate G9; docs/CONTRACT.md "byte for byte"; Zach's rule that
+// stored text is never silently normalized): rclone's default folds a name to NFC to compare, so a folder holding café as NFC
+// and as NFD uploaded one of them ("Duplicate object found in source - ignoring") while the manifest named both, and a file
+// re-saved under the other spelling was skipped as already there and then deleted under its old name. The engine never
+// rewrites a name: NFC and NFD are two names, each landing exactly once, under the spelling its writer used.
+const exactNames = "--no-unicode-normalization"
+
 // Filters writes the rclone filter file for this project's push and returns its path.
 // The peers' folder is always excluded: a machine publishes only its own files.
 func (p *Project) Filters() (string, error) {
@@ -312,7 +319,7 @@ func (p *Project) Push(ctx context.Context, stamp string, result *Result) error 
 		// rclone refuses --filter-from beside --files-from; the list comes from the
 		// filtered scan above, so the ignore rules are already applied.
 		if _, err := p.Rclone.Run(ctx, "copy", p.Folder, remoteRoot,
-			"--files-from-raw", list, "--no-traverse", "--max-delete", fmt.Sprint(p.Config.MaxDelete)); err != nil {
+			"--files-from-raw", list, "--no-traverse", exactNames, "--max-delete", fmt.Sprint(p.Config.MaxDelete)); err != nil {
 			return err
 		}
 		uploadedAt = p.Now()
@@ -939,9 +946,21 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 		// only below, once its files are in, so the next round redoes a cut fetch (the manifest read again, 200 not
 		// 304, then what is missing) and nothing is lost; making the stop wait would hold it as long as the fetch.
 		if _, err := p.Rclone.Run(ctx, "copy", rclone.Path(p.Config.Bucket, p.HostPrefix(peerID)), localRoot,
-			"--files-from-raw", list, "--no-traverse"); err != nil {
+			"--files-from-raw", list, "--no-traverse", exactNames); err != nil {
 			return pr, err
 		}
+	}
+	// two names this disk folds into one file (NFC and NFD on APFS, or case twins) hold one file's bytes between them: neither
+	// lands, and each says why (twins.go)
+	for _, group := range twinGroups(localRoot, fetch) {
+		for _, path := range group {
+			os.Remove(filepath.Join(localRoot, filepath.FromSlash(path)))
+			result.Skipped = append(result.Skipped, names.Skipped{Path: peerID + "/" + path,
+				Reason: fmt.Sprintf("this disk keeps %s and %s as one file (names that differ only in Unicode normalization or case)", group[0], group[1])})
+			pr.Skipped++
+			delete(newIndex, path)
+		}
+		fetch = withoutPaths(fetch, setOf(group))
 	}
 	consistent := true
 	for _, path := range fetch {

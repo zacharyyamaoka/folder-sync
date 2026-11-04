@@ -30,8 +30,8 @@ concurrency:
 env:
   FOLDER_SYNC_E2E_REQUIRE: "1"
   # Cases a run found failing, skipped under their id until fixed (what is wrong: knownBugs in e2e/crossos_test.go). The
-  # summary lists them as quarantined. Empty this to see them fail.
-  FOLDER_SYNC_QUARANTINE: "junk-files,unicode-normalization"
+  # summary lists them as quarantined. Empty since gate G9 fixed junk-files and unicode-normalization (2026-11-04).
+  FOLDER_SYNC_QUARANTINE: ""
 
 jobs:
   test:

@@ -43,7 +43,7 @@ Both run in CI as their own lines (`.github/workflows/test.yml`) and locally:
 
 | Part | Check | CI line |
 |---|---|---|
-| core | `go build ./... && go vet ./... && FOLDER_SYNC_QUARANTINE=junk-files,unicode-normalization go test ./...`, `node --test schema/fixtures.test.mjs` | `test (linux)`, `test (macos)`, `test (windows)`, the two cross-OS pair lines |
+| core | `go build ./... && go vet ./... && go test ./...`, `node --test schema/fixtures.test.mjs` | `test (linux)`, `test (macos)`, `test (windows)`, the two cross-OS pair lines |
 | core, alone | `scripts/check-core-alone` | `core, no server (linux)` |
 | server-cloudflare | `npm --prefix accounts test` (includes the identity seam) | `server-cloudflare (linux)` |
 | ui | `npm --prefix ui test` (Playwright, Chromium) | `ui (linux)` |
