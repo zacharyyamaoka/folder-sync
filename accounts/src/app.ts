@@ -90,7 +90,9 @@ export interface Deps {
 	waitUntil?: (work: Promise<unknown>) => void;
 	/** Better Auth's handler for this app's origin (baseURL = that origin, basePath /fs/api/auth). */
 	auth(request: Request, app: App): Promise<Response>;
-	/** The person whose session this request carries: by its cookie (a browser) or its bearer token (a machine). */
+	/** The person whose session this request carries: by its cookie (a browser) or its bearer token (a machine).
+	 *  WHY: this is the identity port, `whoIs(request) -> person | null` (PARTS.md, seam 2). Every route asks it, here and in
+	 *  handoff.ts, and only auth.ts answers it; test/identity-seam.test.ts fails if anything else reaches Better Auth. */
 	person(request: Request, via: Via, app: App | null): Promise<Person | null>;
 	/** A one-minute, one-use token for this browser's session; null when it has none (§3.10). */
 	handoffToken?(request: Request, app: App): Promise<string | null>;

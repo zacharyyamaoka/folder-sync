@@ -217,6 +217,14 @@ A machine's own files stay where they are in its folder. Its peers' files land r
 
 Before PEP 0007 every overwritten or deleted object was kept at `<root>_trash/<project>/<host-id>/<UTC-stamp>/<path>`. It is not migrated and the view does not show it; any S3 tool still reads it, and the pruner deletes it 30 days after its stamp. Its README lifecycle rule (prefix `_trash/`) only ever matched v0 bucket-key folders, whose root is empty: for an account root (`users/<id>/…`) no lifecycle rule can match, since rules match a literal prefix. That is why retention is folder-sync's own job.
 
+## Parts
+
+This page is the seam between the parts of the repo ([`PARTS.md`](../PARTS.md)): **core** (the Go CLI and engine) writes the layout above and works alone, with no server; **server-cloudflare** (`accounts/`, `demo/`) is the online half and one more host of every folder; **ui** (`ui/`, `app/ui/`) is the sync view; **desktop** (`app/src-tauri/`) wraps the core.
+
+- **Seams:** this page (the layout and manifest, with `schema/`, `testdata/` and the two readers), the credential process ([`docs/peps/0002`](peps/0002-short-lived-scoped-credentials.md): a program that prints short-lived keys for a prefix; `login --key` and `folder-sync credentials` are two of them) and `/fs/v1` HTTP ([`docs/API.md`](API.md)).
+- **What each part owns:** the core owns the bucket contract and every write under `hosts/`, `_history/` and `_changes/` from a machine; the server owns identity, key minting, the web host (the one `web` host a browser writes through), the pruner and quota; the ui owns how a folder is shown and nothing about how it is stored.
+- **Who may import whom:** the core imports no server code and the server imports only this contract (`readers/worker`, `schema/`, `testdata/`); the ui reads the view API and fixtures; nothing imports the desktop. `scripts/check-core-alone` and `accounts/test/identity-seam.test.ts` pin the two ends in CI.
+
 ## Not part of the contract
 
 - `_leases/` and `shared/` layouts beyond what this page states.

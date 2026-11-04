@@ -6,6 +6,12 @@
 # Each job's summary says how many e2e tests ran and how many skipped (scripts/testsummary), because a skipped e2e looks
 # green and tests nothing. FOLDER_SYNC_E2E_REQUIRE=1 turns a skip for a missing tool (rclone, node, python's jsonschema)
 # into a failure (internal/testtools).
+# One repo, three named parts (PARTS.md), each its own red/green line so churn in one shows up as its own check:
+#   core               the `test (...)` matrix and the cross-OS pair below, plus `core, no server` (seam 1)
+#   server-cloudflare  `server-cloudflare` (the accounts Worker; its step "seam 2" is the identity adapter check)
+#   ui                 `ui` (the sync element, in Chromium)
+#   desktop            desktop-smoke.yml and desktop-release.yml (the installers)
+# `test (...)` keeps its name: a required check may be pinned to it.
 # WHY every action pinned to a full commit SHA, with its release in the comment, at least two weeks old (Zach's rule for new
 # dependencies, 2026-10-28). desktop-release.yml pins the same releases by tag.
 name: test
@@ -72,6 +78,11 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # the frozen contract's schemas against the shared fixtures; no dependency, so Linux once is enough
+      - name: schema fixtures
+        if: runner.os == 'Linux'
+        run: node --test schema/fixtures.test.mjs
+
       - name: go test (e2e included)
         run: |
           set +e
@@ -87,6 +98,89 @@ jobs:
           name: test-json-${{ matrix.name }}
           path: ${{ runner.temp }}/test.json
           retention-days: 7
+
+  # Part core, seam 1 (PARTS.md): the core works with no server at all. scripts/check-core-alone copies the checkout WITHOUT
+  # accounts/, demo/ and app/ and runs the core there: the e2e on bucket-key login against the local R2 stand-in, the Go
+  # tests, the schema fixtures. Anything in the core that imports, reads or starts the server part fails here, because the
+  # directory is not there. No `npm ci` in this job on purpose: there is no Worker to start.
+  core-alone:
+    name: core, no server (linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: jsonschema (the manifest-schema check)
+        run: python -m pip install jsonschema
+
+      - name: The pinned rclone (scripts/dev-tools)
+        run: scripts/dev-tools
+
+      - name: The core without the server part
+        run: scripts/check-core-alone
+
+  # Part server-cloudflare: the accounts Worker's own tests (Better Auth over node:sqlite, in-memory S3; no wrangler, no
+  # network). Seam 2 runs first and alone, so "reaches identity around the port" is its own failure.
+  server-cloudflare:
+    name: server-cloudflare (linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: accounts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # the Worker's tests run its TypeScript directly (node >= 22.18)
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      # WHY --ignore-scripts: wrangler's workerd postinstall fetches nothing the tests use
+      - name: npm ci
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: seam 2, identity only through deps.person (the adapter is the only file that imports better-auth)
+        run: node --test test/identity-seam.test.ts
+
+      - name: npm test
+        run: npm test
+
+  # Part ui: <folder-sync-status> in Chromium over the shared fixtures in testdata/view-api/ (a stub server, no Worker).
+  ui:
+    name: ui (linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: npm ci
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Chromium (the version @playwright/test pins)
+        run: npx playwright install --with-deps chromium
+
+      - name: npm test
+        run: npm test
 
   # The Linux half of the pair: write the awkward tree with a real push, assert what landed and what was refused, and
   # save the bucket (a tar, because a Windows folder cannot hold CON.txt or a:b).

@@ -17,6 +17,17 @@ folder-sync projects  # the projects under the key's account root (one LIST): wh
 
 The design is [`docs/peps/0001`](docs/peps/0001-wrap-rclone-and-r2.md) (accepted): rclone moves the files, one Cloudflare R2 bucket is the always-on copy, R2-Explorer is the web backdoor, and a thin Go binary owns the rest. Apps read projects through [the bucket contract](docs/CONTRACT.md): "the folder is the database".
 
+## Parts
+
+One repo, three named parts and a desktop shell, with seams that tests enforce ([`PARTS.md`](PARTS.md) is the map):
+
+- **core** (`cmd/`, `internal/`, `e2e/`, `schema/`): the Go CLI and engine. It works alone, on a bucket key, with no server.
+- **server-cloudflare** (`accounts/`, `demo/`): the accounts Worker (Better Auth, D1, Durable Objects) and the demo site. It reaches identity through one function, `deps.person`, answered by one file, `accounts/src/auth.ts`.
+- **ui** (`ui/`, `app/ui/`): `<folder-sync-status>`, the one sync view, and the desktop shell's page.
+- **desktop** (`app/src-tauri/`): the Tauri shell around the core.
+
+They meet at three seams only: the bucket layout and manifest ([`docs/CONTRACT.md`](docs/CONTRACT.md)), the credential process ([`docs/peps/0002`](docs/peps/0002-short-lived-scoped-credentials.md)) and `/fs/v1` HTTP ([`docs/API.md`](docs/API.md)). The core imports nothing of the server; the server imports only the contract. Each part has its own CI line; `scripts/check-core-alone` runs the core with the server part deleted.
+
 ## Install (v0: from source)
 
 ```bash
