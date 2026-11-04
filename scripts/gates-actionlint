@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Lints .github/workflows/*.yml with actionlint (G4's proof that the CI matrix is well-formed before it ever runs on GitHub).
+# The stock binary, pinned: fetched into <repo>/.tools/ on first use and checked against the SHA-256 below, which is copied from
+# the release's own actionlint_<version>_checksums.txt. WHY v1.7.12: released 2026-03-30, more than two weeks old (Zach's rule
+# for new dependencies, 2026-10-28). Linux and macOS only; the workflows are linted once, on Linux, in CI.
+#   scripts/gates-actionlint              install if needed, lint every workflow, exit 1 on any finding
+#   scripts/gates-actionlint --print-plan print "<platform> <url> <sha256>" and stop (the test reads this)
+# FOLDER_SYNC_TOOLS_DIR installs somewhere other than <repo>/.tools; FOLDER_SYNC_UNAME_S / _M pose as another machine.
+set -euo pipefail
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tools="${FOLDER_SYNC_TOOLS_DIR:-$repo/.tools}"
+version="1.7.12"
+
+machine="${FOLDER_SYNC_UNAME_S:-$(uname -s)}-${FOLDER_SYNC_UNAME_M:-$(uname -m)}"
+case "$machine" in
+  Linux-x86_64)              platform="linux_amd64";  sha="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8" ;;
+  Linux-aarch64|Linux-arm64) platform="linux_arm64";  sha="325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6" ;;
+  Darwin-x86_64)             platform="darwin_amd64"; sha="5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644" ;;
+  Darwin-arm64)              platform="darwin_arm64"; sha="aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f" ;;
+  *) echo "gates-actionlint: no pinned actionlint for $machine" >&2; exit 1 ;;
+esac
+archive="actionlint_${version}_${platform}.tar.gz"
+url="https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}"
+if [[ "${1:-}" == "--print-plan" ]]; then
+  echo "$platform $url $sha"
+  exit 0
+fi
+
+bin="$tools/actionlint"
+if ! { [[ -x "$bin" ]] && "$bin" -version 2>/dev/null | head -1 | grep -qx "$version"; }; then
+  mkdir -p "$tools"
+  scratch="$(mktemp -d)"
+  trap 'rm -rf "$scratch"' EXIT
+  curl -fsSL "$url" -o "$scratch/$archive"
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "$sha  $scratch/$archive" | sha256sum -c - >/dev/null
+  else
+    echo "$sha  $scratch/$archive" | shasum -a 256 -c - >/dev/null
+  fi
+  tar -xzf "$scratch/$archive" -C "$scratch" actionlint
+  mv "$scratch/actionlint" "$bin"
+fi
+cd "$repo"
+exec "$bin" -color .github/workflows/*.yml

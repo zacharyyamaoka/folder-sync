@@ -1,16 +1,15 @@
-# Builds the Windows and macOS installers and installs them silently, WITHOUT publishing anything (PEP 0006). The same smoke
+# Builds the Linux, Windows and macOS installers and installs them silently, WITHOUT publishing anything (PEP 0006). The same smoke
 # runs inside desktop-release.yml, but that workflow only starts from a desktop-v* tag or a dispatch that creates one and
-# publishes; this one lets a pull request or a plain dispatch find a broken installer first.
+# publishes; this one finds a broken installer first. test.yml calls it on every push and pull request (job `desktop`, so gate G4
+# reads this very run); a plain dispatch runs it alone.
 #   Windows  msiexec /i <msi> /qn, and the NSIS -setup.exe /S        macOS  mount the .dmg, copy the .app
+#   Linux    unpack the .deb (dpkg-deb -x: no root, no install scripts); the AppImage is built by the release only
 # then each installed copy's `folder-sync version` must exit 0 (app/scripts/smoke_install.sh).
 # No release job, no secrets, contents: read only. WHY every action pinned to a full commit SHA, as in test.yml.
 name: desktop-smoke
 
 on:
-  pull_request:
-    paths:
-      - "app/**"
-      - ".github/workflows/desktop-*.yml"
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -27,7 +26,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: linux
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            rust_targets: x86_64-unknown-linux-gnu
+            args: --bundles deb
+            bundle_dir: app/src-tauri/target/release/bundle
           - name: macos
+            # WHY macos-latest (Apple silicon): Tauri does not cross-compile to macOS; the universal build makes both architectures
             runner: macos-latest
             target: universal-apple-darwin
             rust_targets: aarch64-apple-darwin x86_64-apple-darwin
@@ -55,6 +61,13 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+
+      - name: Linux build dependencies
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libdbus-1-dev pkg-config patchelf file
 
       # The hosted images carry rustup and a stable Rust; only the targets need adding (no third-party rust action).
       - name: Rust targets

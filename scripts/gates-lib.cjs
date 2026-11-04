@@ -61,7 +61,12 @@ function definitions(ctx) {
     {
       id: 'G4', name: 'Cross-platform',
       target: 'The Linux/macOS/Windows CI matrix and the installer smoke test are green.',
-      proofs: [{ kind: 'inline', name: 'ci', fn: ci4 }],
+      // WHY a leg proof when ctx.leg is set: scripts/gates --os-leg <os> runs inside one OS's CI job and writes gates-<os>.json,
+      // whose G4 says whether that OS's test job passed; the gates job then reads the three files back (ci4)
+      proofs: ctx.leg ? [{ kind: 'inline', name: 'leg', fn: leg4 }] : [
+        { kind: 'cmd', name: 'workflows: actionlint over .github/workflows (scripts/gates-actionlint, pinned)', argv: ['bash', 'scripts/gates-actionlint'] },
+        { kind: 'inline', name: 'ci', fn: ci4 },
+      ],
     },
     {
       id: 'G5', name: 'Three surfaces',
@@ -69,7 +74,7 @@ function definitions(ctx) {
       proofs: [
         { kind: 'go', pkg: './e2e', tests: ['TestTwoMachines'] },
         { kind: 'cmd', name: 'web: the Files page against the real accounts Worker (ui/scripts/files-real.mjs)', argv: ['node', 'ui/scripts/files-real.mjs'], needs: 'web' },
-        { kind: 'inline', name: 'desktop', fn: desktop5 },
+        { kind: 'cmd', name: 'desktop: open the folder, see its files, edit one, see it synced (app/test/journey.mjs: the shell\'s page in Chromium over the real engine)', argv: ['node', 'app/test/journey.mjs'], needs: 'web' },
       ],
     },
     {
@@ -115,10 +120,11 @@ function definitions(ctx) {
     {
       id: 'G11', name: 'Easy to start',
       target: 'From a fresh machine to the first sync in 2 minutes or less, on Linux, macOS and Windows.',
-      proofs: [
+      proofs: ctx.leg ? [{ kind: 'inline', name: 'timer', fn: timer11 }] : [
         { kind: 'go', pkg: './e2e', tests: ['TestGateFirstSyncWithinTwoMinutes'], env: { FOLDER_SYNC_G11_OUT: path.join(ctx.outDir, 'evidence', 'g11-local.json') }, evidence: ['evidence/g11-local.json'] },
         { kind: 'inline', name: 'platforms', fn: platforms11 },
-        { kind: 'missing', name: 'a fresh machine including the installer and rclone\'s one-time download', reason: 'the e2e starts from the built binary with rclone installed; the download and the installers are timed by no test (the desktop installer smoke is G4/G5)' },
+        // the whole walk on a clean HOME: install, sign in, add a folder, first file read back (scripts/first-sync-timer)
+        { kind: 'inline', name: 'timer', fn: timer11 },
       ],
     },
     {
@@ -249,7 +255,59 @@ function gh(args) {
 
 function entry(name, status, detail, duration_ms = 0) { return { name, status, duration_ms, detail: detail || '' }; }
 
-// ci4: the matrix, from the workflow's own `needs` when the gates job runs in CI, else from the latest run GitHub has.
+// The three OS legs of the CI matrix, by the name the matrix and gates-<os>.json use; GOOS spells macOS "darwin".
+const LEGS = ['linux', 'macos', 'windows'];
+const GOOS_OF_LEG = { linux: 'linux', macos: 'darwin', windows: 'windows' };
+
+// readLegs reads the gates-<os>.json files each OS's job uploaded (`scripts/gates --os-leg`), from a directory of downloaded
+// artifacts (actions/download-artifact puts each in a folder of its own; `gh run download` too): { linux: {doc, file}|null, ... }.
+function readLegs(dir) {
+  const found = Object.fromEntries(LEGS.map((name) => [name, null]));
+  for (const file of walk(dir)) {
+    const m = /gates-(linux|macos|windows)\.json$/.exec(file);
+    if (!m) continue;
+    try { found[m[1]] = { doc: JSON.parse(fs.readFileSync(file, 'utf8')), file }; } catch { found[m[1]] = { doc: null, file }; }
+  }
+  return found;
+}
+
+// leg4: inside one OS's CI job, G4 is that job's own result (scripts/gates --os-leg <os> --job-status ${{ job.status }}, run as the
+// job's last step with `if: always()`). The gates job reads the three files back and passes G4 only when all three passed.
+function leg4(ctx) {
+  const { os: legOs, jobStatus } = ctx.leg;
+  return { tests: [entry(`${legOs}: the test job (vet, the Go suite with the e2e, schema fixtures, first sync)`, jobStatus === 'success' ? 'pass' : 'fail', `job.status = ${jobStatus}`)], notBuilt: [] };
+}
+
+// legTests turns the downloaded gates-<os>.json files into G4 entries: pass only when that leg's own G4 passed, and only for
+// this commit (a green from another commit is a skip, never a pass).
+function legTests(ctx) {
+  const tests = [];
+  const notBuilt = [];
+  const legs = readLegs(ctx.osResults);
+  for (const name of LEGS) {
+    const found = legs[name];
+    if (!found) { notBuilt.push({ name: `CI leg ${name}`, reason: `no gates-${name}.json in ${ctx.osResults}: that OS's job has not uploaded one` }); continue; }
+    const doc = found.doc;
+    const problems = doc ? lintLeg(doc, name) : ['not JSON'];
+    if (problems.length) { tests.push(entry(`CI leg ${name} (gates-${name}.json)`, 'fail', `unreadable: ${problems.join('; ')}`)); continue; }
+    const g4 = doc.gates.find((g) => g.id === 'G4');
+    const sha = String(doc.code_sha).replace(/\+dirty$/, '');
+    const where = `${doc.leg.runner || name}, ${doc.leg.arch || '?'}`;
+    if (ctx.sha && sha !== ctx.sha) tests.push(entry(`CI leg ${name} (${where}) on ${sha.slice(0, 7)}, not this commit ${ctx.sha.slice(0, 7)}`, 'skip', g4 ? g4.summary : ''));
+    else tests.push(entry(`CI leg ${name} (${where})`, g4 && g4.status === 'pass' ? 'pass' : 'fail', g4 ? g4.summary : 'the file has no G4'));
+  }
+  return { tests, notBuilt };
+}
+
+function lintLeg(doc, name) {
+  const problems = validate(doc);
+  if (!doc.leg || doc.leg.os !== name) problems.push(`leg.os is ${doc.leg && doc.leg.os}, the file says ${name}`);
+  if (!doc.gates || !doc.gates.find((g) => g.id === 'G4')) problems.push('no G4');
+  return problems;
+}
+
+// ci4: the three OS legs (the gates-<os>.json each job uploaded, else the workflow's own `needs`, else the latest run GitHub has)
+// and the installer smoke.
 function ci4(ctx) {
   const tests = [];
   const notBuilt = [];
@@ -261,6 +319,8 @@ function ci4(ctx) {
     for (const job of ['core-alone', 'server-cloudflare', 'ui', 'pair-pull']) {
       if (ctx.needs[job]) tests.push(entry(`CI job ${job}, this run`, result(job) === 'success' ? 'pass' : 'fail', `needs.${job}.result = ${result(job)}`));
     }
+  } else if (ctx.osResults) {
+    // the legs below are the matrix
   } else if (ctx.noGh) {
     notBuilt.push({ name: 'CI matrix status', reason: 'not read: --no-gh' });
   } else {
@@ -273,9 +333,22 @@ function ci4(ctx) {
       }
     }
   }
-  const smoke = installerSmoke(ctx);
-  tests.push(...smoke.tests);
-  notBuilt.push(...smoke.notBuilt);
+  if (ctx.osResults) {
+    const legs = legTests(ctx);
+    tests.push(...legs.tests);
+    notBuilt.push(...legs.notBuilt);
+  } else if (ctx.needs) {
+    notBuilt.push({ name: 'CI legs (gates-<os>.json)', reason: 'the gates job was not given --os-results, so which OS passed is unread' });
+  }
+  // the installer smoke: this run's own `desktop` job in CI (test.yml calls desktop-smoke.yml), else the latest run GitHub has
+  if (ctx.needs && ctx.needs.desktop) {
+    const r = ctx.needs.desktop.result;
+    tests.push(entry('installer smoke (desktop-smoke.yml: linux, macos, windows), this run', r === 'success' ? 'pass' : r === 'skipped' ? 'skip' : 'fail', `needs.desktop.result = ${r}`));
+  } else {
+    const smoke = installerSmoke(ctx);
+    tests.push(...smoke.tests);
+    notBuilt.push(...smoke.notBuilt);
+  }
   return { tests, notBuilt };
 }
 
@@ -304,12 +377,6 @@ function installerSmoke(ctx) {
   if (!list.json.length) return { tests: [], notBuilt: [{ name: 'installer smoke (desktop-smoke.yml)', reason: 'it has never run (it runs on changes to app/**)' }] };
   const run = list.json[0];
   return { tests: [entry(`installer smoke (desktop-smoke.yml) on ${run.headBranch}@${run.headSha.slice(0, 7)}`, run.conclusion === 'success' ? 'pass' : 'fail', `${run.conclusion}: ${run.url}`)], notBuilt: [] };
-}
-
-function desktop5(ctx) {
-  const smoke = installerSmoke(ctx);
-  if (smoke.tests.length) return { tests: smoke.tests.map((t) => ({ ...t, name: `desktop: ${t.name}` })), notBuilt: [] };
-  return { tests: [], notBuilt: [{ name: 'desktop journey (the installed app signs in, creates a folder, syncs)', reason: smoke.notBuilt[0].reason + '; app/scripts/proof_linux.py needs a built AppImage and the robotparts stack' }] };
 }
 
 // dropIn8 counts the lines an app writes to adopt folder-sync: the page's two snippet lines (docs/API.md), the app Worker's
@@ -356,6 +423,40 @@ function platforms11(ctx) {
   return { tests, notBuilt };
 }
 
+// timer11: the first-sync-<os>.json files scripts/first-sync-timer wrote (install, sign in, add a folder, first file read back, on
+// a clean HOME), one per OS: from --collect (the CI jobs upload them) and from this run's evidence folder. On a host with none,
+// --with-web runs the timer here. A platform with no file is not built, never passed.
+function timer11(ctx) {
+  const tests = [];
+  const notBuilt = [];
+  const found = {};
+  const dirs = [ctx.collect, ctx.outDir && path.join(ctx.outDir, 'evidence')].filter(Boolean);
+  const read = () => {
+    for (const dir of dirs) {
+      for (const file of walk(dir).filter((f) => /first-sync-(linux|darwin|windows)\.json$/.test(f))) {
+        try { const d = JSON.parse(fs.readFileSync(file, 'utf8')); if (d.schema === 'folder-sync-first-sync/1' && !found[d.os]) found[d.os] = d; } catch { /* reported below as missing */ }
+      }
+    }
+  };
+  read();
+  const host = process.platform === 'win32' ? 'windows' : process.platform;
+  const wanted = ctx.leg ? [GOOS_OF_LEG[ctx.leg.os]] : ['linux', 'darwin', 'windows'];
+  if (!found[host] && ctx.withWeb && wanted.includes(host) && ctx.outDir) {
+    const out = path.join(ctx.outDir, 'evidence', `first-sync-${host}.json`);
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    sh([process.execPath, path.join(REPO, 'scripts', 'first-sync-timer'), '--out', out], { timeout: 15 * 60 * 1000 });
+    read();
+  }
+  const labels = { linux: 'Linux', darwin: 'macOS', windows: 'Windows' };
+  for (const name of wanted) {
+    const d = found[name];
+    const detail = d ? (d.steps || []).map((s) => `${s.name} ${s.seconds.toFixed(1)} s`).join(', ') + (d.why ? ` (${d.why})` : '') : '';
+    if (d) tests.push(entry(`first sync on ${labels[name]}/${d.arch} in ${d.limit_seconds} s or less, install to first file (${d.seconds.toFixed(1)} s)`, d.ok && d.seconds <= d.limit_seconds ? 'pass' : 'fail', detail, Math.round(d.seconds * 1000)));
+    else notBuilt.push({ name: `first-sync-timer on ${labels[name]}`, reason: ctx.collect ? `no first-sync-${name}.json in ${ctx.collect}: that OS's job has not uploaded one` : 'not run here: scripts/gates --with-web runs it on this machine; the other OSes come from the CI jobs (--collect)' });
+  }
+  return { tests, notBuilt };
+}
+
 function walk(dir) {
   const out = [];
   if (!fs.existsSync(dir)) return out;
@@ -366,4 +467,4 @@ function walk(dir) {
   return out;
 }
 
-module.exports = { REPO, SCHEMA, GATE_IDS, definitions, parseGoJson, parseTap, aggregate, validate, tail, entry, sh, dropIn8, walk };
+module.exports = { REPO, SCHEMA, GATE_IDS, LEGS, GOOS_OF_LEG, definitions, readLegs, parseGoJson, parseTap, aggregate, validate, tail, entry, sh, dropIn8, walk };

@@ -1,0 +1,216 @@
+#!/usr/bin/env node
+'use strict';
+// Gate G11 (docs/GATES.md): how long a person waits from a clean machine to their first file synced. From a clean HOME it
+//
+//   1. installs         the README's install command (`go build -o ~/.folder-sync/bin/folder-sync ./cmd/folder-sync`)
+//   2. signs in         `folder-sync login` against the local stack, the device code approved with no one at the keyboard
+//   3. adds a folder    a folder with four files, `folder-sync init`
+//   4. first sync       `folder-sync sync --watch`, until the first file is served back by the accounts Worker
+//
+// and prints the seconds each step took and the total. It exits 1 when the total is over the limit (120 s, the gate) or a
+// step failed, and writes first-sync-<os>.json (folder-sync-first-sync/1), which scripts/gates --collect reads.
+//
+//   scripts/first-sync-timer [--limit 120] [--out first-sync-linux.json] [--rclone auto|PATH] [--keep]
+//
+//   --rclone auto  (default) the engine downloads the pinned rclone on first use, as it does for a person, and that time counts.
+//   --rclone PATH  FOLDER_SYNC_RCLONE=PATH: no download (offline runs).
+//   --keep         leave the scratch directory in place and print it.
+//
+// What is timed and what is not: the clock starts at the install command and stops when the first file reads back from the
+// Worker. Not timed: starting the local stack (it stands in for the server that is already up in production) and the test
+// person's own web sign-in (an account exists before a machine joins it). The Go toolchain and its module cache are the
+// machine's own (GOCACHE/GOMODCACHE are kept, only HOME is clean): v0 installs from source, there is no release binary yet.
+// The stack is the dev stack of accounts/scripts/dev.mjs on four free loopback ports; it needs `npm ci --prefix accounts`
+// and the pinned rclone (scripts/dev-tools). Everything it starts is stopped by the PID it recorded.
+
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const net = require('node:net');
+const os = require('node:os');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+
+const REPO = path.resolve(__dirname, '..');
+const LIMIT_S = 120;
+const SCHEMA = 'folder-sync-first-sync/1';
+const PROJECT = 'first-sync';
+const FILES = { 'hello.md': 'the first file\n', 'notes/a.md': 'a\n', 'notes/b.md': 'b\n', 'docs/c.txt': 'c\n' };
+
+// osName: Go's GOOS spelling, the one the g11 files and the matrix use.
+function osName(platform = process.platform) {
+  return platform === 'win32' ? 'windows' : platform;
+}
+
+// installArgv: README.md "Install (v0: from source)", with `~` and the go binary resolved for this machine.
+function installArgv(home, go = 'go', platform = process.platform) {
+  const exe = platform === 'win32' ? 'folder-sync.exe' : 'folder-sync';
+  return [go, 'build', '-o', path.join(home, '.folder-sync', 'bin', exe), './cmd/folder-sync'];
+}
+
+// verdict: pass/fail from the steps and the limit. A step that did not finish makes the run fail whatever the clock says.
+function verdict(steps, limitSeconds) {
+  const seconds = steps.reduce((sum, s) => sum + s.seconds, 0);
+  const failed = steps.find((s) => !s.ok);
+  const over = seconds > limitSeconds;
+  const why = failed ? `${failed.name} failed${failed.detail ? `: ${failed.detail}` : ''}` : over ? `${seconds.toFixed(1)} s is over the ${limitSeconds} s gate` : '';
+  return { ok: !failed && !over, seconds, why };
+}
+
+function document(steps, limitSeconds, extra = {}) {
+  const v = verdict(steps, limitSeconds);
+  return {
+    schema: SCHEMA, os: osName(), arch: os.arch() === 'x64' ? 'amd64' : os.arch(), runner: process.env.RUNNER_NAME || os.hostname(),
+    seconds: Number(v.seconds.toFixed(3)), limit_seconds: limitSeconds, ok: v.ok, why: v.why,
+    steps: steps.map((s) => ({ name: s.name, seconds: Number(s.seconds.toFixed(3)), ok: s.ok, detail: s.detail || '' })),
+    measures: 'install (go build), device sign-in, init of a 4-file folder, sync --watch until the first file reads back; local stack, rclone ' + (extra.rclone || 'auto'),
+    ...extra.fields,
+  };
+}
+
+function arg(argv, name, fallback) {
+  const i = argv.indexOf(name);
+  return i >= 0 ? argv[i + 1] : fallback;
+}
+
+function sh(argv, opts = {}) {
+  const r = spawnSync(argv[0], argv.slice(1), { cwd: opts.cwd || REPO, encoding: 'utf8', timeout: opts.timeout || 600000, env: opts.env || process.env });
+  return { status: r.status, out: (r.stdout || '') + (r.stderr || ''), error: r.error };
+}
+
+async function freePorts(count) {
+  const servers = [];
+  const ports = [];
+  for (let i = 0; i < count; i++) {
+    const server = net.createServer();
+    await new Promise((done) => server.listen(0, '127.0.0.1', done));
+    servers.push(server);
+    ports.push(server.address().port);
+  }
+  await Promise.all(servers.map((s) => new Promise((done) => s.close(done))));
+  return ports;
+}
+
+function goEnv(go) {
+  const r = sh([go, 'env', '-json', 'GOCACHE', 'GOMODCACHE', 'GOPATH', 'GOROOT']);
+  if (r.status !== 0) throw new Error(`go env failed: ${r.out}`);
+  return JSON.parse(r.out);
+}
+
+function toolPath(name) {
+  const exe = process.platform === 'win32' ? `${name}.exe` : name;
+  return path.join(REPO, '.tools', exe);
+}
+
+// stopStack: dev.mjs `down` signals process groups, which Windows does not have; there the recorded PIDs go through taskkill.
+function stopStack(dev, stateDir, pids) {
+  try { dev.down(stateDir); } catch { /* already stopped */ }
+  if (process.platform === 'win32') {
+    for (const pid of Object.values(pids || {})) if (pid) spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+  }
+}
+
+async function run(argv) {
+  const limit = Number(arg(argv, '--limit', LIMIT_S));
+  const outFile = arg(argv, '--out', null);
+  const rcloneOpt = arg(argv, '--rclone', 'auto');
+  const keep = argv.includes('--keep');
+
+  const goLocal = process.platform === 'win32' ? null : '/home/bam/.local/go/bin/go';
+  const go = process.env.GO || (goLocal && fs.existsSync(goLocal) ? goLocal : 'go');
+  const goVars = goEnv(go);
+  // file URLs: a bare C:\ path is not importable on Windows
+  const harness = await import(pathToFileURL(path.join(REPO, 'bench', 'latency', 'harness.mjs')).href);
+  const dev = await import(pathToFileURL(path.join(REPO, 'accounts', 'scripts', 'dev.mjs')).href);
+  const stackRclone = process.env.RCLONE || toolPath('rclone');
+  if (!fs.existsSync(stackRclone)) throw new Error(`no rclone for the local stack at ${stackRclone}: run scripts/dev-tools`);
+
+  const scratch = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'first-sync-'));
+  const stateDir = path.join(scratch, 'stack');
+  const home = path.join(scratch, 'home');
+  const folder = path.join(home, PROJECT);
+  fs.mkdirSync(home, { recursive: true });
+  let stack = null;
+  let machine = null;
+  const steps = [];
+  const timed = async (name, fn) => {
+    const started = process.hrtime.bigint();
+    try {
+      const detail = await fn();
+      steps.push({ name, seconds: Number(process.hrtime.bigint() - started) / 1e9, ok: true, detail: detail || '' });
+    } catch (error) {
+      steps.push({ name, seconds: Number(process.hrtime.bigint() - started) / 1e9, ok: false, detail: String(error && error.message || error).split('\n').slice(0, 6).join(' | ') });
+      throw error;
+    }
+  };
+
+  try {
+    const [standin, store, accounts, inspector] = await freePorts(4);
+    stack = await dev.up(stateDir, {
+      ...process.env, RCLONE: stackRclone, GO: go,
+      FS_STANDIN_PORT: String(standin), FS_STORE_PORT: String(store), FS_ACCOUNTS_PORT: String(accounts), FS_INSPECTOR_PORT: String(inspector),
+    });
+    const browser = await harness.signIn(stack.accounts, 'first-sync@example.com'); // the person's account exists before the machine joins
+
+    // a clean machine: only PATH and the system variables a process needs, a HOME of its own
+    const env = { HOME: home, USERPROFILE: home, FOLDER_SYNC_SERVER: stack.accounts, LANG: 'C.UTF-8' };
+    for (const key of ['PATH', 'Path', 'SYSTEMROOT', 'SystemRoot', 'TEMP', 'TMP', 'COMSPEC', 'PATHEXT', 'WINDIR']) if (process.env[key]) env[key] = process.env[key];
+    if (rcloneOpt !== 'auto') env.FOLDER_SYNC_RCLONE = path.resolve(rcloneOpt);
+    const cli = installArgv(home, go)[3];
+    machine = new harness.Machine({ name: 'fresh', cli, home, folder, env });
+
+    await timed('install', () => {
+      const build = installArgv(home, go);
+      const r = sh(build, { env: { ...process.env, HOME: home, USERPROFILE: home, GOCACHE: goVars.GOCACHE, GOMODCACHE: goVars.GOMODCACHE, GOPATH: goVars.GOPATH, GOROOT: goVars.GOROOT } });
+      if (r.status !== 0 || !fs.existsSync(cli)) throw new Error(`${build.join(' ')} exited ${r.status}: ${r.out.trim().split('\n').slice(-4).join(' | ')}`);
+      return build.slice(1).join(' ');
+    });
+    await timed('sign_in', async () => {
+      await harness.login(machine, browser);
+      if (!fs.existsSync(path.join(home, '.folder-sync', 'account.json'))) throw new Error('login finished but wrote no account.json');
+    });
+    await timed('add_folder', () => {
+      for (const [name, text] of Object.entries(FILES)) {
+        fs.mkdirSync(path.dirname(path.join(folder, name)), { recursive: true });
+        fs.writeFileSync(path.join(folder, name), text);
+      }
+      machine.must(['init', '--project', PROJECT, '--dir', folder]);
+    });
+    await timed('first_sync', async () => {
+      const online = new harness.Online(stack.accounts, machine.token(), PROJECT);
+      await machine.watch();
+      const host = machine.hostId();
+      const until = Date.now() + 5 * 60_000;
+      for (;;) {
+        const bytes = await online.read(host, 'hello.md');
+        if (bytes && bytes.toString() === FILES['hello.md']) return `hello.md read back from ${stack.accounts.replace(/^https?:\/\//, '')}`;
+        if (machine.watcher.exitCode !== null) throw new Error(`sync --watch exited ${machine.watcher.exitCode}: ${machine.log.trim().split('\n').slice(-3).join(' | ')}`);
+        if (Date.now() > until) throw new Error('hello.md never read back within 5 minutes');
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    });
+  } catch (error) {
+    if (!steps.length || steps[steps.length - 1].ok) steps.push({ name: 'setup', seconds: 0, ok: false, detail: String(error && error.message || error).split('\n').slice(0, 6).join(' | ') });
+  } finally {
+    if (machine) await machine.stop().catch(() => {});
+    if (stack) stopStack(dev, stateDir, stack.pids);
+    if (keep) console.error(`scratch kept: ${scratch}`);
+    else {
+      try { fs.rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 }); } catch { /* a Windows file still held: the runner is thrown away */ }
+    }
+  }
+
+  const doc = document(steps, limit, { rclone: rcloneOpt });
+  if (outFile) {
+    fs.mkdirSync(path.dirname(path.resolve(outFile)), { recursive: true });
+    fs.writeFileSync(outFile, JSON.stringify(doc, null, 2) + '\n');
+  }
+  const rows = doc.steps.map((s) => `  ${s.ok ? 'ok  ' : 'FAIL'} ${s.name.padEnd(11)} ${s.seconds.toFixed(1).padStart(7)} s  ${s.detail}`);
+  console.log(`first sync on ${doc.os}/${doc.arch}\n${rows.join('\n')}\n  total ${doc.seconds.toFixed(1)} s (gate: ${limit} s) ${doc.ok ? 'PASS' : `FAIL: ${doc.why}`}`);
+  return doc.ok ? 0 : 1;
+}
+
+if (require.main === module) {
+  run(process.argv.slice(2)).then((code) => process.exit(code), (error) => { console.error(`first-sync-timer: ${error && error.stack || error}`); process.exit(1); });
+}
+
+module.exports = { LIMIT_S, SCHEMA, osName, installArgv, verdict, document };
