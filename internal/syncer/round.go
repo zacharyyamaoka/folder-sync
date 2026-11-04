@@ -421,7 +421,7 @@ func (p *Project) uploadAppends(next []manifest.Entry, paths []string, reads map
 	errs := make([]error, len(paths))
 	parallel(len(paths), func(i int) {
 		read := reads[paths[i]]
-		etags[i], errs[i] = p.S3.PutFile(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+paths[i], read.Bytes, local[paths[i]].MTime)
+		etags[i], errs[i] = p.Objects().PutFile(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+paths[i], read.Bytes, local[paths[i]].MTime)
 	})
 	if err := errors.Join(errs...); err != nil {
 		return err
@@ -502,7 +502,7 @@ func newJobID() string {
 // multipart upload's "<md5>-<parts>" ETag, a HEAD that fails) leaves the field empty: the file is then read whole and
 // checked by sha256, never served under a wrong identity.
 func (p *Project) recordObjectETags(next []manifest.Entry, uploaded []string, md5s map[string]string) {
-	if p.S3 == nil {
+	if p.Objects() == nil {
 		return
 	}
 	want := map[string]bool{}
@@ -513,7 +513,7 @@ func (p *Project) recordObjectETags(next []manifest.Entry, uploaded []string, md
 		if !want[next[i].Path] {
 			continue
 		}
-		etag, found, err := p.S3.Head(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+next[i].Path)
+		etag, found, err := p.Objects().Head(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+next[i].Path)
 		if err != nil || !found {
 			continue
 		}
@@ -664,7 +664,7 @@ func (p *Project) keepManifest(m manifest.Manifest) error {
 // ReconcileReadOnly is the reconcile of a round with read-only keys: no stray moves (they write), only this host's
 // published manifest taken when it is ahead of the local copy (a delete's answer lost with its job file).
 func (p *Project) ReconcileReadOnly() error {
-	got, err := p.S3.GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
+	got, err := p.Objects().GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
 	if err != nil || got.NotFound {
 		return err
 	}
@@ -681,7 +681,7 @@ func (p *Project) ReconcileReadOnly() error {
 // adoptPublished takes this host's manifest from the bucket (a read): a round with read-only keys reconciles its
 // manifest state this way, with no write (review r3 #2).
 func (p *Project) adoptPublished() error {
-	got, err := p.S3.GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
+	got, err := p.Objects().GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(p.Host.ID)+"/"+manifest.FileName, "")
 	if err != nil {
 		return err
 	}
@@ -751,7 +751,7 @@ func (p *Project) writeList(name string, paths []string) (string, error) {
 func (p *Project) Reconcile(ctx context.Context, stamp string, result *Result) error {
 	own := p.HostPrefix(p.Host.ID)
 	out, err := p.Rclone.Run(ctx, "lsjson", "-R", "--files-only", "--no-mimetype", rclone.Path(p.Config.Bucket, own))
-	if err != nil && !strings.Contains(err.Error(), "directory not found") {
+	if out, err = rclone.Listing(out, err); err != nil {
 		return err
 	}
 	var items []lsjsonItem
@@ -816,7 +816,7 @@ func (p *Project) Reconcile(ctx context.Context, stamp string, result *Result) e
 // it. One whose history key would pass 1,024 bytes stays where it is: nothing is deleted without a copy.
 func (p *Project) moveStray(own, path string) error {
 	key := own + "/" + path
-	stat, err := p.S3.HeadObject(p.Config.Bucket, key)
+	stat, err := p.Objects().HeadObject(p.Config.Bucket, key)
 	if err != nil {
 		return err
 	}
@@ -825,17 +825,17 @@ func (p *Project) moveStray(own, path string) error {
 		p.say("reconcile: %s is not in the manifest, and its history key would be too long; left in place", path)
 		return nil
 	}
-	if err := p.S3.Copy(p.Config.Bucket, key, dest, ""); err != nil {
+	if err := p.Objects().Copy(p.Config.Bucket, key, dest, ""); err != nil {
 		return err
 	}
-	return p.S3.Delete(p.Config.Bucket, key)
+	return p.Objects().Delete(p.Config.Bucket, key)
 }
 
 // Discover lists the project's hosts/ folder one level deep (one delimiter LIST, not a
 // full listing) and adds new peers. It runs with every reconcile and every DiscoverEvery.
 func (p *Project) Discover(ctx context.Context) error {
 	out, err := p.Rclone.Run(ctx, "lsjson", "--dirs-only", "--no-mimetype", "--no-modtime", rclone.Path(p.Config.Bucket, p.HostsPrefix()))
-	if err != nil && !strings.Contains(err.Error(), "directory not found") {
+	if out, err = rclone.Listing(out, err); err != nil {
 		return err
 	}
 	var dirs []lsjsonItem
@@ -893,7 +893,7 @@ func (p *Project) pullPeer(ctx context.Context, peerID string, peers *PeerState,
 	if haveCached {
 		etag = peers.ETags[peerID]
 	}
-	got, err := p.S3.GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(peerID)+"/"+manifest.FileName, etag)
+	got, err := p.Objects().GetIfNoneMatch(p.Config.Bucket, p.HostPrefix(peerID)+"/"+manifest.FileName, etag)
 	if err != nil {
 		return PeerResult{}, err
 	}

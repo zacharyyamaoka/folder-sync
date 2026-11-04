@@ -32,6 +32,7 @@ import (
 	"folder-sync/internal/rclonebin"
 	"folder-sync/internal/s3"
 	"folder-sync/internal/service"
+	"folder-sync/internal/store"
 	"folder-sync/internal/syncer"
 	"folder-sync/internal/viewer"
 )
@@ -42,7 +43,10 @@ var version = "v0-dev"
 const usage = `folder-sync %s: this folder, on every machine you use, and readable online.
 
 Usage:
-  folder-sync init    [--project NAME] [--bucket NAME] [--dir PATH]   this folder becomes a synced folder
+  folder-sync init    [--project NAME] [--bucket NAME | --store URL] [--dir PATH]
+                                                                     this folder becomes a synced folder; --store is
+                                                                     r2://bucket, s3://bucket/prefix, gs://bucket/prefix
+                                                                     or file:///dir (docs/STORAGE.md)
   folder-sync login   [--server URL] [--key]                         sign this machine in (a code you approve in a
                                                                      browser); --key stores a bucket key instead
   folder-sync logout                                                 end this machine's session, delete account.json
@@ -221,9 +225,13 @@ func cmdInit(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	project := fs.String("project", "", "project name, the bucket prefix (default: the folder's name)")
 	bucket := fs.String("bucket", "", "R2 bucket (default: "+config.DefaultBucket+")")
+	storeURL := fs.String("store", "", "where the bytes live, a URL: r2://bucket (default), s3://bucket/prefix, gs://bucket/prefix, file:///dir")
 	dir := folderFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *storeURL != "" && *bucket != "" {
+		return fmt.Errorf("--store names the bucket already: use --store or --bucket, not both")
 	}
 	folder, err := filepath.Abs(*dir)
 	if err != nil {
@@ -253,18 +261,43 @@ func cmdInit(args []string, out io.Writer) error {
 		fmt.Fprintf(out, "host:   %s (%s)\n", h.ID, h.Name)
 	}
 
-	resolver := creds.NewResolver(l.Credentials, l.Session, credentialEnv(l, os.Getenv, os.Executable))
+	// the store decides whose keys apply, so it is settled before the keys are asked for
+	var existing *config.Config
+	if _, statErr := os.Stat(filepath.Join(folder, config.FileName)); statErr == nil {
+		loaded, err := config.Load(folder)
+		if err != nil {
+			return err
+		}
+		existing = &loaded
+	}
+	spec := store.R2Default(config.DefaultBucket)
+	switch {
+	case existing != nil:
+		spec = existing.StoreSpec()
+		if *storeURL != "" {
+			asked, err := store.Parse(*storeURL)
+			if err != nil {
+				return err
+			}
+			if asked.String() != spec.String() {
+				return fmt.Errorf("%s is already project %q with store %q; edit %s to change it", folder, existing.Project, spec.String(), config.FileName)
+			}
+		}
+	case *storeURL != "":
+		if spec, err = store.Parse(*storeURL); err != nil {
+			return err
+		}
+	}
+	resolver := creds.NewResolver(l.Credentials, l.Session, credentialEnvFor(l, spec, os.Getenv, os.Executable))
+	resolver.Store = spec
 	c, credsErr := resolver.Current()
 	if credsErr != nil && resolver.UsesProcess() {
 		return credsErr // a configured credential process that fails is an error, not "no key yet"
 	}
 
 	var cfg config.Config
-	if _, statErr := os.Stat(filepath.Join(folder, config.FileName)); statErr == nil {
-		cfg, err = config.Load(folder)
-		if err != nil {
-			return err
-		}
+	if existing != nil {
+		cfg = *existing
 		if (*project != "" && *project != cfg.Project) || (*bucket != "" && *bucket != cfg.Bucket) {
 			return fmt.Errorf("%s is already project %q in bucket %q; edit %s to change it", folder, cfg.Project, cfg.Bucket, config.FileName)
 		}
@@ -287,6 +320,9 @@ func cmdInit(args []string, out io.Writer) error {
 			b = config.DefaultBucket
 		}
 		cfg = config.New(name, b)
+		if *storeURL != "" {
+			cfg.Store, cfg.Bucket = *storeURL, ""
+		}
 		if err := cfg.Validate(); err != nil {
 			return err
 		}
@@ -298,7 +334,11 @@ func cmdInit(args []string, out io.Writer) error {
 		if err := config.Write(folder, cfg); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "config: wrote %s (project %q, bucket %q)\n", filepath.Join(folder, config.FileName), cfg.Project, cfg.Bucket)
+		if cfg.Store != "" {
+			fmt.Fprintf(out, "config: wrote %s (project %q, store %q)\n", filepath.Join(folder, config.FileName), cfg.Project, cfg.Store)
+		} else {
+			fmt.Fprintf(out, "config: wrote %s (project %q, bucket %q)\n", filepath.Join(folder, config.FileName), cfg.Project, cfg.Bucket)
+		}
 	}
 	if credsErr != nil {
 		// WHY no registration yet: it records the account root, which only a key can tell (`sync` registers it).
@@ -308,6 +348,14 @@ func cmdInit(args []string, out io.Writer) error {
 	stateDir := filepath.Join(l.Projects, syncer.StateKey(cfg.Project, folder, c.Prefix))
 	if err := syncer.EnsureRegistered(l, stateDir, syncer.Registration{Project: cfg.Project, Bucket: cfg.Bucket, Folder: folder, HostID: h.ID, Root: c.Prefix}); err != nil {
 		return err
+	}
+	if spec.Kind == store.File {
+		if err := store.NewFile(spec).HeadBucket(cfg.Bucket); err != nil {
+			return fmt.Errorf("store check: %w", err)
+		}
+		fmt.Fprintf(out, "store:  %s, a directory (no key needed)\n", spec.String())
+		fmt.Fprintf(out, "Next:   folder-sync sync --once   (or --watch, or --install-service)\n")
+		return nil
 	}
 	client := &s3.Client{Endpoint: c.Endpoint, Region: c.Region, AccessKeyID: c.AccessKeyID, SecretAccessKey: c.SecretAccessKey, SessionToken: c.SessionToken}
 	if c.Prefix != "" {
@@ -321,6 +369,24 @@ func cmdInit(args []string, out io.Writer) error {
 			return fmt.Errorf("key check: %w", err)
 		}
 		fmt.Fprintf(out, "key:    %s can reach bucket %q (one HEAD)\n", c.Redacted(), cfg.Bucket)
+	}
+	if spec.Kind == store.S3 || spec.Kind == store.GS {
+		// WHY at init: the person sees what this provider lacks (docs/STORAGE.md) before the first sync, and the sync reuses the answer
+		var caps store.Capabilities
+		var err error
+		if declared := os.Getenv("FOLDER_SYNC_STORE_CAPS"); declared != "" {
+			caps, err = store.ParseCaps(declared) // declared, not measured
+		} else {
+			caps, err = store.Probe(client, cfg.Bucket, c.Prefix)
+		}
+		if err != nil {
+			return fmt.Errorf("store check: %w", err)
+		}
+		cacheKey := spec.String() + "|" + c.Endpoint + "|" + c.Prefix
+		if err := store.SaveCaps(filepath.Join(stateDir, "store-caps.json"), cacheKey, caps); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "store:  %s honours %s\n", spec.String(), syncer.DescribeCaps(caps))
 	}
 	fmt.Fprintf(out, "Next:   folder-sync sync --once   (or --watch, or --install-service)\n")
 	return nil
@@ -406,7 +472,7 @@ func openProject(dir string, out io.Writer) (*syncer.Project, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := syncer.Open(folder, l, credentialEnv(l, os.Getenv, os.Executable), bin, out)
+	p, err := syncer.Open(folder, l, credentialEnvFor(l, folderStore(folder), os.Getenv, os.Executable), bin, out)
 	if err != nil {
 		return nil, err
 	}
@@ -780,6 +846,14 @@ func installService(dir string, out io.Writer) error {
 	return nil
 }
 
+// cloudflareOnly refuses a feature that exists only on Cloudflare (the R2-Explorer viewer, the accounts Worker's visibility switch).
+func cloudflareOnly(cfg config.Config, what string) error {
+	if spec := cfg.StoreSpec(); spec.Kind != store.R2 {
+		return fmt.Errorf("%s is Cloudflare's (R2 and the accounts Worker); this folder's store is %s: `folder-sync serve` is the viewer for any store", what, spec.String())
+	}
+	return nil
+}
+
 func cmdPublish(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("publish", flag.ContinueOnError)
 	withViewer := fs.Bool("viewer", false, "write the R2-Explorer viewer config and print its deploy command")
@@ -801,6 +875,9 @@ func cmdPublish(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if err := cloudflareOnly(cfg, "--public and --private"); err != nil {
+			return err
+		}
 		visibility := "private"
 		if *public {
 			visibility = "public"
@@ -813,6 +890,9 @@ func cmdPublish(args []string, out io.Writer) error {
 	}
 	defer p.Close()
 	if *withViewer { // refuse before any upload if the viewer settings are incomplete
+		if err := cloudflareOnly(p.Config, "--viewer"); err != nil {
+			return err
+		}
 		if err := viewerSettings(p).Validate(); err != nil {
 			return err
 		}
@@ -919,7 +999,7 @@ func cmdProjects(args []string, out, errOut io.Writer) error {
 	runner := rclone.Runner{Bin: bin, Layout: l, Creds: c}
 	listed, err := runner.Run(context.Background(), "lsjson", "--dirs-only", "--no-mimetype", "--no-modtime",
 		rclone.Path(b, strings.TrimSuffix(c.Prefix, "/")))
-	if err != nil && !strings.Contains(err.Error(), "directory not found") {
+	if listed, err = rclone.Listing(listed, err); err != nil {
 		return err
 	}
 	var dirs []struct{ Path string }

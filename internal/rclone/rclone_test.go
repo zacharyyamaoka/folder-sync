@@ -1,6 +1,7 @@
 package rclone
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +10,7 @@ import (
 
 	"folder-sync/internal/creds"
 	"folder-sync/internal/layout"
+	"folder-sync/internal/store"
 )
 
 func TestEveryCallPinsItsDirsUnderFolderSync(t *testing.T) {
@@ -109,5 +111,58 @@ func TestFailFastTrimsRetriesOnlyWhenAsked(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("FailFast flags %q lack %q", joined, want)
 		}
+	}
+}
+
+// A file:// store is rclone's local backend: the same "fsremote:<dir>/<key>" paths, no keys, no endpoint.
+func TestFileStoreIsTheLocalRemote(t *testing.T) {
+	spec, err := store.Parse("file:///srv/nas/hub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := Runner{Store: spec, Creds: creds.Creds{Source: "file"}}
+	env := strings.Join(r.Env([]string{"PATH=/bin"}), "\n")
+	if !strings.Contains(env, "RCLONE_CONFIG_FSREMOTE_TYPE=local") {
+		t.Errorf("not the local backend:\n%s", env)
+	}
+	for _, gone := range []string{"ACCESS_KEY_ID", "ENDPOINT", "PROVIDER", "NO_CHECK_BUCKET", "ACL"} {
+		if strings.Contains(env, "FSREMOTE_"+gone) {
+			t.Errorf("a local remote got %s:\n%s", gone, env)
+		}
+	}
+	if got := Path(spec.Bucket, "demo/hosts/x"); got != "fsremote:/srv/nas/hub/demo/hosts/x" {
+		t.Errorf("Path = %s", got)
+	}
+}
+
+// WHY: x-amz-acl: private is R2's habit; a bucket with ACLs disabled (AWS's default now) refuses a request that sets one.
+func TestOnlyR2GetsAnACLHeader(t *testing.T) {
+	r2 := Runner{Creds: creds.Creds{Provider: "Cloudflare", Endpoint: "https://a.r2.cloudflarestorage.com"}}
+	if !strings.Contains(strings.Join(r2.Env(nil), "\n"), "RCLONE_CONFIG_FSREMOTE_ACL=private") {
+		t.Error("R2 lost its private ACL")
+	}
+	for _, provider := range []string{"AWS", "Minio", "Other", "GCS", "Wasabi"} {
+		r := Runner{Creds: creds.Creds{Provider: provider, Endpoint: "https://s3.example"}}
+		if strings.Contains(strings.Join(r.Env(nil), "\n"), "FSREMOTE_ACL") {
+			t.Errorf("provider %s sends an ACL header", provider)
+		}
+	}
+}
+
+// WHY: on the local backend rclone prints the opening "[" of its listing before it finds the directory missing, so
+// stdout is not empty when the directory is not there; a caller must treat a missing directory as nothing listed.
+func TestMissingListingIsEmptyEvenWithPartialOutput(t *testing.T) {
+	partial := []byte("[\n")
+	err := fmt.Errorf("rclone lsjson failed: exit status 3: Failed to lsjson with 2 errors: last error was: error in ListJSON: directory not found")
+	out, err := Listing(partial, err)
+	if err != nil || len(out) != 0 {
+		t.Errorf("a missing directory: %q, %v", out, err)
+	}
+	if out, err := Listing([]byte("[]"), nil); err != nil || string(out) != "[]" {
+		t.Errorf("a listing passes through: %q, %v", out, err)
+	}
+	other := fmt.Errorf("rclone lsjson failed: exit status 1: access denied")
+	if _, err := Listing(nil, other); err == nil {
+		t.Error("another failure is still a failure")
 	}
 }

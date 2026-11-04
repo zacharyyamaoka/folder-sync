@@ -150,3 +150,82 @@ func TestHistoryEvery(t *testing.T) {
 		t.Fatalf("written and read back: %+v %v", again, err)
 	}
 }
+
+// The store is a URL (docs/STORAGE.md). A config that names only a bucket is r2://<bucket>, as before.
+func TestStoreURLRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	c := New("demo", "")
+	c.Store = "s3://my-bucket/team?region=eu-west-1"
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Bucket != "my-bucket" {
+		t.Fatalf("Validate must derive the bucket from the store, got %q", c.Bucket)
+	}
+	if err := Write(dir, c); err != nil {
+		t.Fatal(err)
+	}
+	text, _ := os.ReadFile(filepath.Join(dir, FileName))
+	if !strings.Contains(string(text), `store = "s3://my-bucket/team?region=eu-west-1"`) || strings.Contains(string(text), "\nbucket =") {
+		t.Errorf("a store config names the store and not a bucket:\n%s", text)
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, c) {
+		t.Fatalf("got %+v\nwant %+v", got, c)
+	}
+	spec := got.StoreSpec()
+	if spec.Kind != "s3" || spec.Bucket != "my-bucket" || spec.Prefix != "team/" || spec.Region != "eu-west-1" {
+		t.Errorf("StoreSpec = %+v", spec)
+	}
+}
+
+func TestNoStoreMeansR2(t *testing.T) {
+	c := New("demo", "folder-sync")
+	if spec := c.StoreSpec(); spec.Kind != "r2" || spec.Bucket != "folder-sync" {
+		t.Errorf("StoreSpec = %+v", spec)
+	}
+	if text := Render(c); !strings.Contains(text, `bucket = "folder-sync"`) || strings.Contains(text, "store =") {
+		t.Errorf("a v0 config is rendered as before:\n%s", text)
+	}
+}
+
+func TestFileStoreConfig(t *testing.T) {
+	dir := t.TempDir()
+	hub := filepath.ToSlash(filepath.Join(dir, "hub"))
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte("project = \"demo\"\nstore = \"file://"+hub+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Bucket != hub || c.StoreSpec().Kind != "file" {
+		t.Errorf("bucket %q, spec %+v", c.Bucket, c.StoreSpec())
+	}
+}
+
+func TestLoadRejectsBadStores(t *testing.T) {
+	cases := map[string]string{
+		"unknown scheme":           "project = \"demo\"\nstore = \"ftp://x/y\"\n",
+		"relative file store":      "project = \"demo\"\nstore = \"file://rel/dir\"\n",
+		"bucket disagrees":         "project = \"demo\"\nbucket = \"other-bucket\"\nstore = \"s3://my-bucket\"\n",
+		"bad bucket in store":      "project = \"demo\"\nstore = \"s3://BAD\"\n",
+		"neither store nor bucket": "project = \"demo\"\n",
+	}
+	for name, body := range cases {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, FileName), []byte(body), 0o644)
+		if _, err := Load(dir); err == nil {
+			t.Errorf("%s: Load succeeded", name)
+		}
+	}
+	// the bucket may be repeated beside the store when it is the same one
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, FileName), []byte("project = \"demo\"\nbucket = \"my-bucket\"\nstore = \"s3://my-bucket\"\n"), 0o644)
+	if _, err := Load(dir); err != nil {
+		t.Errorf("the same bucket beside its store: %v", err)
+	}
+}
