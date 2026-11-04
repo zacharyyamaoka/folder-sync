@@ -64,7 +64,12 @@ jobs:
         # WHY bash everywhere: scripts/dev-tools is bash; Git Bash is what windows-latest ships
         shell: bash
     steps:
+      # WHY the whole history: TestSharedTree builds the engine as it was before the shared tree (e2e/stack_test.go oldEngine,
+      # commit 2118ca0) from `git archive`; the default one-commit checkout does not have it, and with FOLDER_SYNC_E2E_REQUIRE=1
+      # that is a failure (the first run: gates (linux) G1)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -85,6 +90,44 @@ jobs:
       - name: The pinned rclone (scripts/dev-tools)
         run: scripts/dev-tools
 
+      # WHY before `go test`: the shared-tree e2e (TestSharedTree, TestSoakSharedNothingLost) starts the accounts Worker
+      # (accounts/scripts/dev.mjs, wrangler dev), so accounts/node_modules must exist; with FOLDER_SYNC_E2E_REQUIRE=1 a missing
+      # one fails them. wrangler's workerd needs its install script, so this is not the --ignore-scripts install of other jobs.
+      # The first push ran this install after `go test`, and both tests failed with "accounts/node_modules is missing".
+      - name: npm ci (accounts, for the shared-tree e2e and the local stack)
+        run: npm ci --no-audit --no-fund
+        working-directory: accounts
+
+      # WHY Linux only: MinIO is built from source (a few minutes), once per pin; the G7 journeys run in one place, and the
+      # gates job runs them again. Restore, build and save are separate steps so a red test run still keeps the build.
+      - name: MinIO pin (scripts/fetch-minio)
+        if: runner.os == 'Linux'
+        id: minio_pin
+        run: echo "pin=$(scripts/fetch-minio --print-pin | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: MinIO cache
+        if: runner.os == 'Linux'
+        id: minio_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .tools/minio
+            .tools/minio.version
+          key: minio-${{ runner.os }}-${{ steps.minio_pin.outputs.pin }}
+
+      - name: MinIO, the pinned build (scripts/fetch-minio)
+        if: runner.os == 'Linux'
+        run: scripts/fetch-minio
+
+      - name: MinIO cache, save
+        if: runner.os == 'Linux' && steps.minio_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .tools/minio
+            .tools/minio.version
+          key: minio-${{ runner.os }}-${{ steps.minio_pin.outputs.pin }}
+
       - name: go vet
         run: go vet ./...
 
@@ -94,6 +137,9 @@ jobs:
         run: node --test schema/fixtures.test.mjs
 
       - name: go test (e2e included)
+        env:
+          # the G7 MinIO journeys run on Linux, where the step above built MinIO: a missing build there is a failure, not a skip
+          FOLDER_SYNC_E2E_MINIO: ${{ runner.os == 'Linux' && '1' || '' }}
         run: |
           set +e
           go test -count=1 -json ./... > "$RUNNER_TEMP/test.json"
@@ -127,10 +173,6 @@ jobs:
       # the R2 stand-in), add a folder, first file read back from the Worker; fails over 120 s. The stack needs the Worker's
       # dependencies, with install scripts (workerd's postinstall), so this is not the --ignore-scripts install the other jobs use.
       # continue-on-error: a slow first sync is G11's red (scripts/gates reads the file), not the Go suite's.
-      - name: npm ci (accounts, for the local stack)
-        run: npm ci --no-audit --no-fund
-        working-directory: accounts
-
       - name: G11, first sync from a clean HOME (scripts/first-sync-timer)
         id: first_sync
         continue-on-error: true
@@ -218,6 +260,12 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+
+      # WHY: test/set-secrets.test.ts imports accounts/scripts/set-secrets.py, which reads wrangler.toml with tomllib (Python 3.11+);
+      # ubuntu-22.04's own python3 is 3.10 ("No module named 'tomllib'", first push)
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
 
       # WHY --ignore-scripts: wrangler's workerd postinstall fetches nothing the tests use
       - name: npm ci
@@ -336,7 +384,12 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
+      # WHY the whole history: TestSharedTree builds the engine as it was before the shared tree (e2e/stack_test.go oldEngine,
+      # commit 2118ca0) from `git archive`; the default one-commit checkout does not have it, and with FOLDER_SYNC_E2E_REQUIRE=1
+      # that is a failure (the first run: gates (linux) G1)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -392,6 +445,20 @@ jobs:
           path: ${{ runner.temp }}/legs
         continue-on-error: true
 
+      # MinIO is built from source by scripts/gates (G7, scripts/fetch-minio): the cache the test job fills holds it, so the build is skipped
+      - name: MinIO pin (scripts/fetch-minio)
+        id: minio_pin
+        run: echo "pin=$(scripts/fetch-minio --print-pin | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: MinIO cache
+        id: minio_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .tools/minio
+            .tools/minio.version
+          key: minio-${{ runner.os }}-${{ steps.minio_pin.outputs.pin }}
+
       # WHY the needs JSON through an environment variable: the shell never sees workflow text
       - name: Run the gates
         env:
@@ -399,6 +466,15 @@ jobs:
         run: |
           printf '%s' "$NEEDS" > "$RUNNER_TEMP/needs.json"
           scripts/gates --profile ci --with-web --needs "$RUNNER_TEMP/needs.json" --collect "$RUNNER_TEMP/g11" --os-results "$RUNNER_TEMP/legs"
+
+      - name: MinIO cache, save
+        if: ${{ !cancelled() && steps.minio_cache.outputs.cache-hit != 'true' && hashFiles('.tools/minio') != '' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .tools/minio
+            .tools/minio.version
+          key: minio-${{ runner.os }}-${{ steps.minio_pin.outputs.pin }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}

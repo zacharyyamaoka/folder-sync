@@ -3,7 +3,29 @@ package store
 import (
 	"strings"
 	"testing"
+
+	"folder-sync/internal/testtools"
 )
+
+// The tests build file:// URLs from t.TempDir(). On Windows that is C:\Users\..., and "file://" + "C:/Users/..." names the host
+// "C:" (the first CI run: "use an absolute path, not a host"), so every test goes through testtools.FileURL.
+func TestFileURLOfADirectoryOnAnyOS(t *testing.T) {
+	for dir, want := range map[string]string{
+		"/srv/nas/hub":     "/srv/nas/hub",
+		"C:/Users/BAM/hub": "C:/Users/BAM/hub",
+		"D:/a/_temp/hub":   "D:/a/_temp/hub",
+	} {
+		raw := testtools.FileURL(dir)
+		spec, err := Parse(raw)
+		if err != nil {
+			t.Errorf("%s -> %s: %v", dir, raw, err)
+			continue
+		}
+		if spec.Kind != File || spec.Bucket != want {
+			t.Errorf("%s -> %s parsed as %+v, want the directory %s", dir, raw, spec, want)
+		}
+	}
+}
 
 func TestParse(t *testing.T) {
 	cases := []struct {

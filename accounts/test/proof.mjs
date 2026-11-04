@@ -31,13 +31,14 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wri
 import { homedir, hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { defaultRclone } from "../scripts/dev.mjs";
 
 const ACCOUNTS = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REPO = resolve(ACCOUNTS, "..");
 const DIR = resolve(process.env.PROOF_DIR || join(ACCOUNTS, ".state", "proof"));
 const STATE = join(DIR, "stack");
 const GO = process.env.GO || (existsSync(join(homedir(), ".local", "go", "bin", "go")) ? join(homedir(), ".local", "go", "bin", "go") : "go");
-const RCLONE = resolve(process.env.RCLONE || join(REPO, ".tools", "rclone"));
+const RCLONE = resolve(process.env.RCLONE || defaultRclone(REPO));
 const PROJECT = "robotparts";
 const PEOPLE = { A: "maker@example.com", B: "stranger@example.com" };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -11,9 +11,11 @@
 //    "bucket":"folder-sync","parentKeyId":"…","accountId":"…","stateDir":"…","pids":{"store":…,"gate":…,"accounts":…}}
 //
 // Ports (all 127.0.0.1), each checked free before anything binds: FS_STANDIN_PORT (4930), FS_STORE_PORT (4931),
-// FS_ACCOUNTS_PORT (4932), FS_INSPECTOR_PORT (4942, wrangler's devtools). Tools: RCLONE (default <repo>/.tools/rclone,
+// FS_ACCOUNTS_PORT (4932), FS_INSPECTOR_PORT (4942, wrangler's devtools). Tools: RCLONE (default <repo>/.tools/rclone[.exe],
 // from scripts/dev-tools), GO (default ~/.local/go/bin/go, else go). SIGN_UP_EMAILS defaults to "*" here.
 // The state dir (default accounts/.state/dev) holds keys.json, the D1, the store, logs and one <name>.pid per process.
+// Linux, macOS and Windows: what differs by OS is in the small functions below (exeName, stopPlan, sleepMs, ...), which
+// accounts/test/dev-platform.test.ts runs for every platform on any machine.
 
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -28,6 +30,50 @@ const REPO = resolve(ACCOUNTS, "..");
 const BUCKET = "folder-sync";
 const NAMES = ["accounts", "gate", "store"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** A program's file name on `platform`: Windows only runs files that end in .exe, and `go build -o x` writes x as named. */
+export function exeName(name, platform = process.platform) {
+	return platform === "win32" && !name.toLowerCase().endsWith(".exe") ? `${name}.exe` : name;
+}
+
+/** Where `up` builds the R2 stand-in. */
+export function standinBinary(state, platform = process.platform) {
+	return join(state, "bin", exeName("r2standin", platform));
+}
+
+/** The pinned rclone scripts/dev-tools puts in <repo>/.tools. */
+export function defaultRclone(repo = REPO, platform = process.platform) {
+	return join(repo, ".tools", exeName("rclone", platform));
+}
+
+/** The store process: `rclone serve s3` over the state dir's s3/ folder.
+ *  WHY --config is a file in the state dir and not /dev/null: Git Bash turns /dev/null into "nul", which rclone refuses
+ *  as a reserved device name on Windows (the same reason scripts/dev-tools omits it there). An empty file works everywhere. */
+export function storeArgv(rclone, state, port) {
+	return [rclone, "serve", "s3", "--addr", `127.0.0.1:${port}`, "--config", join(state, "rclone.conf"), "--cache-dir", join(state, "store-cache"), join(state, "s3")];
+}
+
+/** How to stop the process (and its children) that `up` recorded. POSIX: `start` made it a process group leader, so a
+ *  signal to -pid reaches wrangler and its workerd. Windows has no groups and no SIGTERM: taskkill /T ends the tree, /F
+ *  because a console-less process does not handle a polite stop. */
+export function stopPlan(pid, platform = process.platform, force = false) {
+	if (platform === "win32") return { kind: "taskkill", command: "taskkill", args: ["/PID", String(pid), "/T", "/F"] };
+	return { kind: "signal", pid: -pid, signal: force ? "SIGKILL" : "SIGTERM" };
+}
+
+function stop(pid, force = false) {
+	const plan = stopPlan(pid, process.platform, force);
+	if (plan.kind === "taskkill") {
+		spawnSync(plan.command, plan.args, { stdio: "ignore" });
+		return;
+	}
+	try { process.kill(plan.pid, plan.signal); } catch { /* gone */ }
+}
+
+/** Wait without an external `sleep` (Windows has none) and without an event loop turn. */
+export function sleepMs(ms) {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
 function options(argv) {
 	const out = { verb: argv[0] || "up", stateDir: join(ACCOUNTS, ".state", "dev") };
@@ -96,7 +142,8 @@ function wrangler() {
 function start(state, name, argv, cwd, env = {}) {
 	const log = openSync(join(state, `${name}.log`), "a");
 	// WHY detached: the pid is a process group (wrangler and its workerd), so `down` stops exactly what this started
-	const child = spawn(argv[0], argv.slice(1), { cwd, detached: true, stdio: ["ignore", log, log], env: { ...process.env, ...env } });
+	// windowsHide: no console window per process on Windows
+	const child = spawn(argv[0], argv.slice(1), { cwd, detached: true, windowsHide: true, stdio: ["ignore", log, log], env: { ...process.env, ...env } });
 	child.unref();
 	writeFileSync(join(state, `${name}.pid`), String(child.pid));
 	return child.pid;
@@ -157,13 +204,13 @@ export async function up(state, env = process.env) {
 	for (const [name, port] of Object.entries(p)) {
 		if (!(await free(port))) throw new Error(`port ${port} (${name}) is taken on 127.0.0.1: set FS_${name === "standin" ? "STANDIN" : name.toUpperCase()}_PORT to a free one`);
 	}
-	const rclone = resolve(env.RCLONE || join(REPO, ".tools", "rclone"));
+	const rclone = resolve(env.RCLONE || defaultRclone());
 	if (!existsSync(rclone)) throw new Error(`no rclone at ${rclone}: run scripts/dev-tools, or set RCLONE`);
 	const go = env.GO || (existsSync(join(homedir(), ".local", "go", "bin", "go")) ? join(homedir(), ".local", "go", "bin", "go") : "go");
 	for (const sub of ["s3", "bin", "d1"]) mkdirSync(join(state, sub), { recursive: true });
 	mkdirSync(join(state, "s3", BUCKET), { recursive: true });
 
-	const standin = join(state, "bin", "r2standin");
+	const standin = standinBinary(state);
 	const built = spawnSync(go, ["-C", REPO, "build", "-o", standin, "./e2e/r2standin"], { encoding: "utf8" });
 	if (built.status !== 0) throw new Error(`r2standin build failed: ${built.stderr || built.error}`);
 	const vars = devVars(p, k, env);
@@ -174,7 +221,8 @@ export async function up(state, env = process.env) {
 	});
 	if (migrate.status !== 0) throw new Error(`migrations failed:\n${migrate.stdout}${migrate.stderr}`);
 
-	const store = start(state, "store", [rclone, "serve", "s3", "--addr", `127.0.0.1:${p.store}`, "--config", "/dev/null", "--cache-dir", join(state, "store-cache"), join(state, "s3")], state);
+	writeFileSync(join(state, "rclone.conf"), "", { flag: "a" }); // empty, and kept if it is already there
+	const store = start(state, "store", storeArgv(rclone, state, p.store), state);
 	const gate = start(state, "gate", [standin, "serve", "--listen", `127.0.0.1:${p.standin}`, "--backend", `127.0.0.1:${p.store}`, "--account", k.accountId, "--parent", `${k.parentKeyId}:${k.parentSecret}`, "--log", join(state, "gate.jsonl")], state);
 	// WHY --var as well as .dev.vars: the values this process runs with stay pinned even if another state dir's `up`
 	// rewrites .dev.vars; WHY --local-upstream: the Worker must see its own 127.0.0.1 origin (PUBLIC_URL), the one
@@ -199,13 +247,13 @@ export function down(state) {
 		const pid = pidOf(state, name);
 		if (!pid) continue;
 		// only the process group this state dir recorded, never "whatever listens on the port"
-		try { process.kill(-pid, "SIGTERM"); } catch { /* gone */ }
+		stop(pid);
 		stopped.push({ name, pid });
 	}
 	const until = Date.now() + 5000;
-	while (stopped.some((s) => alive(s.pid)) && Date.now() < until) spawnSync("sleep", ["0.2"]);
+	while (stopped.some((s) => alive(s.pid)) && Date.now() < until) sleepMs(200);
 	for (const s of stopped) {
-		if (alive(s.pid)) try { process.kill(-s.pid, "SIGKILL"); } catch { /* gone */ }
+		if (alive(s.pid)) stop(s.pid, true);
 		rmSync(join(state, `${s.name}.pid`), { force: true });
 	}
 	return stopped;

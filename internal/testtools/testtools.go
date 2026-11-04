@@ -63,6 +63,16 @@ func Terminate(process *os.Process) {
 	process.Signal(syscall.SIGTERM)
 }
 
+// FileURL is the file:// store URL of directory dir on every OS: file:///srv/dir, and file:///C:/Users/x/dir for a Windows
+// path. WHY not "file://" + ToSlash(dir): C:/Users/x puts the drive where a host goes, and the store parser refuses a host.
+func FileURL(dir string) string {
+	slashed := filepath.ToSlash(dir)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	return "file://" + slashed
+}
+
 // HomeEnv is the environment that points a child process's home at dir on every OS (folder-sync reads HOME, or
 // USERPROFILE on Windows; see internal/layout).
 func HomeEnv(dir string) []string {
