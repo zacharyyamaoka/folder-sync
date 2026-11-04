@@ -5,12 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>folder-sync — your folder, on every computer and online</title>
 <link rel="icon" href="data:,">
-<meta name="description" content="Obsidian Sync for any application: a plain folder of files, the same on every computer and readable online. Local editors, scripts and AI agents just open the files.">
+<meta name="description" content="Obsidian Sync for any application: a plain folder of files, the same on every computer and readable online, with version history. Three measured objectives, twelve gates, all current.">
 <!--
-  Rebuilt 2026-10-28 from the earlier, richer page (lane/brand, site/landing/index.html, written as "localfilesync").
-  Zach, 2026-10-28: "I like the minimalism but the Unix thing is too minimalist. Go back to what you had before."
-  WHY every number is written into the HTML with its source beside it: the page must say only what main
-  (d603c9f) does, and a number with no source is the first thing to drift. Sources: README.md on this branch.
+  Updated 2026-11-04 (lane/gh-pages-landing). Zach, Nov 4: a landing page with the overview, the philosophy, the objectives and gates
+  with their CURRENT values, and a short demo video, on GitHub Pages.
+  WHY the objectives and gates block is generated: a number typed by hand drifts. tools/update-status runs scripts/readme-status
+  (on the main branch of this repo) over the hourly KPI series and the last gate run, and rewrites only what sits between the
+  status:begin and status:end markers below. Everything else on this page is written by hand and says only what main does.
   WHY no web fonts and no CDN: one self-contained page that renders the same offline and on a static host.
 -->
 <style>
@@ -129,14 +130,10 @@
     color: var(--accent); background: var(--accent-soft); border-radius: 3px; padding: 5px 7px;
   }
 
-  /* ---------- video + stills ---------- */
+  /* ---------- video ---------- */
   .film { margin-top: 44px; border: 1px solid var(--line-strong); background: var(--paper); }
   .film video, .film img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; background: var(--paper-2); }
-  .film figcaption, .stills figcaption { padding: 12px 16px; font: 12.5px/1.6 var(--mono); color: var(--muted); border-top: 1px solid var(--line); }
-  .stills { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 36px; }
-  .stills figure { margin: 0; border: 1px solid var(--line-strong); background: var(--paper); }
-  .stills img { display: block; width: 100%; height: auto; }
-  .stills a { display: block; }
+  .film figcaption { padding: 12px 16px; font: 12.5px/1.6 var(--mono); color: var(--muted); border-top: 1px solid var(--line); }
 
   /* ---------- how it works ---------- */
   .flow {
@@ -181,22 +178,6 @@
   .features .later li::before { content: "□"; color: var(--accent); }
   .features li span { color: var(--muted); display: block; font-size: 14px; }
 
-  /* ---------- speed ---------- */
-  .tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 36px; border: 1px solid var(--line-strong); background: var(--paper); }
-  .tiles > div { padding: 20px 22px; border-right: 1px solid var(--line); min-width: 0; }
-  .tiles > div:last-child { border-right: 0; }
-  .tiles .big { font: 700 clamp(30px, 4vw, 42px)/1 var(--mono); color: var(--accent); letter-spacing: -0.02em; }
-  .tiles .what { margin-top: 10px; font-size: 15px; }
-  .tiles .src { margin-top: 8px; font: 12px/1.5 var(--mono); color: var(--muted); }
-  table.speed { width: 100%; border-collapse: collapse; margin-top: 24px; font-size: 14.5px; background: var(--paper); border: 1px solid var(--line-strong); }
-  table.speed th, table.speed td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-  table.speed th { font: 600 11.5px/1.2 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
-  table.speed td.n { font-family: var(--mono); white-space: nowrap; text-align: right; }
-  table.speed th.n { text-align: right; }
-  table.speed td.fast { color: var(--accent); font-weight: 700; }
-  table.speed td.x { font-family: var(--mono); color: var(--muted); text-align: right; }
-  .bar { height: 4px; background: var(--line); margin-top: 8px; position: relative; max-width: 260px; }
-  .bar b { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); }
   .note { font: 12.5px/1.6 var(--mono); color: var(--muted); margin-top: 14px; max-width: 86ch; }
   .note a { color: var(--ink); }
 
@@ -236,13 +217,10 @@
     .flow { grid-template-columns: 1fr; }
     .arrow { width: auto; height: 44px; border: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
     .arrow span { display: inline-block; transform: rotate(90deg); }
-    .cols, .features, .install-grid, .tiles, .stills { grid-template-columns: minmax(0, 1fr); }
-    .cols > div, .tiles > div { border-right: 0; border-bottom: 1px solid var(--line); }
-    .cols > div:last-child, .tiles > div:last-child { border-bottom: 0; }
+    .cols, .features, .install-grid { grid-template-columns: minmax(0, 1fr); }
+    .cols > div { border-right: 0; border-bottom: 1px solid var(--line); }
+    .cols > div:last-child { border-bottom: 0; }
     .features > div + div { border-left: 0; border-top: 1px solid var(--line); }
-    table.speed th.x, table.speed td.x { display: none; }
-    table.speed th, table.speed td { padding: 10px 10px; }
-    .bar { display: none; }
     .user { min-width: 0; flex: 1 1 100%; }
     pre.term { white-space: pre-wrap; overflow-wrap: anywhere; }
   }
@@ -250,6 +228,64 @@
     nav.links { gap: 10px; }
     .theme-btn .word { display: none; }
   }
+
+  /* ---------- objectives and gates (the block between the status markers is generated) ---------- */
+  :root { --warn: #9a5a12; --warn-soft: rgba(154, 90, 18, 0.10); --bad: #a33a2a; --bad-soft: rgba(163, 58, 42, 0.10); }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --warn: #e0a35a; --warn-soft: rgba(224, 163, 90, 0.12); --bad: #e58a78; --bad-soft: rgba(229, 138, 120, 0.12); } }
+  :root[data-theme="dark"] { --warn: #e0a35a; --warn-soft: rgba(224, 163, 90, 0.12); --bad: #e58a78; --bad-soft: rgba(229, 138, 120, 0.12); }
+  .status .asof { font: 12.5px/1.6 var(--mono); color: var(--muted); margin-top: 20px; max-width: 90ch; }
+  .objectives { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 28px; border: 1px solid var(--line-strong); background: var(--paper); }
+  .objective { padding: 22px 24px; border-bottom: 1px solid var(--line); min-width: 0; }
+  .objective:last-child { border-bottom: 0; }
+  .objective h3 { display: flex; align-items: baseline; gap: 10px; }
+  .objective .oid { font: 600 12px/1 var(--mono); color: var(--accent); }
+  .objective .blurb { color: var(--muted); font-size: 14.5px; margin-top: 6px; }
+  table.kpis { width: 100%; table-layout: fixed; border-collapse: collapse; margin-top: 16px; font-size: 14px; }
+  table.kpis th, table.kpis td { text-align: left; padding: 9px 0; border-top: 1px solid var(--line); vertical-align: top; }
+  table.kpis thead th { font: 600 11px/1.2 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border-top: 0; padding-top: 0; }
+  table.kpis tbody th { font-weight: 500; padding-right: 10px; }
+  table.kpis td.target { color: var(--muted); font: 12.5px/1.5 var(--mono); padding-right: 10px; }
+  table.kpis thead th:nth-child(1) { width: 36%; }
+  table.kpis thead th:nth-child(2) { width: 24%; }
+  table.kpis td.cell { overflow-wrap: anywhere; font: 600 14px/1.4 var(--mono); white-space: nowrap; }
+  table.kpis td.cell .verdict { display: block; font: 600 10.5px/1.4 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
+  td.cell.met { color: var(--accent); }
+  td.cell.missed { color: var(--warn); }
+  td.cell.failed { color: var(--bad); white-space: normal; }
+  td.cell.none { color: var(--muted); font-weight: 400; white-space: normal; }
+  .gate-line { margin-top: 28px; font: 600 14px/1.5 var(--mono); }
+  ul.gates { list-style: none; padding: 0; margin: 14px 0 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border: 1px solid var(--line-strong); background: var(--paper); }
+  li.gate { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); min-width: 0; }
+  li.gate a { display: grid; gap: 4px; padding: 12px 12px 12px; text-decoration: none; border-top: 3px solid var(--line-strong); height: 100%; }
+  li.gate a:hover { background: var(--paper-2); }
+  li.gate strong { font: 700 13px/1 var(--mono); }
+  li.gate .gname { font-size: 13px; line-height: 1.3; color: var(--ink); overflow-wrap: anywhere; }
+  li.gate i { font: normal 600 10.5px/1.3 var(--mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+  li.g-pass a { border-top-color: var(--accent); }
+  li.g-pass i { color: var(--accent); }
+  li.g-fail a { border-top-color: var(--bad); background: var(--bad-soft); }
+  li.g-fail i { color: var(--bad); }
+  li.g-notbuilt a, li.g-skipped a { border-top-color: var(--warn); }
+  li.g-notbuilt i, li.g-skipped i { color: var(--warn); }
+  .principles .cols { margin-top: 0; }
+  .principles .cols + .cols { margin-top: -1px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 10px 22px; margin-top: 22px; font: 12.5px/1.5 var(--mono); color: var(--muted); }
+  .stats a { color: var(--ink); }
+  @media (max-width: 1000px) { ul.gates { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @media (max-width: 820px) {
+    .objective { padding: 18px 16px; }
+    table.kpis { table-layout: auto; }
+    table.kpis thead { display: none; }
+    table.kpis, table.kpis tbody, table.kpis tr, table.kpis th, table.kpis td { display: block; width: 100%; }
+    table.kpis tr { border-top: 1px solid var(--line); padding: 10px 0; }
+    table.kpis th, table.kpis td { border-top: 0; padding: 2px 0; }
+    table.kpis td.target::before { content: "Target  "; color: var(--muted); }
+    table.kpis td.cell { white-space: normal; }
+    table.kpis td.cell[data-env="test"]::before { content: "Test  "; color: var(--muted); font-weight: 400; }
+    table.kpis td.cell[data-env="prod"]::before { content: "Production  "; color: var(--muted); font-weight: 400; }
+    table.kpis td.cell .verdict { display: inline; margin-left: 8px; }
+  }
+  @media (max-width: 560px) { ul.gates { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>
 </head>
 <body>
@@ -258,9 +294,10 @@
   <div class="wrap">
     <a class="brand" href="#top"><span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>folder-sync</span></a>
     <nav class="links">
-      <a href="#how" class="hide-sm">How it works</a>
-      <a href="#speed" class="hide-sm">Speed</a>
-      <a href="#install">Install</a>
+      <a href="#objectives" class="hide-sm">Objectives</a>
+      <a href="#why" class="hide-sm">Philosophy</a>
+      <a href="#install">Quick start</a>
+      <a href="https://github.com/zacharyyamaoka/folder-sync#readme" class="hide-sm">README</a>
       <a href="https://github.com/zacharyyamaoka/folder-sync" class="hide-sm">GitHub</a>
       <!-- WHY a plain link: hosted accounts live on the accounts Worker; /fs/signin only returns to a path on its own
            origin, so the return is /fs/account there (checked 2026-10-28: 200, "Sign in · folder-sync"). -->
@@ -276,21 +313,77 @@
       <div class="label"><span class="dot">●</span> Sync for plain-file folders</div>
       <h1 style="margin-top:22px">Your folder, on every computer <em>and online.</em></h1>
       <p class="position">Obsidian Sync for any application.</p>
-      <p class="lede">File-first, agent-friendly. Pick any folder of plain files and folder-sync keeps it the same on your laptop, your desktop and the web. Any editor, script or local AI agent can just open the files.</p>
+      <p class="lede">File-first, agent-friendly. Pick any folder of plain files and folder-sync keeps it the same on your laptop, your desktop and the web, with version history. Any editor, script or local AI agent can just open the files.</p>
       <div class="cta">
-        <a class="btn primary" href="#install">Download v0.2.0</a>
+        <a class="btn primary" href="#install">Quick start</a>
         <a class="btn" href="https://folder-sync-demo.zach-yamaoka.workers.dev/">Live demo (invite-only)</a>
-        <a class="btn" href="#how">How it works →</a>
+        <a class="btn" href="#objectives">The numbers →</a>
       </div>
       <figure class="film" style="margin-left:0;margin-right:0;margin-bottom:0">
-        <video autoplay muted loop playsinline preload="metadata" poster="media/hero-poster.png" width="1280" height="720" aria-label="A folder synced: files dropped in and edited on one machine appear online and on a second machine">
-          <source src="media/hero.mp4" type="video/mp4" id="hero-mp4">
-          <a href="media/hero.gif">Watch it as a GIF</a>
+        <video autoplay muted loop playsinline preload="metadata" poster="media/demo-poster.png" width="1280" height="720" aria-label="A file saved on a laptop appears in the browser, a file added in the browser lands on the laptop's disk, and the version history restores an earlier text">
+          <source src="media/demo.webm" type="video/webm">
+          <source src="media/demo.mp4" type="video/mp4" id="hero-mp4">
+          <a href="media/demo.gif">Watch it as a GIF</a>
         </video>
-        <!-- Recorded 2026-10-28 by tools/record_hero.py on this branch: the v0.1.0 linux-amd64 binary and main's
-             accounts Worker under wrangler dev, run with tools/setup.mjs. Times from that run's hero-run.json. -->
-        <figcaption>Recorded, not mocked: the v0.1.0 CLI and main's accounts Worker on one machine (local stack), two HOMEs as two computers. Captions are that run's measured times: a save on disk until the Worker serves the same bytes, and until they are on the second machine's disk.</figcaption>
+        <!-- Recorded 2026-11-04 by ui/scripts/record-demo.mjs on main (lane/readme-landing): the real CLI and the real Files page
+             on the local stack (wrangler dev, a local D1, the R2 stand-in); the two halves are cut where a shared flash ends.
+             The two times in the captions are that run's, polled by the recorder; docs/media/demo.json on main holds them. -->
+        <figcaption>Recorded, not mocked: the real command line on a laptop (left) and the real Files page in a browser (right), on a local stack. A file saved on the laptop shows in the browser in under a second; a file added in the browser is on the laptop's disk in about a quarter of a second; the version history takes the earlier text back. <a href="media/demo.mp4">mp4</a> · <a href="media/demo.webm">webm</a> · <a href="media/demo.gif">gif</a></figcaption>
       </figure>
+    </div>
+  </section>
+
+  <section id="objectives">
+    <div class="wrap">
+      <div class="label">Objectives &amp; gates</div>
+      <h2>Three numbers we chase, twelve checks that stay green.</h2>
+      <p class="lede">The objectives are measured every hour, in a test rig and in production: how <b>fast</b> a save arrives, how <b>efficiently</b> old versions are stored, and what a gigabyte <b>costs</b>. The gates are yes-or-no checks, each backed by a test that runs on every change. Everything below is generated from the latest runs, so a missed target is shown as missed.</p>
+      <!-- status:begin -->
+<div class="status">
+<p class="asof">Latest measurements: test 2026-11-04 21:14 UTC, production 2026-11-04 21:14 UTC. Gates last run 2026-11-04 20:56 UTC on bb601e2.</p>
+<div class="objectives">
+<article class="objective" data-objective="O1">
+<h3><span class="oid">O1</span> Fast</h3>
+<p class="blurb">Save to bytes on the other disk and online</p>
+<table class="kpis"><thead><tr><th scope="col">Measure</th><th scope="col">Target</th><th scope="col">Test</th><th scope="col">Production</th></tr></thead><tbody>
+<tr><th scope="row">Save to the bytes on the other disk and online, median (p50)</th><td class="target">≤ 1 s</td><td class="cell met" data-env="test">400 ms<span class="verdict">met</span></td><td class="cell missed" data-env="prod">3.4 s<span class="verdict">missed</span></td></tr>
+<tr><th scope="row">The same, 95th percentile (p95)</th><td class="target">≤ 3 s</td><td class="cell met" data-env="test">492 ms<span class="verdict">met</span></td><td class="cell missed" data-env="prod">4.6 s<span class="verdict">missed</span></td></tr>
+</tbody></table></article>
+<article class="objective" data-objective="O2">
+<h3><span class="oid">O2</span> Storage efficient</h3>
+<p class="blurb">History bytes / live bytes, 30-day max</p>
+<table class="kpis"><thead><tr><th scope="col">Measure</th><th scope="col">Target</th><th scope="col">Test</th><th scope="col">Production</th></tr></thead><tbody>
+<tr><th scope="row">History bytes ÷ live bytes (H), worst of the last 30 days</th><td class="target">≤ 1.0 (stretch ≤ 0.25)</td><td class="cell missed" data-env="test">1.51<span class="verdict">missed</span></td><td class="cell missed" data-env="prod">68<span class="verdict">missed</span></td></tr>
+<tr><th scope="row">H, latest sample</th><td class="target">none (the 30-day worst is the target)</td><td class="cell none" data-env="test">1.51</td><td class="cell none" data-env="prod">0.05</td></tr>
+</tbody></table></article>
+<article class="objective" data-objective="O3">
+<h3><span class="oid">O3</span> Cost per GB</h3>
+<p class="blurb">Per GB-month and per person-month at 10 GB; idle near zero</p>
+<table class="kpis"><thead><tr><th scope="col">Measure</th><th scope="col">Target</th><th scope="col">Test</th><th scope="col">Production</th></tr></thead><tbody>
+<tr><th scope="row">Cost per GB-month, cheapest provider</th><td class="target">no number set; the cheapest provider</td><td class="cell none" data-env="test">$0.017</td><td class="cell none" data-env="prod">$0.92</td></tr>
+<tr><th scope="row">Cost per person-month at 10 GB, cheapest provider</th><td class="target">≤ $0.50</td><td class="cell met" data-env="test">$0.22<span class="verdict">met</span></td><td class="cell met" data-env="prod">$0.32<span class="verdict">met</span></td></tr>
+<tr><th scope="row">CPU when idle</th><td class="target">&lt; 0.1 %</td><td class="cell met" data-env="test">0.089 %<span class="verdict">met</span></td><td class="cell failed" data-env="prod">could not be measured</td></tr>
+<tr><th scope="row">Storage requests an hour when idle</th><td class="target">none (idle cost should be about $0)</td><td class="cell none" data-env="test">123</td><td class="cell none" data-env="prod">not measured yet</td></tr>
+</tbody></table></article>
+</div>
+<p class="gate-line">10 of 12 gates pass, 2 are not built yet.</p>
+<ul class="gates">
+<li class="gate g-pass" data-gate="G1"><a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/GATES.md#the-twelve" title="Nothing lost. Random edits, deletes, renames and crashes end with every file and every kept version intact.. 77 passed"><strong>G1</strong><span class="gname">Nothing lost</span><i>pass</i></a></li>
+<li class="gate g-pass" data-gate="G2"><a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/GATES.md#the-twelve" title="Version history. Any version from the last 30 days restores byte for byte; deleted files restore for 30 days.. 33 passed"><strong>G2</strong><span class="gname">Version history</span><i>pass</i></a></li>
+<li class="gate g-pass" data-gate="G3"><a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/GATES.md#the-twelve" title="Private. No account can read another account's files.. 8 passed"><strong>G3</strong><span class="gname">Private</span><i>pass</i></a></li>
+<li class="gate g-notbuilt" data-gate="G4"><a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/GATES.md#the-twelve" title="Cross-platform. Linux, macOS and Windows all pass CI, and the desktop installers install on all three.. 4 passed, 1 skipped, 1 proof not built"><strong>G4</strong><span class="gname">Cross-platform</span><i>not built yet</i></a></li>
+<li class="gate g-pass" data-gate="G5"><a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/GATES.md#the-twelve" title="Three surfaces. The command line, the desktop app and the web page each pass one full journey.. 3 passed"><strong>G5</strong><span class="gname">Three surfaces</span><i>pass</i></a></li>
+<li class="gate g-pass" data-gate="G6"><a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/GATES.md#the-twelve" title="Headless. A fresh machine syncs from a script with no prompt and no browser.. 1 passed"><strong>G6</strong><span class="gname">Headless</span><i>pass</i></a></li>
+<li class="gate g-pass" data-gate="G7"><a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/GATES.md#the-twelve" title="Storage provider swappable. The same journey passes on R2, another S3-compatible store and a plain folder.. 25 passed"><strong>G7</strong><span class="gname">Storage provider swappable</span><i>pass</i></a></li>
+<li class="gate g-pass" data-gate="G8"><a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/GATES.md#the-twelve" title="Drop-in. An app adds sync, accounts and the sync view in 20 lines of code or fewer.. 3 passed"><strong>G8</strong><span class="gname">Drop-in</span><i>pass</i></a></li>
+<li class="gate g-pass" data-gate="G9"><a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/GATES.md#the-twelve" title="Ignore rules. gitignore-style rules; OS junk ignored by default; accented names land exactly once.. 9 passed"><strong>G9</strong><span class="gname">Ignore rules</span><i>pass</i></a></li>
+<li class="gate g-pass" data-gate="G10"><a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/GATES.md#the-twelve" title="Accounts. Google and email-code sign-in; one deployment per app.. 69 passed"><strong>G10</strong><span class="gname">Accounts</span><i>pass</i></a></li>
+<li class="gate g-notbuilt" data-gate="G11"><a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/GATES.md#the-twelve" title="Easy to start. From a fresh machine to the first sync in 2 minutes or less.. 2 passed, 4 skipped, 4 proofs not built"><strong>G11</strong><span class="gname">Easy to start</span><i>not built yet</i></a></li>
+<li class="gate g-pass" data-gate="G12"><a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/GATES.md#the-twelve" title="Trusted restore. A restore takes 5 seconds or less.. 1 passed"><strong>G12</strong><span class="gname">Trusted restore</span><i>pass</i></a></li>
+</ul>
+</div>
+<!-- status:end -->
+      <p class="note">Targets: a save on the other disk and online in at most 1 s (median) and 3 s (95th percentile); history bytes at most the live bytes (worst of 30 days; stretch: a quarter); at most $0.50 per person-month at 10 GB, with an idle machine near $0 and under 0.1 % CPU. How each is measured: <a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/KPI.md">docs/KPI.md</a>. The gates and their tests: <a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/GATES.md">docs/GATES.md</a>. Test numbers come from one machine over loopback, so the internet's round trips are not in them; production numbers come from the live service.</p>
     </div>
   </section>
 
@@ -320,39 +413,52 @@
           <p>Your other computers pull it down; apps and the browser read the same files.</p>
         </div>
       </div>
-      <div class="stills">
-        <figure><a href="media/still-2-anything-online.png"><img src="media/still-2-anything-online.png" alt="A markdown note, a JSON file and an image dropped into the laptop's folder, each served online by the Worker" width="1280" height="720" loading="lazy"></a>
-          <figcaption>Anything goes in: a note, a JSON file, an image. Each is online in about 0.3 s.</figcaption></figure>
-        <figure><a href="media/still-3-edit-synced.png"><img src="media/still-3-edit-synced.png" alt="An edit to plan.md, online in 0.33 s and on the second machine in 0.30 s" width="1280" height="720" loading="lazy"></a>
-          <figcaption>An edit is online in 0.33 s and on the other machine in 0.30 s, under hosts/&lt;laptop&gt;/.</figcaption></figure>
-        <figure><a href="media/still-1-init-watch.png"><img src="media/still-1-init-watch.png" alt="The terminal: folder-sync init, publish --public and sync --watch, with the folder watcher and hub on" width="1280" height="720" loading="lazy"></a>
-          <figcaption>Three commands: <code>init</code>, <code>publish --public</code>, <code>sync --watch</code>. Folder watcher on, hub on.</figcaption></figure>
-        <figure><a href="media/still-4-signin.png"><img src="media/still-4-signin.png" alt="The hosted folder-sync sign-in page: Continue with Google" width="640" height="360" loading="lazy"></a>
-          <figcaption>Hosted accounts sign in with Google, from the browser. Invite-only for now.</figcaption></figure>
-      </div>
     </div>
   </section>
 
-  <section id="why">
+  <section id="why" class="principles">
     <div class="wrap">
-      <div class="label">Why file-first</div>
+      <div class="label">Philosophy</div>
       <h2>The folder is the database.</h2>
-      <div class="cols">
+      <p class="lede">The folder on your disk is the truth; the web is a view of it. Nothing has to go through an app.</p>
+      <div class="cols" style="margin-top:36px">
         <div>
           <span class="num">A</span>
-          <h3>Local agents just work</h3>
-          <p>An AI agent on your machine reads and writes plain files with the tools it already has. No API, no SDK, no export step. It edits; the folder syncs.</p>
+          <h3>File-first</h3>
+          <p>An AI agent on your machine reads and writes plain files with the tools it already has. No API, no SDK, no export step. If folder-sync disappeared, you would still have every file.</p>
         </div>
         <div>
           <span class="num">B</span>
-          <h3>No lock-in, no lost work</h3>
-          <p>The files on your disk are the truth. An overwrite or delete keeps the old copy online in <code>_trash/</code>, and an empty or unmounted folder can't wipe the online one.</p>
+          <h3>Obsidian Sync ergonomics</h3>
+          <p>Make a folder and it is the same everywhere, fast, with history, without thinking about it. And you can see it online too, which is the one thing Obsidian Sync does not give you.</p>
         </div>
         <div>
           <span class="num">C</span>
-          <h3>One backend for every app</h3>
-          <p>An app keeps its data in a folder and gets sync, an online copy and accounts for free. One sign-in works across every app that uses it.</p>
+          <h3>Off-the-shelf parts</h3>
+          <p>rclone moves the bytes, Better Auth does sign-in, R2 or any S3-style store holds the copy, Cloudflare Workers run the small server. The code here is the glue those parts do not already provide.</p>
         </div>
+      </div>
+      <div class="cols">
+        <div>
+          <span class="num">D</span>
+          <h3>One thing, done well</h3>
+          <p>It does not understand what is inside your files; apps like Vibe Tracks do that. An overwrite or delete keeps the old copy for 30 days, and an empty or unmounted folder cannot wipe the online one.</p>
+        </div>
+        <div>
+          <span class="num">E</span>
+          <h3>Drop-in</h3>
+          <p>An app keeps its data in a folder and gets sync, accounts and a sync view in 20 lines of code or fewer, with no server of its own. One sign-in works across every app that uses it.</p>
+        </div>
+        <div>
+          <span class="num">F</span>
+          <h3>Honest numbers</h3>
+          <p>Every number on this page is generated from measurements. A gate never passes without its proof, and a target we miss is shown as missed.</p>
+        </div>
+      </div>
+      <div class="stats">
+        <span>Parts: <a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/PARTS.md">core</a> (Go CLI and engine, works alone) · server-cloudflare · ui · desktop</span>
+        <span>Storage: R2, S3-compatible, Google Cloud Storage or a plain folder (<a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/STORAGE.md">docs/STORAGE.md</a>)</span>
+        <span>For apps: <a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/NEW-APP.md">drop it into an app</a></span>
       </div>
     </div>
   </section>
@@ -371,7 +477,10 @@
             <li><div>Sign in from the browser<span>a new machine shows a code you approve; it holds short-lived keys for your own files only, and you can revoke it</span></div></li>
             <li><div>Runs in the background<span><code>sync --install-service</code> writes the systemd, launchd or Task Scheduler entry</span></div></li>
             <li><div>Ignore rules<span>gitignore syntax</span></div></li>
-            <li><div>A desktop tray app<span>Linux, built from source for now (<code>app/</code>)</span></div></li>
+            <li><div>A desktop app<span>Tauri installers for Linux, macOS and Windows; the macOS and Windows results are not yet in (gate G4)</span></div></li>
+            <li><div>One tree for everyone<span><code>folder-sync share</code>: every machine, agent and web page edits the same files; two edits to different lines of a note merge, a collision becomes a conflicted copy</span></div></li>
+            <li><div>Swappable storage<span>R2, AWS S3 and S3-compatible stores (Backblaze B2, Wasabi, MinIO), Google Cloud Storage, or a plain folder: one line in <code>.folder-sync.toml</code></span></div></li>
+            <li><div>An account page<span>plans and a storage quota (Stripe in test mode), or bring your own bucket</span></div></li>
             <li><div>Version history<span>old copies of replaced and deleted files, kept up to 30 days and thinned as they age; see what changed, download one, restore it</span></div></li>
             <li><div>Activity log<span>which machine changed what, and when, with each sync's time from disk to online and back</span></div></li>
             <li><div>Deleted files<span>every deleted file with a kept copy; restore one or many at once</span></div></li>
@@ -382,48 +491,18 @@
         <div class="later">
           <span class="soon">Coming</span>
           <ul>
-            <li><div>Windows<span>the binary cross-compiles; it has not been run on Windows yet</span></div></li>
+            <li><div>macOS and Windows proved in CI<span>the CI matrix builds and tests on both; G4 and G11 stay "not built yet" until their results are in</span></div></li>
+            <li><div>Production on target<span>the objectives above show where the hosted service stands against each target today</span></div></li>
           </ul>
         </div>
       </div>
     </div>
   </section>
 
-  <section id="speed">
-    <div class="wrap">
-      <div class="label">Speed</div>
-      <h2>Push, not polling: a save shows up in about a third of a second.</h2>
-      <p class="lede">Each machine tells a small per-folder hub "this changed", so nothing waits for a timer. These numbers are illustrative: they are measured on one machine over loopback, so the internet's round trips are not in them.</p>
-      <!-- Tiles: bench/latency/bench.mjs (lane/latency-kpi) run 2026-10-28 22:45Z against main d603c9f's CLI and accounts
-           Worker, --stack local, 10 trials each way at random phases: up p50 296 ms (p95 357), down p50 257 ms (p95 318).
-           The third tile is the hero video's run (tools/record_hero.py, 2026-10-28 22:54Z): edit_peer_ms 304. -->
-      <div class="tiles">
-        <div><div class="big">0.30 s</div><div class="what">Save on disk → served online</div><div class="src">median of 10 · p95 0.36 s · 2026-10-28</div></div>
-        <div><div class="big">0.26 s</div><div class="what">Written online → on your disk</div><div class="src">median of 10 · p95 0.32 s · 2026-10-28</div></div>
-        <div><div class="big">0.30 s</div><div class="what">Edit → your other computer</div><div class="src">one run, the video above · 2026-10-28</div></div>
-      </div>
-      <p class="note">Main at d603c9f, local stack (wrangler dev, a local D1, rclone serve s3 behind the R2 stand-in), the latency bench driving the CLI as a person does: <code>init</code>, then <code>sync --watch</code>. Clocks start just before the write and stop when the reader holds the same bytes.</p>
-
-      <!-- Table: PEP 0005 §4b, raw data in reports/media/fast-sync-2026-10-26/{before-ab,after,idle-before,idle-after}.json
-           (measured 2026-10-27 05:34-05:36Z, i.e. 2026-10-26 evening PT). Means of 10; ratios from the raw milliseconds. -->
-      <table class="speed">
-        <thead><tr><th>Push vs polling (mean of 10)</th><th class="n">Polling</th><th class="n">Push</th><th class="n x">Faster</th></tr></thead>
-        <tbody>
-          <tr><td>Web page write → your laptop<div class="bar"><b style="width:27.6%"></b></div></td><td class="n">1.01 s</td><td class="n fast">0.28 s</td><td class="x">3.6×</td></tr>
-          <tr><td>Laptop → your other computer<div class="bar"><b style="width:22.3%"></b></div></td><td class="n">2.80 s</td><td class="n fast">0.63 s</td><td class="x">4.5×</td></tr>
-          <tr><td>Laptop → an open browser page<div class="bar"><b style="width:12.1%"></b></div></td><td class="n">6.20 s</td><td class="n fast">0.75 s</td><td class="x">8.2×</td></tr>
-          <tr><td>A new computer joins → laptop has its file<div class="bar"><b style="width:2%"></b></div></td><td class="n">144 s</td><td class="n fast">0.16 s</td><td class="x">880×</td></tr>
-          <tr><td>Idle machine, per minute</td><td class="n">3.3% CPU</td><td class="n fast">0.1% CPU</td><td class="x">33×</td></tr>
-        </tbody>
-      </table>
-      <p class="note">Measured 2026-10-26 on a local stack, 2 machines and a browser page, 10 trials each way at random phases; "polling" is the same build with push off (2 s rounds, the page re-reading every 10 s). That push code merged to main on 2026-10-28 (99560d9). Source: <a href="https://github.com/zacharyyamaoka/folder-sync/blob/main/docs/peps/0005-push-sync.md">PEP 0005 §4b</a>.</p>
-    </div>
-  </section>
-
   <section id="install">
     <div class="wrap">
-      <div class="label">Install</div>
-      <h2>Download one file, then point it at a folder.</h2>
+      <div class="label">Quick start</div>
+      <h2>Download one file, sign in, point it at a folder.</h2>
       <div class="install-grid">
         <div class="card">
           <h3>1 · Download the CLI</h3>
@@ -478,7 +557,7 @@
 <footer>
   <div class="wrap">
     <span>folder-sync · MIT licensed · <a href="https://github.com/zacharyyamaoka/folder-sync">source on GitHub</a></span>
-    <span><a href="#how">How it works</a> · <a href="#speed">Speed</a> · <a href="#install">Install</a> · <a href="https://folder-sync-accounts.zach-yamaoka.workers.dev/fs/signin?return=/fs/account">Sign in</a></span>
+    <span><a href="#objectives">Objectives</a> · <a href="#why">Philosophy</a> · <a href="#install">Quick start</a> · <a href="https://github.com/zacharyyamaoka/folder-sync#readme">README</a> · <a href="https://github.com/zacharyyamaoka/folder-sync/tree/main/docs">Docs</a> · <a href="https://folder-sync-accounts.zach-yamaoka.workers.dev/fs/signin?return=/fs/account">Sign in</a></span>
   </div>
 </footer>
 
@@ -504,7 +583,7 @@
   const hero = document.querySelector(".film video");
   const toGif = () => {
     const gif = document.createElement("img");
-    Object.assign(gif, { src: "media/hero.gif", alt: hero.getAttribute("aria-label"), width: 640, height: 360 });
+    Object.assign(gif, { src: "media/demo.gif", alt: hero.getAttribute("aria-label"), width: 640, height: 360 });
     hero.replaceWith(gif);
   };
   if (!hero.canPlayType("video/mp4")) toGif();

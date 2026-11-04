@@ -1,0 +1,9 @@
+#!/bin/sh
+# Rewrites the objectives and gates block of index.html (between the status:begin and status:end markers) from the hourly KPI
+# series and the last gate run, with scripts/readme-status from a checkout of folder-sync's main work (the code lives there, not here).
+#   tools/update-status                    uses $FOLDER_SYNC_REPO, default ~/folder-sync
+#   tools/update-status --check            exit 1 if the block is out of date, write nothing
+set -eu
+here="$(cd "$(dirname "$0")/.." && pwd)"
+repo="${FOLDER_SYNC_REPO:-$HOME/folder-sync}"
+exec "$repo/scripts/readme-status" --readme none --landing "$here/index.html" "$@"
