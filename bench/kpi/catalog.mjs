@@ -46,6 +46,23 @@ function objectives() {
 	];
 }
 
+// Health checks (docs/KPI.md "Is it syncing?"): not objectives, no target; the stall check runs every 5 minutes.
+function health() {
+	const base = { level: 1, parent: null, direction: "lower", facets: ["env"], computed_from: "runs", scale: "linear", cadence_s: 300, aggregate: null, lines_by: "env", line_values: ["test", "prod"] };
+	return [
+		{
+			id: "sync_canary_ms", title: "Sync canary", unit: "ms", ...base,
+			description: "Health check, not an objective. Every 5 minutes bench/kpi/canary.mjs saves a small file in a dedicated canary folder synced by this machine's installed engine and times it until the Worker serves its bytes. labels.result is ok, stalled (not online after 10 minutes, or a cause found sooner: held lock, quota, signed out) or offline (no route to the server: not measured, never red). A stalled or offline run is a `failed` point with the reason.",
+			formula: "first read of GET /fs/v1/folders/<canary>/files/<host>/canary.txt with the same bytes - the write",
+		},
+		{
+			id: "sync_stalled_folders", title: "Stalled folders", unit: "folders", ...base,
+			description: "Health check, not an objective. Of this machine's synced folders (folder-sync status --json), how many have not completed a round for more than 10 minutes while online (labels.stalled names each with its cause: held lock and holder, quota, signed out, failing rounds, no engine running). Offline: not measured.",
+			formula: "count of folders whose last clean round is older than max(10 minutes, 3 x the folder's interval)",
+		},
+	];
+}
+
 export function catalog(generatedAt) {
 	return {
 		schema: "vt-kpi-catalog/1",
@@ -54,6 +71,6 @@ export function catalog(generatedAt) {
 		title: "folder-sync: fast, storage efficient, cheap",
 		producer: { name: "folder-sync bench/kpi/run-all.mjs", bench_version: "folder-sync-kpi/1", repo: "/home/bam/folder-sync", doc: "docs/KPI.md" },
 		cadence_s: HOURLY,
-		kpis: [...legacy(), ...objectives()],
+		kpis: [...legacy(), ...objectives(), ...health()],
 	};
 }

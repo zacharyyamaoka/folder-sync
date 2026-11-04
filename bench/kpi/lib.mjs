@@ -22,6 +22,8 @@ export const KPI_NAMES = [
 	"cost_per_gb_month_usd", "cost_per_person_month_usd",
 	"idle_cpu_pct", "idle_ops_per_hour",
 ];
+/** Health checks, not objectives (docs/KPI.md "Is it syncing?"): the live stall check's two points. */
+export const HEALTH_KPI_NAMES = ["sync_canary_ms", "sync_stalled_folders"];
 export const LEGACY_KPI_NAMES = ["sync_up_ms", "sync_down_ms", "sync_up_ms_p95", "sync_down_ms_p95"];
 export const DIRECTIONS = ["machine->machine", "machine->web", "web->machine"];
 export const OPS = ["add", "edit", "delete", "rename"];
@@ -58,9 +60,9 @@ export function sourceOf(bench_version, runId, code = codeSha()) {
 
 /** One vt-kpi-point/1. No number means status "failed" and a reason, never a silent zero or a skipped line. */
 export function makePoint({ kpi, value, n, t, labels = {}, source, slice, reason }) {
-	if (!KPI_NAMES.includes(kpi) && !LEGACY_KPI_NAMES.includes(kpi)) throw new Error(`unknown kpi ${kpi}`);
+	if (!KPI_NAMES.includes(kpi) && !HEALTH_KPI_NAMES.includes(kpi) && !LEGACY_KPI_NAMES.includes(kpi)) throw new Error(`unknown kpi ${kpi}`);
 	if (!slice || !["test", "prod"].includes(slice.env)) {
-		if (KPI_NAMES.includes(kpi)) throw new Error(`${kpi} needs slice.env test|prod`);
+		if (KPI_NAMES.includes(kpi) || HEALTH_KPI_NAMES.includes(kpi)) throw new Error(`${kpi} needs slice.env test|prod`);
 	}
 	const measured = typeof value === "number" && Number.isFinite(value);
 	if (!measured && !reason) throw new Error(`${kpi}: a point with no value needs a reason`);
