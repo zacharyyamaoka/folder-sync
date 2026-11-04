@@ -66,6 +66,7 @@ public), each with what their role may see.
 | `POST …/restore` | `restore_request` → `restore_response` | owner | owner |
 | `POST …/history/purge` | `purge_request` → `purge_response` | owner | `501 online_only` |
 | `GET /fs/v1/usage` | `usage` (adds `live`, `history`) | session (exists, PEP 0003) | no |
+| `GET /fs/v1/usage/breakdown` | what is in the account (below; not a frozen schema) | session | no |
 | `GET /fs/v1/folders` | `folders` | session (exists, PEP 0003) | the folders this machine syncs, with `folder` |
 | `GET /fs/ui/v1/<file>` | the element's files | yes | yes (embedded in the binary) |
 | `GET /fs/` | a page with one `<folder-sync-status>` per folder | no | yes |
@@ -114,6 +115,17 @@ public), each with what their role may see.
   secret"), or everything older than `older_than_days` (0–30, optionally one `host` and `path`: "Free up space"). Up
   to 1,000 objects a call, the usage lowered by each; `more: true` means call again (as PEP 0003's `web-trash/purge`).
 
+- **`usage/breakdown`** (Storage tab) lists the signed-in person's own root with a read-only credential, at most
+  `BREAKDOWN_MAX_PAGES` (default 100) pages of 1,000 objects, and answers `partial: true` when it was cut. It never
+  takes an owner: a stranger's prefix is not a thing a caller can name. The body: `owner`, `measured_at`, `used` and
+  `quota` (`bytes`, `objects`; `used.objects` is what the quota counts, which is every object but `_changes/` records),
+  `over` (the quota's reason, or `null`), `kinds` (account-wide: `live`, `history`, `trash`, `changes`, `requests`,
+  `other`, each `bytes`, `objects`, `oldest`, `newest` and `clock`: `key` where the date is in the key, trash's stamp
+  and a version's `written_at`, else `modified`), `projects` (each with its `kinds`, each with its `hosts`, a device's
+  `host_name` being its manifest's, empty when it has none), `folders` and `files` (the 10 biggest, a folder at most
+  three levels deep, with `live_bytes` and `old_bytes`, which counts history and legacy trash) and `suggestions`
+  (`id`, `title`, `why`, `bytes`, `objects`: what a person could free, never done by this route; they overlap).
+
 ### Errors
 
 Every non-2xx JSON answer is `{ "error": "<code>", "why": "<sentence>" }` (PEP 0003 §3.3; `$defs/error`).
@@ -147,11 +159,13 @@ Every app embeds the same element with two lines, on its own origin:
 ```
 
 It is a pill showing the folder's state; clicking it opens a menu (native `popover`) with **Activity**, **Version
-history**, **Deleted files**, and online **Storage** and a link to `/fs/account` (devices, visibility); each opens a
+history**, **Deleted files**, **Storage** and a link to `/fs/account` (devices, visibility); each opens a
 panel in a native `<dialog>`. Activity shows each sync's time beside its line (`↑ 0.4 s`, `↓ 1.3 s`, from `up_ms` and
 `down_ms`). Version history shows a file's versions with **Show changes** (a line diff, jsdiff's
 `diffLines`, vendored at `/fs/ui/v1/vendor/diff.js`), **Download** and **Restore**; Deleted files restores one or
-many at once.
+many at once. Storage (online, the owner's) answers "what is in this account": used of quota and what most of it is,
+a bar by kind, suggestions for what to free (shown, not yet doable), then project, kind and device, and the biggest
+folders and files.
 
 - **URL:** `/fs/ui/v1/folder-sync.js`, an ES module with no dependency beyond its own `/fs/ui/v1/` files; served by
   the Worker from its assets and by `serve` from the binary, the same bytes. `/fs/ui/v1/` takes fixes; a breaking
@@ -162,7 +176,7 @@ many at once.
   - `folder` (optional): on a machine, the folder's path, for a project two folders on it sync (sent as `?folder=`,
     so the machine never answers `409 ambiguous_folder`; `serve`'s `/fs/` page sets it on each element).
   - `base` (optional, default `/fs`): where the app mounts folder-sync.
-  - `view` (optional): `activity`, `history` or `deleted` opens that panel at once and shows no pill (`serve`'s `/fs/`
+  - `view` (optional): `activity`, `history`, `deleted` or `storage` opens that panel at once and shows no pill (`serve`'s `/fs/`
     page and an app's "Sync details" window use it).
 - **Methods:** `open(view, {host, path}?)` opens a panel (`history` with a `host` and `path` opens that file's
   versions); `close()`; `refresh()` reads `status` now.
