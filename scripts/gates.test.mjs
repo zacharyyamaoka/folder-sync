@@ -27,6 +27,58 @@ test("go test -json: one entry per top-level test, subtests folded in, a skip an
 	assert.equal(packageFailed, true);
 });
 
+// A soak-shaped failure: the test logs, then t.Fatalf prints a headline, the sync's output and a long step log.
+function soakFailure({ marked = true, steps = 200 } = {}) {
+	const out = (Output, OutputType) => JSON.stringify({ Action: "output", Test: "TestSoakNothingLost", Output, ...(marked && OutputType ? { OutputType } : {}) });
+	return [
+		JSON.stringify({ Action: "run", Test: "TestSoakNothingLost" }),
+		out("=== RUN   TestSoakNothingLost\n", "frame"),
+		out("    e2e_test.go:151: stand-in: rclone serve s3 on 127.0.0.1:4801, pid 1\n"),
+		out("    soak_test.go:470: seed 1, profile ci: 90 s of editing, at most 700 steps\n"),
+		out("2026/11/04 15:50:21 httputil: ReverseProxy read error during body copy: unexpected EOF\n"),
+		out("    soak_test.go:422: seed 1: concurrent sync: C exited 1: folder-sync sync: pull: unexpected EOF; its output:\n", "error"),
+		out("        pull from e84765fc: unexpected EOF\n", "error-continue"),
+		out("        folder-sync sync: pull: unexpected EOF\n", "error-continue"),
+		out("        \n", "error-continue"),
+		out("        ops so far:\n", "error-continue"),
+		...Array.from({ length: steps }, (_, i) => out(`        A write notes/step-${i}.md (12 bytes)\n`, "error-continue")),
+		out("--- FAIL: TestSoakNothingLost (45.27s)\n", "frame"),
+		JSON.stringify({ Action: "fail", Test: "TestSoakNothingLost", Elapsed: 45.27 }),
+	].join("\n");
+}
+
+test("a failed Go test keeps the failure's first lines and its last: the headline names the cause (CI run 41926097553 lost it)", () => {
+	const [t] = lib.parseGoJson(soakFailure()).tests;
+	assert.equal(t.status, "fail");
+	assert.equal(t.errors.length, 205, "the failure's own lines, apart from the test's logging");
+	const detail = lib.failureDetail(t);
+	const lines = detail.split("\n");
+	assert.match(lines[0], /^soak_test\.go:422: seed 1: concurrent sync: C exited 1: folder-sync sync: pull: unexpected EOF/);
+	assert.ok(lines.includes("        folder-sync sync: pull: unexpected EOF"));
+	assert.equal(lines.length, lib.FAIL_HEAD + 1 + lib.FAIL_TAIL);
+	assert.equal(lines[lib.FAIL_HEAD], `… ${205 - lib.FAIL_HEAD - lib.FAIL_TAIL} lines left out …`);
+	assert.equal(lines.at(-1), "        A write notes/step-199.md (12 bytes)");
+	assert.doesNotMatch(detail, /stand-in: rclone serve s3|=== RUN|--- FAIL/);
+	// the tail alone, what gates.json kept before, is the step log and nothing that says what failed
+	assert.doesNotMatch(lib.tail(t.lines, 30), /exited 1|unexpected EOF/);
+	assert.equal(lib.headline(detail), "soak_test.go:422: seed 1: concurrent sync: C exited 1: folder-sync sync: pull: unexpected EOF; its output: | pull from e84765fc: unexpected EOF | folder-sync sync: pull: unexpected EOF");
+});
+
+test("a failure the toolchain does not mark (an older Go, a panic, a timeout) keeps the head and tail of everything; a short one is kept whole", () => {
+	const [t] = lib.parseGoJson(soakFailure({ marked: false })).tests;
+	assert.equal(t.errors.length, 0);
+	const lines = lib.failureDetail(t).split("\n");
+	assert.match(lines[0], /stand-in: rclone serve s3/);
+	assert.ok(lines.some((l) => /concurrent sync: C exited 1/.test(l)), "the headline is within the head");
+	assert.equal(lines.at(-1), "        A write notes/step-199.md (12 bytes)");
+	const [short] = lib.parseGoJson(soakFailure({ steps: 3 })).tests;
+	assert.doesNotMatch(lib.failureDetail(short), /left out/);
+	assert.equal(lib.failureDetail(short).split("\n").length, 8);
+	assert.equal(lib.headTail(["a", "b"], 1, 1), "a\nb");
+	assert.equal(lib.headTail(["a", "b", "c", "d"], 1, 1), "a\n… 2 lines left out …\nd");
+	assert.equal(lib.headline("x".repeat(400), 1, 10), `${"x".repeat(10)}…`);
+});
+
 test("a build failure leaves no test entries and keeps the compiler's words", () => {
 	const { tests, output, packageFailed } = lib.parseGoJson(['{"Action":"output","Package":"p","Output":"x.go:3: undefined: y\\n"}', '{"Action":"fail","Package":"p"}'].join("\n"));
 	assert.equal(tests.length, 0);

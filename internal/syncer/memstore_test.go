@@ -44,10 +44,18 @@ type memStore struct {
 	// is the short length) and carrying the full object's ETag: what a store that serves an object while it is being replaced does.
 	// A real S3 or R2 never does this; rclone serve s3 over a directory, the e2e stand-in, can.
 	short map[string]int
+	// cut makes the next N whole-object GETs of a key answer 200 with the whole object's Content-Length, send the first half of
+	// the body and drop the connection: the client reads io.ErrUnexpectedEOF. What the stand-in does when the file under a GET is
+	// truncated by a PUT, and what any network does when a connection breaks part way.
+	cut map[string]int
+	// busy makes the next N GETs of a key answer 500 InternalError, S3's "please try again" (the stand-in answers a GET that
+	// races a PUT this way; R2 and S3 document it as a transient answer to retry).
+	busy map[string]int
 }
 
 func newMemStore(t *testing.T, bucket string, now func() time.Time) (*memStore, *httptest.Server) {
-	m := &memStore{bucket: bucket, objects: map[string]*memObject{}, now: now, written: map[string]int64{}, short: map[string]int{}}
+	m := &memStore{bucket: bucket, objects: map[string]*memObject{}, now: now, written: map[string]int64{}, short: map[string]int{},
+		cut: map[string]int{}, busy: map[string]int{}}
 	server := httptest.NewServer(m)
 	t.Cleanup(server.Close)
 	return m, server
@@ -109,6 +117,13 @@ func (m *memStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		if m.busy[key] > 0 && r.Method == http.MethodGet {
+			m.busy[key]--
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><Error><Code>InternalError</Code><Message>We encountered an internal error. Please try again.</Message></Error>`)
+			return
+		}
 		if want := r.Header.Get("If-Match"); want != "" && want != obj.etag {
 			w.WriteHeader(http.StatusPreconditionFailed)
 			return
@@ -136,6 +151,14 @@ func (m *memStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if m.short[key] > 0 && r.Method == http.MethodGet && status == http.StatusOK {
 			m.short[key]--
 			data = data[:len(data)/2]
+		}
+		if m.cut[key] > 0 && r.Method == http.MethodGet && status == http.StatusOK {
+			m.cut[key]--
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+			w.WriteHeader(status)
+			w.Write(data[:len(data)/2])
+			w.(http.Flusher).Flush()
+			panic(http.ErrAbortHandler) // the server drops the connection without logging; m.mu is released by the defer
 		}
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		w.WriteHeader(status)

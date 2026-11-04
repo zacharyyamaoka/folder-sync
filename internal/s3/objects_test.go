@@ -176,6 +176,34 @@ func TestBusyAnswersAreSentAgain(t *testing.T) {
 	}
 }
 
+// TestAGetAnswersItsStatusTyped: a GET's unexpected status is a *StatusError with the same text as before, and TryAgain tells the
+// store's "send it again" (5xx but 501, 429: what do() sends again) from its answer. WHY: the manifest read (syncer's getManifest)
+// reads again on exactly those, never on a 403.
+func TestAGetAnswersItsStatusTyped(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var code int
+		fmt.Sscanf(strings.TrimPrefix(r.URL.Path, "/bkt/"), "%d", &code)
+		w.WriteHeader(code)
+		io.WriteString(w, "<Error><Code>X</Code></Error>")
+	}))
+	defer server.Close()
+	client := &Client{Endpoint: server.URL, Region: "auto", AccessKeyID: "key", SecretAccessKey: "secret"}
+	for code, again := range map[int]bool{500: true, 503: true, 429: true, 501: false, 403: false, 400: false} {
+		_, err := client.GetIfNoneMatch("bkt", fmt.Sprint(code), "")
+		var status *StatusError
+		if !errors.As(err, &status) || status.Code != code || status.TryAgain() != again {
+			t.Errorf("%d: %#v (%v), want TryAgain %v", code, status, err, again)
+			continue
+		}
+		if want := fmt.Sprintf("GET %d returned %d %s: <Error><Code>X</Code></Error>", code, code, http.StatusText(code)); err.Error() != want {
+			t.Errorf("%d: the text is %q, want %q", code, err.Error(), want)
+		}
+		if again != tryAgain(code) {
+			t.Errorf("%d: do() and TryAgain disagree", code)
+		}
+	}
+}
+
 // TestPutFileCarriesRcloneMTime (PEP 0009 §4.1): an append the engine uploads itself is stored as rclone would store it,
 // with the file's modification time in x-amz-meta-mtime (seconds, then nine digits), so R2-Explorer, `rclone copy` as
 // the way out, and a peer's rclone all read the same object.

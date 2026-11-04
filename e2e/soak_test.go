@@ -272,10 +272,17 @@ func (r *soakRun) round(m *machine, discover bool) {
 	out, code := r.run(m, 0, false, args...)
 	r.rounds++
 	if code != 0 {
-		r.t.Fatalf("seed %s: %s's sync --once exited %d (it must succeed, even right after a kill or an offline round):\n%s\n\nops so far:\n%s",
-			os.Getenv("FOLDER_SYNC_SOAK_SEED"), m.name, code, out, strings.Join(r.log, "\n"))
+		r.t.Fatalf("seed %s: %s's sync --once exited %d: %s (it must succeed, even right after a kill or an offline round); its output:\n%s\n\nops so far:\n%s",
+			os.Getenv("FOLDER_SYNC_SOAK_SEED"), m.name, code, lastLine(out), out, strings.Join(r.log, "\n"))
 	}
 	delete(r.pending, m)
+}
+
+// lastLine is the last line a command printed: folder-sync ends a failed command with "folder-sync <command>: <why>". WHY in a
+// failure's first line: scripts/gates keeps a failure's first and last lines, and the step log after it is long.
+func lastLine(out string) string {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
 }
 
 func (r *soakRun) isOffline(m *machine) bool { return r.offline[m] > r.stepNo }
@@ -412,7 +419,7 @@ func (r *soakRun) step(machines []*machine) {
 			go func(mm *machine) {
 				defer wg.Done()
 				if out, code := r.run(mm, 0, false, "sync", "--once", "--discover"); code != 0 {
-					failed <- fmt.Sprintf("%s exited %d:\n%s", mm.name, code, out)
+					failed <- fmt.Sprintf("%s exited %d: %s; its output:\n%s", mm.name, code, lastLine(out), out)
 				}
 			}(machines[i])
 		}
