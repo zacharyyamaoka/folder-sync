@@ -90,8 +90,14 @@ QUOTA_BY_OWNER = '{"ysoJLOgtD3znbT8X0noLOHEZIyfiyeOG": {"bytes": 12884901888}}'
 # Who sign-in codes come from (an address on a domain verified in Resend); empty: no email codes in production.
 # Codes go out once this and the secret RESEND_API_KEY are both set (src/email.ts, PEP 0003 §3.3).
 EMAIL_FROM = "Robot Parts <signin@robotparts.dev>"
+# The four switches of a deployment (src/features.ts, docs/NEW-APP.md), each "on" or "off". Unset keeps the default shown, so
+# this top-level block (vibetracks.dev's) needs none: FEATURE_STORAGE (online file storage: the web host and the Files page,
+# on), FEATURE_SYNC (local file sync: the device flow and scoped keys, on), FEATURE_PAYMENTS (plans set the storage quota, bought
+# through Stripe in TEST mode: docs/PAYMENTS.md, off), FEATURE_BYO (a person's own S3-compatible bucket, off). Off hides the UI
+# and refuses the routes. PLANS (JSON, payments only) names the plans and their quotas; QUOTA_BY_OWNER stays the operator's override.
 # Secrets, set once by the operator (never in this file): BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
-# RESEND_API_KEY, R2_PARENT_ACCESS_KEY_ID, R2_PARENT_SECRET_ACCESS_KEY, and SIGN_UP_EMAILS (who may create an account, comma-separated;
+# RESEND_API_KEY, R2_PARENT_ACCESS_KEY_ID, R2_PARENT_SECRET_ACCESS_KEY, and (payments on) STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET,
+# and (bring-your-own on) BYO_ENCRYPTION_KEY (accounts/scripts/set-secrets.py makes it), and SIGN_UP_EMAILS (who may create an account, comma-separated;
 # unset means nobody new, "*" anyone; it holds real emails, so it is a secret). Until they are set, sign-in answers 503
 # and nothing is served.
 
@@ -106,7 +112,7 @@ EMAIL_FROM = "Robot Parts <signin@robotparts.dev>"
 [env.robotparts]
 name = "folder-sync-accounts-robotparts"
 # the Worker's own host (the CLI's default server and the account pages); robotparts.dev/fs reaches it through the service binding
-vars = { ENVIRONMENT = "production", PUBLIC_URL = "https://folder-sync-accounts-robotparts.zach-yamaoka.workers.dev", R2_ACCOUNT_ID = "c2747ee6a8842e150e38acc3d044adde", SYNC_BUCKET = "folder-sync", R2_ENDPOINT = "", SYNC_CREDENTIAL_TTL_S = "300", QUOTA_BYTES = "1073741824", QUOTA_OBJECTS = "100000", QUOTA_RECHECK_S = "300", QUOTA_MAX_AGE_S = "3600", QUOTA_BY_OWNER = "", EMAIL_FROM = "Robot Parts <signin@robotparts.dev>", ROOT_PREFIX = "apps/robotparts/" }
+vars = { ENVIRONMENT = "production", PUBLIC_URL = "https://folder-sync-accounts-robotparts.zach-yamaoka.workers.dev", R2_ACCOUNT_ID = "c2747ee6a8842e150e38acc3d044adde", SYNC_BUCKET = "folder-sync", R2_ENDPOINT = "", SYNC_CREDENTIAL_TTL_S = "300", QUOTA_BYTES = "1073741824", QUOTA_OBJECTS = "100000", QUOTA_RECHECK_S = "300", QUOTA_MAX_AGE_S = "3600", QUOTA_BY_OWNER = "", EMAIL_FROM = "Robot Parts <signin@robotparts.dev>", ROOT_PREFIX = "apps/robotparts/", FEATURE_STORAGE = "on", FEATURE_SYNC = "on", FEATURE_PAYMENTS = "off", FEATURE_BYO = "off" }
 
 [env.robotparts.assets]
 directory = "./site"

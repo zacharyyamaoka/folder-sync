@@ -34,7 +34,8 @@
       await import('/fs/ui/v1/folder-sync.js');
       root.textContent = '';
       const view = document.createElement('folder-sync-status');
-      view.setAttribute('view', 'files');
+      // ?view=storage opens the Storage tab (the account page's "See what uses your storage"); anything else is Files
+      view.setAttribute('view', new URLSearchParams(location.search).get('view') === 'storage' ? 'storage' : 'files');
       view.setAttribute('project', project);
       view.addEventListener('folder-sync:project', (e) => {
         const next = new URL(location.href);

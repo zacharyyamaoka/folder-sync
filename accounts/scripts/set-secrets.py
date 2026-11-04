@@ -6,6 +6,8 @@
 It serves http://127.0.0.1:<port>/ (and opens it): one section per website, each with an annotated screenshot,
 numbered steps, a copy button for every value to type there, and the paste boxes for what that site gives back.
 Values are piped into `wrangler secret put <NAME> --env <env>`; the page exits once every secret is set.
+A Stripe section (test mode) appears only when the app's wrangler env sets FEATURE_PAYMENTS = "on"; with FEATURE_BYO = "on"
+the encryption key for people's own buckets is generated and set for you (never asked for, never printed).
 WHY (Zach, 2026-11-04, /rate): "I don't want to have to think about this at all" and "include annotated screen shots
 with step by step instructions of what I need to do on each website". Values go from the form to wrangler's stdin
 only; they are never printed, logged or written to disk.
@@ -15,8 +17,10 @@ import base64
 import html
 import json
 import os
+import secrets as randomness
 import subprocess
 import sys
+import tomllib
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -30,12 +34,38 @@ def worker_host(env):
     return f"folder-sync-accounts-{env}.zach-yamaoka.workers.dev"
 
 
-def sites(env):
+def features_of(env):
+    """The app's switches, read from its own [env.<app>] block of wrangler.toml (docs/NEW-APP.md; src/features.ts is the same
+    rule): storage and sync default on, payments and bring-your-own default off, an unrecognised value is off."""
+    out = {"storage": True, "sync": True, "payments": False, "byo": False}
+    try:
+        with open(os.path.join(HERE, "wrangler.toml"), "rb") as f:
+            block = tomllib.load(f).get("env", {}).get(env, {}).get("vars", {})
+    except (OSError, ValueError):
+        block = {}
+    for name in out:
+        raw = str(block.get("FEATURE_" + name.upper(), "")).strip().lower()
+        if raw:
+            out[name] = raw in ("on", "true", "1")
+    return out
+
+
+def make_key():
+    """32 random bytes, base64: what BYO_ENCRYPTION_KEY is (src/byo.ts derives its AES key from it)."""
+    return base64.b64encode(randomness.token_bytes(32)).decode()
+
+
+def generated(features):
+    """Secrets this script makes itself instead of asking for, by name: only what the app's switches need."""
+    return {"BYO_ENCRYPTION_KEY": make_key()} if (features or {}).get("byo") else {}
+
+
+def sites(env, features=None):
     """Each website: where to go, what to do there (with values to copy), and which secrets it gives back.
     WHY its own Google client per app: a Google OAuth client holds at most two secrets, and the shared one is full;
     one client per app also matches "one account per app" (PEP 0003 §3.7)."""
     domain = f"{env}.dev"
-    return [
+    found = [
         {
             "title": "Google: create the sign-in client",
             "url": f"https://console.cloud.google.com/auth/clients/create?project={GOOGLE_PROJECT}",
@@ -67,6 +97,27 @@ def sites(env):
                         ("R2_PARENT_SECRET_ACCESS_KEY", "Secret Access Key")],
         },
     ]
+    if (features or {}).get("payments"):
+        found.append({
+            "title": "Stripe: test-mode keys, products and webhook",
+            "url": "https://dashboard.stripe.com/test/apikeys",
+            "picture": None,
+            "steps": [
+                ("Stay in <b>test mode</b> for every step (the Test mode / Sandbox switch at the top of the dashboard). "
+                 "Real keys are refused by the Worker; payments here are rehearsal only.", []),
+                ("<b>1</b> On this page (Developers, API keys), copy the <b>Secret key</b> (starts with sk_test_) into the first box below.", []),
+                ("<b>2</b> Product catalog, Add product: one product per plan, a monthly recurring price, and under "
+                 "Additional options set the <b>Lookup key</b>. Plus (10 GiB):", ["folder-sync-plus"]),
+                ("<b>3</b> A second product, Pro (100 GiB), lookup key:", ["folder-sync-pro"]),
+                ("<b>4</b> Developers, Webhooks, Add endpoint. Endpoint URL:", [f"https://{worker_host(env)}/fs/api/auth/stripe/webhook"]),
+                ("<b>5</b> Select these four events (search each, tick it):",
+                 ["checkout.session.completed", "customer.subscription.created",
+                  "customer.subscription.updated", "customer.subscription.deleted"]),
+                ("<b>6</b> Press <b>Add endpoint</b>, then reveal the <b>Signing secret</b> (starts with whsec_) and paste it into the second box below.", []),
+            ],
+            "secrets": [("STRIPE_SECRET_KEY", "Secret key (sk_test_…)"), ("STRIPE_WEBHOOK_SECRET", "Signing secret (whsec_…)")],
+        })
+    return found
 
 
 def wrangler(args, value=None):
@@ -111,7 +162,7 @@ input{{width:100%;box-sizing:border-box;font:14px ui-monospace,monospace;padding
 button.save{{font:inherit;padding:10px 22px;border:0;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer}}
 .done{{color:var(--ok);font-weight:600}} .err{{color:#c0392b}} .set{{color:var(--ok);font-size:13px}}
 </style>
-<main><h1>Two websites, four values, one Save</h1>
+<main><h1>{headline}</h1>
 <p class=sub>For the <b>{env}</b> accounts Worker. Open each site, do the numbered steps (copy buttons hold every value to type),
 paste what it gives back into the boxes, then press Save once at the bottom.</p>
 {body}</main>
@@ -120,9 +171,10 @@ document.querySelectorAll('button.c').forEach(b=>b.onclick=()=>{{navigator.clipb
 </script>"""
 
 
-def form(env, todo, message=""):
+def form(env, todo, message="", features=None):
     parts = [message, "<form method=post>"]
-    for site in sites(env):
+    shown = [s for s in sites(env, features) if any(n in todo for n, _ in s["secrets"])]
+    for site in sites(env, features):
         wanted = [(n, l) for n, l in site["secrets"] if n in todo]
         if not wanted:
             continue
@@ -136,7 +188,8 @@ def form(env, todo, message=""):
         parts.append(f'<section><h2>{html.escape(site["title"])}<a class=open href="{site["url"]}" target=_blank '
                      f'rel=noopener>Open page ↗</a></h2>{picture(site["picture"])}<ol>{"".join(steps)}</ol>{boxes}</section>')
     parts.append("<button class=save>Save</button></form>")
-    return PAGE.format(env=html.escape(env), body="".join(parts))
+    words = {1: "One website", 2: "Two websites", 3: "Three websites"}.get(len(shown), f"{len(shown)} websites")
+    return PAGE.format(env=html.escape(env), headline=f"{words}, {len(todo)} value{'' if len(todo) == 1 else 's'}, one Save", body="".join(parts))
 
 
 def main():
@@ -147,8 +200,17 @@ def main():
     parser.add_argument("--port", type=int, default=0)
     opts = parser.parse_args()
 
-    names = [n for site in sites(opts.env) for n, _ in site["secrets"]]
-    state = {"todo": [n for n in names if n not in have(opts.env) or n in opts.replace]}
+    features = features_of(opts.env)
+    already = have(opts.env)
+    # WHY made here and not asked for: a random key is nothing a person should type or see (Zach: "I don't want to have to
+    # think about this at all"); it is piped to wrangler and never printed. An existing one stays: changing it would make
+    # every attached bucket's keys unreadable.
+    for name, value in generated(features).items():
+        if name not in already:
+            made = wrangler(["secret", "put", name, "--env", opts.env], value)
+            print(f"{name}: {'set' if made.returncode == 0 else 'could not be set'}")
+    names = [n for site in sites(opts.env, features) for n, _ in site["secrets"]]
+    state = {"todo": [n for n in names if n not in already or n in opts.replace]}
     if not state["todo"]:
         print(f"every secret for --env {opts.env} is already set")
         return
@@ -166,7 +228,7 @@ def main():
             self.wfile.write(data)
 
         def do_GET(self):
-            self.send(form(opts.env, state["todo"]))
+            self.send(form(opts.env, state["todo"], features=features))
 
         def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
@@ -181,12 +243,12 @@ def main():
                 else:
                     failed.append(name)
             if not state["todo"]:
-                self.send(PAGE.format(env=html.escape(opts.env), body="<p class=done>All set. You can close this tab.</p>"))
+                self.send(PAGE.format(env=html.escape(opts.env), headline="Done", body="<p class=done>All set. You can close this tab.</p>"))
                 print(f"all secrets for --env {opts.env} are set")
                 self.server.done = True
                 return
             note = f'<p class=err>Could not save: {", ".join(failed)}.</p>' if failed else ""
-            self.send(form(opts.env, state["todo"], note))
+            self.send(form(opts.env, state["todo"], note, features))
 
     server = HTTPServer(("127.0.0.1", opts.port), Handler)
     server.done = False

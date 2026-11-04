@@ -17,9 +17,14 @@
 import { betterAuth } from "better-auth";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { bearer, deviceAuthorization, emailOTP, oneTimeToken } from "better-auth/plugins";
+import { stripe as stripePlugin } from "@better-auth/stripe";
+import Stripe from "stripe";
 import type { App } from "./apps.ts";
 import type { Deps, Env, Person, Via } from "./app.ts";
+import { stripeReady, type BillingPort } from "./billing.ts";
 import { emailSender } from "./email.ts";
+import { featuresOf } from "./features.ts";
+import { plansOf, type Plan } from "./plans.ts";
 import { signUpAllowed } from "./signup.ts";
 import { d1Store, type D1Like } from "./store.ts";
 import { pagedSessions, SIGN_IN_AGAIN, type GrantRow } from "./devices.ts";
@@ -35,6 +40,27 @@ const approvers = new Map<string, string>();
 
 /** Dev only: the last code sent to each email, read by the local proof at /fs/dev/mailbox. */
 const mailbox = new Map<string, string>();
+
+/** Payments are on and Stripe is set up with a test-mode key: the one condition for loading the plugin and the billing port. */
+function payments(env: Env): boolean {
+	return featuresOf(env).payments && stripeReady(env);
+}
+
+/** The Stripe client: api.stripe.com, or STRIPE_API_URL (stripe-mock, the tests' fixture). WHY the fetch client: Workers
+ *  have no Node http. */
+function stripeClient(env: Env): Stripe {
+	const other = env.STRIPE_API_URL ? new URL(env.STRIPE_API_URL) : null;
+	return new Stripe(env.STRIPE_SECRET_KEY!, {
+		httpClient: Stripe.createFetchHttpClient(),
+		...(other ? { host: other.hostname, port: other.port, protocol: other.protocol.replace(":", "") as "http" | "https" } : {}),
+	});
+}
+
+/** The plans PLANS lists, as the plugin wants them. WHY `limits`: the plugin's own place for what a plan allows; the quota
+ *  itself is read from the subscription row by plan name (quota.ts), so a plan renamed in PLANS is the one place to change. */
+function stripePlans(env: Env) {
+	return plansOf(env).map((plan: Plan) => ({ name: plan.id, ...(plan.lookupKey ? { lookupKey: plan.lookupKey } : {}), ...(plan.priceId ? { priceId: plan.priceId } : {}), limits: { bytes: plan.bytes, objects: plan.objects } }));
+}
 
 export function createAuth(env: Env, origin: string) {
 	const dev = env.ENVIRONMENT === "dev";
@@ -66,7 +92,8 @@ export function createAuth(env: Env, origin: string) {
 		//   minutes into waiting for an approval, was a 429 that ended the sign-in. Any finite count trips a patient poller,
 		//   and the grant already guards itself: a 40-character secret code and Better Auth's slow_down for polls
 		//   under the interval, so the limiter would only add a D1 write per poll.
-		rateLimit: { enabled: !dev, storage: "database", customRules: { "/device": { window: 600, max: 30 }, "/device/token": false } },
+		// - /stripe/webhook: Stripe's own calls, signed and checked by the plugin; a burst of events must never be a 429
+		rateLimit: { enabled: !dev, storage: "database", customRules: { "/device": { window: 600, max: 30 }, "/device/token": false, "/stripe/webhook": false } },
 		advanced: {
 			// WHY a prefix of our own: an app on the same domain may run Better Auth too (Vibe Tracks does), and its
 			// better-auth.session_token must never be mistaken for ours or overwritten by ours
@@ -163,6 +190,15 @@ export function createAuth(env: Env, origin: string) {
 			bearer(),
 			// A loopback channel's sign-in (PEP 0003 §3.10). WHY disableClientRequest: only the /fs/handoff route mints one
 			oneTimeToken({ expiresIn: 1, storeToken: "hashed", disableClientRequest: true }),
+			// WHY loaded only when ready: no Stripe client, no routes, no tables read when payments are off or unset (billing.ts)
+			...(payments(env)
+				? [stripePlugin({
+					stripeClient: stripeClient(env),
+					stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET!,
+					createCustomerOnSignUp: false,
+					subscription: { enabled: true, plans: () => stripePlans(env) },
+				})]
+				: []),
 			...(dev || mail
 				? [emailOTP({
 					otpLength: 6,
@@ -219,7 +255,32 @@ export function liveDeps(env: Env): Deps | null {
 		if (ua) out.set("User-Agent", ua);
 		return out;
 	};
+	// Stripe, through the plugin's own endpoints on this person's cookie session (billing.ts)
+	const billing: BillingPort = {
+		async checkout(request, app, _person, plan, urls) {
+			const headers = sent(request, "cookie");
+			if (!headers) throw new Error("no browser session");
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			const made = await (instance(request, app).api as any).upgradeSubscription({ headers, body: { plan: plan.id, successUrl: urls.success, cancelUrl: urls.cancel, disableRedirect: true } });
+			if (!made?.url) throw new Error("Stripe sent no checkout address");
+			return made.url as string;
+		},
+		async portal(request, app, _person, returnUrl) {
+			const headers = sent(request, "cookie");
+			if (!headers) throw new Error("no browser session");
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			const made = await (instance(request, app).api as any).createBillingPortal({ headers, body: { returnUrl, disableRedirect: true } });
+			if (!made?.url) throw new Error("Stripe sent no billing address");
+			return made.url as string;
+		},
+	};
 	return {
+		...(payments(env) ? { billing } : {}),
+		// the sign-in providers a person linked ("google"): provider names only, never a token (account.ts)
+		async signInMethods(userId) {
+			const rows = (await (env.DB as D1Like).prepare('SELECT DISTINCT "providerId" FROM "account" WHERE "userId" = ?').bind(userId).all<{ providerId: string }>()).results;
+			return rows.map((row) => row.providerId);
+		},
 		// the router only calls this for a registered origin, so the request's own origin is an app's
 		auth: async (request) => {
 			const auth = authFor(env, new URL(request.url).origin);

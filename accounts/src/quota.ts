@@ -8,6 +8,8 @@
 // expire (SYNC_CREDENTIAL_TTL_S, 300 s by default), and the
 // measurement can be QUOTA_RECHECK_S old, so one person can go over by what they upload in about ten minutes.
 
+import { featuresOf, type FeatureEnv } from "./features.ts";
+import { plansOf, type PlanEnv } from "./plans.ts";
 import type { Store } from "./store.ts";
 
 export interface QuotaEnv {
@@ -91,25 +93,50 @@ function positive(value: string | undefined, fallback: number): number {
 	return value && Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
 }
 
+/** The operator's entry for `owner` in QUOTA_BY_OWNER, or null (also when the JSON is malformed). */
+export function ownerOverride(env: QuotaEnv, owner?: string): { bytes?: unknown; objects?: unknown } | null {
+	if (!owner || !env.QUOTA_BY_OWNER) return null;
+	try {
+		const entry = JSON.parse(env.QUOTA_BY_OWNER)?.[owner];
+		return entry && typeof entry === "object" ? entry : null;
+	} catch {
+		return null;
+	}
+}
+
 /** The quota for `owner`: QUOTA_BYTES / QUOTA_OBJECTS, or that person's entry in QUOTA_BY_OWNER.
+ *  `plan` is what their subscription gives (quotaFor): it stands where QUOTA_BYTES / QUOTA_OBJECTS would, so the operator's
+ *  QUOTA_BY_OWNER entry still wins over it, field by field (payments are only the default source of a quota, PEP 0003 §3.11).
  *  WHY per person, not a bigger global figure (Zach, 2026-10-29: "please increase my limit"): anyone may sign up, so
  *  raising QUOTA_BYTES raises everyone's share of the operator's bucket; the operator grants more one person at a time.
  *  A malformed QUOTA_BY_OWNER is ignored rather than failing every request. */
-export function quotaOf(env: QuotaEnv, owner?: string): Quota {
-	let own: { bytes?: unknown; objects?: unknown } = {};
-	if (owner && env.QUOTA_BY_OWNER) {
-		try {
-			own = JSON.parse(env.QUOTA_BY_OWNER)?.[owner] ?? {};
-		} catch {
-			own = {};
-		}
-	}
+export function quotaOf(env: QuotaEnv, owner?: string, plan?: { bytes: number; objects: number }): Quota {
+	const own = ownerOverride(env, owner) ?? {};
+	const defaultBytes = plan ? plan.bytes : positive(env.QUOTA_BYTES, 1024 ** 3);
+	const defaultObjects = plan ? plan.objects : positive(env.QUOTA_OBJECTS, 100_000);
 	return {
-		bytes: positive(own.bytes === undefined ? env.QUOTA_BYTES : String(own.bytes), positive(env.QUOTA_BYTES, 1024 ** 3)),
-		objects: positive(own.objects === undefined ? env.QUOTA_OBJECTS : String(own.objects), positive(env.QUOTA_OBJECTS, 100_000)),
+		bytes: own.bytes === undefined ? defaultBytes : positive(String(own.bytes), defaultBytes),
+		objects: own.objects === undefined ? defaultObjects : positive(String(own.objects), defaultObjects),
 		recheckS: positive(env.QUOTA_RECHECK_S, 300),
 		maxAgeS: positive(env.QUOTA_MAX_AGE_S, 3600),
 	};
+}
+
+/** The quota for `owner` as this deployment sets it: with payments on, the plan their active (or trialing) subscription
+ *  names is the source of the ceiling, the best one when they hold several; with payments off, or with no subscription,
+ *  QUOTA_BYTES / QUOTA_OBJECTS; either way QUOTA_BY_OWNER is the operator's override (quotaOf).
+ *  WHY a read that fails is the free quota and not an error: the quota is read on nearly every request, and a D1 hiccup
+ *  must not take the whole service down; the lower ceiling is the safe side (read-only keys for a few minutes at worst). */
+export async function quotaFor(env: QuotaEnv & PlanEnv & FeatureEnv, store: Pick<Store, "activePlans">, owner: string): Promise<Quota> {
+	if (!featuresOf(env).payments || !store.activePlans) return quotaOf(env, owner);
+	let held: string[];
+	try {
+		held = await store.activePlans(owner);
+	} catch {
+		return quotaOf(env, owner);
+	}
+	const best = plansOf(env).filter((plan) => held.includes(plan.id)).sort((a, b) => b.bytes - a.bytes)[0];
+	return quotaOf(env, owner, best ? { bytes: best.bytes, objects: best.objects } : undefined);
 }
 
 /** No measurement can be had yet: another is under way, or the last one failed less than a minute ago (503). */

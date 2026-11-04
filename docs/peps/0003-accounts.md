@@ -277,6 +277,55 @@ domain, and `sign-in/social` refuses a `callbackURL` on the channel (403 `INVALI
   origin, and here the proxy deliberately hides that origin from this Worker. WHY not email codes (§3.8) alone: they
   would work through the proxy, but they need Resend set up, and the Google button would still fail on a channel.
 
+### 3.11 The drop-in account product: switches, plans as quotas, your own bucket (2026-11-04)
+
+Zach's sketch for the Accounts part: *"Accounts (BetterAuth): bring your own tokens, stock account page, easily toggle on,
+online file storage, local file sync, payments, storage quotas."* One deployment per app (§3.7, `docs/NEW-APP.md`) stays;
+this adds what an app turns on inside its own deployment. The data contracts and the other parts do not change.
+
+- **The stock account page** is `GET /fs/account`, which §3.3 already had, composed of: profile and the ways in (linked
+  Google, email codes), storage against the quota as a bar and in words with a way to the Storage view
+  (`/fs/files?view=storage`), the plan (payments on), your own bucket (BYO on), devices (the existing device grants and
+  sessions) and Sign out. Still one server-rendered page with no script, calm, light and dark, usable at phone width.
+  **Better Auth's own UI kit was looked for and not used:** the maintained kit, `@daveyplate/better-auth-ui`, is React with
+  shadcn/Radix components, and Better Auth ships no plain-HTML account page; the page must work on a Worker with
+  JavaScript off (§3.3), so it stays ours and takes its data from Better Auth (sessions, device grants, linked accounts, the
+  Stripe plugin's `subscription` rows).
+- **Four switches,** wrangler vars per app (`src/features.ts`): `FEATURE_STORAGE` (the web host's writes and the Files
+  page; default on), `FEATURE_SYNC` (the device flow, `/device`, a machine's keys and its deletes; default on),
+  `FEATURE_PAYMENTS` (default off), `FEATURE_BYO` (default off). Off hides the UI and refuses the routes with
+  `404 feature_off`, Better Auth's own `device/*`, `stripe/*` and `subscription/*` paths included. Unset keeps the default
+  (existing deployments change nothing); an unrecognised value is off.
+- **Payments, Stripe TEST mode only,** through Better Auth's `@better-auth/stripe` plugin (loaded in `auth.ts` only when
+  payments are on and Stripe is set up; behind the `billing` port of `Deps`, so the identity seam of `PARTS.md` holds and a
+  test now fails if any other file imports `@better-auth/*` or `stripe`). A plan is a storage ceiling and a Stripe price
+  (`PLANS`, with defaults: Plus 10 GiB, Pro 100 GiB, by lookup keys `folder-sync-plus` / `folder-sync-pro`).
+  **The plan is the quota's source in place of `QUOTA_BYTES` / `QUOTA_OBJECTS`** (`quotaFor`, from the plugin's
+  `subscription` row, active or trialing only), and a signed Stripe webhook is the only thing that sets it;
+  **`QUOTA_BY_OWNER` stays the operator's override over the plan,** field by field. A live key is refused outright. Customers
+  are made at checkout, not at sign-up. The secrets Zach pastes are in `docs/PAYMENTS.md`.
+- **Bring your own tokens.** A person attaches an S3-compatible bucket (endpoint, bucket, prefix, access key, secret) on the
+  account page; the Worker tries it (one listing), keeps the secret sealed with Web Crypto AES-GCM under a key derived from
+  the Worker secret `BYO_ENCRYPTION_KEY` and bound to the owner, and `POST /fs/v1/credentials` then hands that person's
+  machines the keys for their bucket, with the store as `Store: "s3://bucket/prefix"` beside the usual `Endpoint`, `Bucket`,
+  `Prefix`, `Region`, `Provider` (the string form `lane/storage-backends` names; the one function `storeUrl` in `src/byo.ts`
+  makes it). Only a signed-in browser may attach or remove (a stolen laptop must not be able to redirect the other
+  machines); a row that will not open fails closed (503), never to the service's storage unasked; the hosted quota does not
+  apply to a person's own bucket.
+- **Disclosed limits.** (1) The keys are long-lived and handed as they are: removing a bucket or rotating a key reaches a
+  machine within `SYNC_CREDENTIAL_TTL_S`, but signing a device out cannot take back a key it holds (the page says so).
+  (2) The web host, the Files page and the usage figures read the service's own storage; a person who attached a bucket
+  syncs machine to machine and sees nothing of it online. (3) Changing `BYO_ENCRYPTION_KEY` makes every attached bucket's
+  keys unreadable until they are attached again. (4) The 303 from a no-script form to Stripe is blocked by the page's
+  `form-action 'self'` in Chrome, so the form answers a page with a meta refresh and a link (`goTo`).
+- **Routes added** (JSON, errors as §3.3; a browser's write carries the CSRF header and the user it shows):
+  `GET /fs/v1/billing` (plan, plans, subscription); `POST /fs/v1/billing/checkout {plan}` and `POST /fs/v1/billing/portal` ->
+  `{url}`; `GET | PUT | DELETE /fs/v1/byo` (a browser only; never the secret); the page's forms `POST /fs/account/plan |
+  billing | byo | byo/remove`; and Stripe's call to `POST /fs/api/auth/stripe/webhook`. Migrations `0011` (the plugin's
+  `subscription` table, `user.stripeCustomerId`) and `0012` (`byo_store`), both additive.
+- **Not an architecture fork:** every choice above is the stock part (Better Auth's Stripe plugin, Web Crypto, Stripe's
+  hosted checkout and portal) with the smallest piece around it; no decision record is warranted.
+
 ## 4. Vibe Tracks, to switch (not done here)
 
 - Replace `worker/src/auth.ts` and `creds.ts` with the `/fs/*` forwarder; register `vibetracks` in `apps.json`.

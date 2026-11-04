@@ -4,14 +4,20 @@
   "type": "module",
   "description": "Part server-cloudflare (PARTS.md): folder-sync's accounts Worker (PEP 0003): Better Auth + D1, the device grant for `folder-sync login`, short-lived R2 keys per person, each person's folders online, a web host per folder.",
   "scripts": {
-    "test": "node --test test/worker.test.ts test/devices.test.ts test/handoff.test.ts test/real-auth.test.ts test/history.test.ts test/history-forms.test.ts test/prune.test.ts test/view-api.test.ts test/download.test.ts test/identity-seam.test.ts test/storage.test.ts test/files-page.test.ts test/app-root.test.ts",
+    "test": "node --test test/worker.test.ts test/devices.test.ts test/handoff.test.ts test/real-auth.test.ts test/history.test.ts test/history-forms.test.ts test/prune.test.ts test/view-api.test.ts test/download.test.ts test/identity-seam.test.ts test/storage.test.ts test/files-page.test.ts test/app-root.test.ts test/features.test.ts test/billing.test.ts test/byo.test.ts test/account.test.ts test/set-secrets.test.ts",
     "proof": "node test/proof.mjs",
+    "journey": "node test/account-journey.mjs",
     "dev": "node scripts/dev.mjs up"
   },
   "dependencies": {
-    "better-auth": "1.7.11"
+    "@better-auth/core": "1.7.11",
+    "@better-auth/stripe": "1.7.11",
+    "better-auth": "1.7.11",
+    "better-call": "1.4.2",
+    "stripe": "22.6.2"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "wrangler": "4.151.2"
   },
   "engines": {
