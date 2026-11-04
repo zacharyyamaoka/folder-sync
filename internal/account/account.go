@@ -562,3 +562,51 @@ func (c *Client) SetVisibility(ctx context.Context, token, project, visibility s
 	}
 	return row, nil
 }
+
+// SharedTree is a folder's shared tree as the accounts server answers `share` (docs/API.md "The shared tree").
+type SharedTree struct {
+	Host    string   `json:"host"`
+	Name    string   `json:"name"`
+	Private []string `json:"private"`
+	Seq     int64    `json:"seq"`
+	Created bool     `json:"created"`
+}
+
+// Share opts a project into a shared tree (POST /fs/v1/folders/<project>/share, PEP 0010 §7): the server mints the
+// tree's id once and writes its empty manifest with the private rule. Asking again returns the tree; a private rule that
+// differs from the first one is refused (ServerError, Code "already_shared"). private nil asks for the tree as it is.
+func (c *Client) Share(ctx context.Context, token, project string, private []string) (SharedTree, error) {
+	var body any
+	if private != nil {
+		body = map[string]any{"private": private}
+	}
+	status, data, err := c.call(ctx, http.MethodPost, "/fs/v1/folders/"+url.PathEscape(project)+"/share", body, token)
+	if err != nil {
+		return SharedTree{}, err
+	}
+	if status == http.StatusUnauthorized {
+		return SharedTree{}, ErrSignedOut
+	}
+	var tree SharedTree
+	if status != http.StatusOK || json.Unmarshal(data, &tree) != nil || tree.Host == "" {
+		return SharedTree{}, fmt.Errorf("%s did not share the folder: %w", c.Server, serverError(status, data))
+	}
+	return tree, nil
+}
+
+// SharedCommit sends one commit to the shared tree (POST /fs/v1/folders/<project>/shared, PEP 0010 §5) and returns the
+// server's answer as it came. A refusal is a *ServerError with the server's own code (max_delete, private_path,
+// over_quota, ...); a signed-out machine is ErrSignedOut.
+func (c *Client) SharedCommit(ctx context.Context, token, project string, request any) ([]byte, error) {
+	status, data, err := c.call(ctx, http.MethodPost, "/fs/v1/folders/"+url.PathEscape(project)+"/shared", request, token)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusUnauthorized {
+		return nil, ErrSignedOut
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("%s did not take the commit: %w", c.Server, serverError(status, data))
+	}
+	return data, nil
+}

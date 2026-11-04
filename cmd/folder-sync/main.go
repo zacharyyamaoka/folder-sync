@@ -55,6 +55,8 @@ Usage:
   folder-sync publish [--viewer] [--dir PATH]                        bring the manifest up to date; --viewer writes
                                                                      the R2-Explorer config and prints its deploy command
   folder-sync publish --public | --private [--dir PATH]              make the folder readable by anyone online, or not
+  folder-sync share   [--private PATTERN]... [--dir PATH]            share this folder: one tree every machine and the
+                                                                     web edits (needs login); PATTERNs stay per machine
   folder-sync status  [--json] [--dir PATH]                          last push, pull and clean run, per project;
                                                                      --json prints folder-sync-status/1
   folder-sync projects [--json] [--bucket NAME]                      the projects under the key's account root
@@ -102,6 +104,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdSync(args[1:], stdout)
 	case "publish":
 		err = cmdPublish(args[1:], stdout)
+	case "share":
+		err = cmdShare(args[1:], stdout)
 	case "status":
 		err = cmdStatus(args[1:], stdout)
 	case "projects":
@@ -128,7 +132,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		fmt.Fprintf(stderr, "folder-sync %s: %v\n", args[0], err)
-		var shared config.ErrSharedIsV1
+		var shared config.ErrUseShare
 		switch {
 		case errors.As(err, &shared):
 			return 3
@@ -427,6 +431,18 @@ func openProject(dir string, out io.Writer) (*syncer.Project, error) {
 			var answer syncer.DeleteAnswer
 			if err := json.Unmarshal(data, &answer); err != nil {
 				return syncer.DeleteAnswer{}, fmt.Errorf("the accounts server's answer is not JSON")
+			}
+			return answer, nil
+		}
+		// a shared folder commits its changes to the shared tree through the same server (docs/peps/0010 §5)
+		p.SharedCommit = func(ctx context.Context, request syncer.SharedRequest) (syncer.SharedAnswer, error) {
+			data, err := client.SharedCommit(ctx, a.Token, p.Config.Project, request)
+			if err != nil {
+				return syncer.SharedAnswer{}, err
+			}
+			var answer syncer.SharedAnswer
+			if err := json.Unmarshal(data, &answer); err != nil {
+				return syncer.SharedAnswer{}, fmt.Errorf("the accounts server's answer is not JSON")
 			}
 			return answer, nil
 		}

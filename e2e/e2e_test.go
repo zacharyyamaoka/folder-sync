@@ -782,11 +782,11 @@ func TestTwoMachines(t *testing.T) {
 		w.ops.take()
 	})
 
-	t.Run("v1's shared folders are refused, clearly", func(t *testing.T) {
+	t.Run("a shared mode in [modes] is refused, and the message points at `folder-sync share`", func(t *testing.T) {
 		editConfig(t, b, "[modes]\n", "[modes]\n\"shared\" = \"shared\"\n")
 		out, code := w.run(b, "sync", "--once")
 		w.record("B: shared mode refused", "B", "folder-sync sync --once   (with [modes] \"shared\" = \"shared\")", out, w.ops.take())
-		if code != 3 || !strings.Contains(out, "not available in v0") {
+		if code != 3 || !strings.Contains(out, "not a setting") || !strings.Contains(out, "folder-sync share") {
 			t.Fatalf("exit %d: %s", code, out)
 		}
 		editConfig(t, b, "[modes]\n\"shared\" = \"shared\"\n", "[modes]\n")

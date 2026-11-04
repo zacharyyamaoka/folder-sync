@@ -116,6 +116,9 @@ type Project struct {
 	// over its storage quota, docs/peps/0003 §3.7), as job (an id kept until the answer comes), from the manifest at
 	// fromSeq; the server answers the manifest it built. Nil when not signed in.
 	RemoteDelete func(ctx context.Context, job string, fromSeq int64, paths []string) (DeleteAnswer, error)
+	// SharedCommit sends a commit to the folder's shared tree through the accounts server (docs/peps/0010 §5); nil when not
+	// signed in. A folder that is shared needs it to push: the tree has one writer, the folder's Durable Object.
+	SharedCommit func(ctx context.Context, request SharedRequest) (SharedAnswer, error)
 	Trace    *trace.Writer // FOLDER_SYNC_TRACE: step timings; nil = off
 
 	// reportedSkips are the names last round already reported, so --watch says each once.
@@ -126,6 +129,9 @@ type Project struct {
 	restoring map[string]restoreMark
 	// behind is set by a pull that did not apply a peer's latest manifest (this round is not "synced").
 	behind bool
+	// shared is shared.json, loaded once per round (shared.go); sharedDirty says it was changed since it was saved.
+	shared      *sharedState
+	sharedDirty bool
 }
 
 // Open loads everything a round needs for the folder.
