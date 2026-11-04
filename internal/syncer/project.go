@@ -490,14 +490,18 @@ type Lock struct{ path string }
 // staleLock is how old a lock file must be before a crashed holder is assumed.
 const staleLock = 30 * time.Minute
 
+// emptyLockGrace is how long a lock with no holder in it is respected: a taker that creates the lock and then writes its pid
+// (createWhole on a disk with no hard links, or an engine before it) writes it a moment later, so one empty for longer was left
+// by a taker killed in between.
+const emptyLockGrace = 5 * time.Second
+
 // AcquireLock takes the project's lock or explains who holds it.
 func (p *Project) AcquireLock() (*Lock, error) {
 	path := p.statePath("lock")
 	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		err := createWhole(path, fmt.Sprintf("pid %d at %s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339)))
 		if err == nil {
-			fmt.Fprintf(f, "pid %d at %s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))
-			f.Close()
+			sweepLockTemps(path)
 			return &Lock{path: path}, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
@@ -516,9 +520,61 @@ func (p *Project) AcquireLock() (*Lock, error) {
 			os.Remove(path)
 			continue
 		}
+		if statErr == nil && len(strings.TrimSpace(string(holder))) == 0 && time.Since(info.ModTime()) > emptyLockGrace {
+			os.Remove(path)
+			continue
+		}
 		return nil, fmt.Errorf("%w (%s: %s)", ErrBusy, path, strings.TrimSpace(string(holder)))
 	}
 	return nil, fmt.Errorf("cannot take the lock %s", path)
+}
+
+// lockTempSuffix ends the name of the file a lock's holder is written to before it becomes the lock (createWhole).
+const lockTempSuffix = ".tmp"
+
+// createWhole creates path holding content, or fails with an error matching os.ErrExist when path exists. No reader ever finds
+// it without its content: the content is written to a file of its own, which is then hard-linked to path (a link fails when
+// the name exists, as O_EXCL does). WHY (gate G1, the soak at seed 81: `sync --once` killed 93 ms in, then every round on that
+// machine exited 75, "another folder-sync round is running for this folder (…/lock: )"): the lock used to be created with
+// O_EXCL and its pid written after, so a kill between the two left an empty lock whose holder nobody could check, refused for
+// staleLock. Prior art: the link-a-written-file lock of liblockfile and Go's github.com/nightlyone/lockfile. A disk with no hard
+// links (FAT, some network shares) gets the exclusive create and the write, and emptyLockGrace covers its moment in between.
+func createWhole(path, content string) error {
+	tmp := path + "." + newJobID()[:8] + lockTempSuffix
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		return err
+	}
+	defer os.Remove(tmp)
+	err := os.Link(tmp, path)
+	if err == nil || errors.Is(err, os.ErrExist) {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(content)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(path) // not left empty for the next taker to wait out
+	}
+	return err
+}
+
+// sweepLockTemps removes what a taker killed between writing its holder and linking it left behind (createWhole's file of its
+// own); a live taker removes its own a moment after writing it.
+func sweepLockTemps(path string) {
+	dir, base := filepath.Split(path)
+	entries, _ := os.ReadDir(dir)
+	for _, entry := range entries {
+		if name := entry.Name(); strings.HasPrefix(name, base+".") && strings.HasSuffix(name, lockTempSuffix) {
+			if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) > emptyLockGrace {
+				os.Remove(filepath.Join(dir, name))
+			}
+		}
+	}
 }
 
 // Release drops the lock.

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -82,31 +83,50 @@ type Result struct {
 // rewrites a name: NFC and NFD are two names, each landing exactly once, under the spelling its writer used.
 const exactNames = "--no-unicode-normalization"
 
-// manifestReads is how many times a manifest is read before one that will not parse is an error.
+// manifestReads is how many times a manifest is read before a read that keeps breaking (brokenRead) is an error.
 const manifestReads = 3
 
-// manifestRetryPause is the wait before a manifest that did not parse is read again (times the read number); a test sets it to 0.
+// manifestRetryPause is the wait before a broken manifest read is read again (times the read number); a test sets it to 0.
 var manifestRetryPause = 200 * time.Millisecond
 
-// getManifest reads the manifest object at key (conditionally on etag; "" always reads) and parses it. A body that is cut short,
-// which manifest.Parse refuses as "not valid JSON", is read again up to manifestReads times before the error is returned.
+// getManifest reads the manifest object at key (conditionally on etag; "" always reads) and parses it. A read the store answered
+// but that came back broken (brokenRead) is read again, up to manifestReads times, before its error is returned.
 // WHY: real S3 and R2 replace an object atomically, but a store that serves an object while it is being replaced can answer 200
 // with part of it (the e2e stand-in, rclone serve s3 over a directory, did, once: G1's one unexplained failure). A cut-short body
 // is never a state, so nothing acts on it; but one such read failed the whole round, and Discover's noteShared dropped it silently
-// and never asked that host again. Only a syntax error is read again: a manifest of the wrong schema or host is not transient.
+// and never asked that host again. The same race breaks a read two more ways, and failed G1 again (CI run 41926097553): the body
+// ends before its Content-Length ("unexpected EOF") or the store answers 500 InternalError; a real network and a real store do
+// both now and then (a dropped connection; S3's and R2's documented "please try again").
 func getManifest(objects store.Objects, bucket, key, etag string) (s3.GetResult, manifest.Manifest, error) {
 	for read := 1; ; read++ {
-		got, err := objects.GetIfNoneMatch(bucket, key, etag)
-		if err != nil || got.NotFound || got.NotModified {
-			return got, manifest.Manifest{}, err
-		}
-		m, err := manifest.Parse(got.Body)
-		var syntax *json.SyntaxError
-		if err == nil || !errors.As(err, &syntax) || read == manifestReads {
+		got, m, err := readManifest(objects, bucket, key, etag)
+		if err == nil || !brokenRead(err) || read == manifestReads {
 			return got, m, err
 		}
 		time.Sleep(manifestRetryPause * time.Duration(read))
 	}
+}
+
+// readManifest is one read of getManifest: the conditional GET, then the parse of a 200's body.
+func readManifest(objects store.Objects, bucket, key, etag string) (s3.GetResult, manifest.Manifest, error) {
+	got, err := objects.GetIfNoneMatch(bucket, key, etag)
+	if err != nil || got.NotFound || got.NotModified {
+		return got, manifest.Manifest{}, err
+	}
+	m, err := manifest.Parse(got.Body)
+	return got, m, err
+}
+
+// brokenRead reports a manifest read that reached the store and came back broken, which a later read gets through: a body that
+// ended before its Content-Length (the connection dropped part way: io.ErrUnexpectedEOF), a body that is not a whole manifest (a
+// JSON syntax error: 200 with part of the object), or the store's own "send it again" (s3.StatusError.TryAgain: 5xx but 501, 429).
+// WHY nothing else: an answer the store meant (403, a manifest of the wrong schema or host) is not transient, and a store that
+// cannot be reached is offline, which a round must report at once (`sync --watch` shows it in seconds: rclone.FailFast), not
+// after a pause for every peer.
+func brokenRead(err error) bool {
+	var syntax *json.SyntaxError
+	var status *s3.StatusError
+	return errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &syntax) || (errors.As(err, &status) && status.TryAgain())
 }
 
 // Filters writes the rclone filter file for this project's push and returns its path.

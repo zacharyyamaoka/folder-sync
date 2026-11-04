@@ -111,7 +111,7 @@ function runProof(proof) {
     const started = Date.now();
     const r = lib.sh(proof.argv, { cwd: REPO, timeout: 15 * 60 * 1000, env: { PATH: pathEnv } });
     const text = (r.stdout + r.stderr).split('\n');
-    result.tests.push(lib.entry(proof.name, r.status === 0 ? 'pass' : 'fail', r.status === 0 ? lib.tail(text, 3) : lib.tail(text, 40), Date.now() - started));
+    result.tests.push(lib.entry(proof.name, r.status === 0 ? 'pass' : 'fail', r.status === 0 ? lib.tail(text, 3) : lib.headTail(text, lib.FAIL_HEAD, lib.FAIL_TAIL), Date.now() - started));
     return result;
   }
   if (proof.kind === 'node') {
@@ -140,13 +140,13 @@ function runProof(proof) {
   for (const name of wanted) {
     const t = byName.get(name);
     if (!t || !t.status) {
-      const why = parsed.packageFailed || r.status ? `the package did not finish:\n${lib.tail([...parsed.output, ...(t ? t.lines : [])], 30)}` : 'no such test ran (renamed or deleted?)';
+      const why = parsed.packageFailed || r.status ? `the package did not finish:\n${lib.headTail([...parsed.output, ...(t ? t.lines : [])], lib.FAIL_HEAD, lib.FAIL_TAIL)}` : 'no such test ran (renamed or deleted?)';
       result.tests.push(lib.entry(`go ${proof.pkg} ${name}`, 'fail', why));
       continue;
     }
     result.tests.push({
       name: `go ${proof.pkg} ${t.name}`, status: t.status, duration_ms: t.duration_ms,
-      detail: t.status === 'pass' ? '' : lib.tail(t.lines, 30),
+      detail: t.status === 'pass' ? '' : lib.failureDetail(t),
     });
   }
   if (!wanted.length) result.tests.push(lib.entry(`go ${proof.pkg}`, 'fail', 'no test ran'));
@@ -168,6 +168,8 @@ for (const gate of gates) {
   const evidence = [...new Set(results.flatMap((r) => r.evidence))].filter((e) => fs.existsSync(path.join(outDir, e)));
   out.push({ id: gate.id, name: gate.name, status: verdict.status, summary: verdict.summary, tests: results.flatMap((r) => r.tests), evidence, target: gate.target });
   process.stderr.write(`   ${verdict.status.toUpperCase()}  ${verdict.summary.slice(0, 160)}\n`);
+  // the cause in the job's log too: gates.json is an artifact, and a red should say what broke where it is first seen
+  for (const t of out[out.length - 1].tests.filter((x) => x.status === 'fail' && x.detail)) process.stderr.write(`      ${t.name}: ${lib.headline(t.detail)}\n`);
 }
 
 const doc = {
@@ -192,7 +194,9 @@ if (flag('--publish')) {
 
 if (process.env.GITHUB_STEP_SUMMARY) {
   const mark = { pass: 'pass', fail: '**FAIL**', not_built: 'not built', skipped: 'skipped' };
-  const rows = out.map((g) => `| ${g.id} | ${g.name} | ${mark[g.status]} | ${g.summary.replace(/\|/g, '\\|').slice(0, 300)} |`);
+  const cell = (text) => text.replace(/\|/g, '\\|').replace(/</g, '&lt;').replace(/>/g, '&gt;'); // a cause can hold S3's XML
+  const cause = (g) => { const t = g.tests.find((x) => x.status === 'fail' && x.detail); return t ? `<br>${cell(lib.headline(t.detail, 2, 200))}` : ''; };
+  const rows = out.map((g) => `| ${g.id} | ${g.name} | ${mark[g.status]} | ${cell(g.summary).slice(0, 300)}${cause(g)} |`);
   fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n### Gates (${profile} profile, ${doc.code_sha.slice(0, 7)})\n\n| | gate | status | summary |\n|---|---|---|---|\n${rows.join('\n')}\n`);
 }
 

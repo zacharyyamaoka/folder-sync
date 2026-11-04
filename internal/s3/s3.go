@@ -288,6 +288,7 @@ func (c *Client) GetIfNoneMatch(bucket, key, etag string) (GetResult, error) {
 		return GetResult{ETag: got, Body: body}, nil
 	default:
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return GetResult{}, fmt.Errorf("GET %s returned %s: %s", key, resp.Status, strings.TrimSpace(string(snippet)))
+		// typed, so a caller can tell the store's "send it again" (StatusError.TryAgain) from its answer
+		return GetResult{}, &StatusError{Call: "GET " + key, Code: resp.StatusCode, Status: resp.Status, Body: strings.TrimSpace(string(snippet))}
 	}
 }

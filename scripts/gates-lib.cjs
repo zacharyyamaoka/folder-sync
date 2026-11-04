@@ -158,6 +158,8 @@ function definitions(ctx) {
 // --- parsing -----------------------------------------------------------------------------------------------------------
 
 // parseGoJson turns `go test -json` output into one entry per top-level test, and the build/package failure if there is one.
+// An entry's `errors` are the lines its t.Error and t.Fatal calls printed, which test2json marks (OutputType "error", then
+// "error-continue"; Go 1.25 and later): the failure itself, apart from what the test logged on the way.
 function parseGoJson(text) {
   const tests = new Map();
   const output = [];
@@ -172,9 +174,13 @@ function parseGoJson(text) {
       continue;
     }
     const top = ev.Test.split('/')[0];
-    const entry = tests.get(top) || { name: top, status: null, duration_ms: 0, lines: [] };
+    const entry = tests.get(top) || { name: top, status: null, duration_ms: 0, lines: [], errors: [] };
     tests.set(top, entry);
-    if (ev.Action === 'output' && ev.Output) entry.lines.push(ev.Output.replace(/\n$/, ''));
+    if (ev.Action === 'output' && ev.Output) {
+      const out = ev.Output.replace(/\n$/, '');
+      entry.lines.push(out);
+      if (ev.OutputType === 'error' || ev.OutputType === 'error-continue') entry.errors.push(out);
+    }
     if (ev.Test === top && (ev.Action === 'pass' || ev.Action === 'fail' || ev.Action === 'skip')) {
       entry.status = ev.Action === 'pass' ? 'pass' : ev.Action === 'fail' ? 'fail' : 'skip';
       entry.duration_ms = Math.round((ev.Elapsed || 0) * 1000);
@@ -186,6 +192,30 @@ function parseGoJson(text) {
 function tail(lines, n) {
   const kept = lines.filter((l) => !/^\s*(=== |--- )/.test(l)).map((l) => l.trimEnd());
   return kept.slice(-n).join('\n').trim();
+}
+
+// headTail keeps the first `head` lines and the last `tail` (the "=== RUN" and "--- FAIL" frames left out), with a line saying
+// how many were left out between them. WHY the head too (CI run 41926097553): a failure says what broke in its first lines, and
+// with the tail alone G1's red kept the last 30 lines of the soak's step log and lost the line naming the sync that failed.
+function headTail(lines, head, tail) {
+  const kept = lines.filter((l) => !/^\s*(=== |--- )/.test(l)).map((l) => l.trimEnd());
+  if (kept.length <= head + tail) return kept.join('\n').trim();
+  return [...kept.slice(0, head), `… ${kept.length - head - tail} lines left out …`, ...kept.slice(-tail)].join('\n').trim();
+}
+
+// FAIL_HEAD and FAIL_TAIL are how many first and last lines of a failure gates.json keeps.
+const FAIL_HEAD = 12;
+const FAIL_TAIL = 30;
+
+// failureDetail is what gates.json keeps of a failed Go test: the failure's own lines (`errors`), head and tail; every line the
+// test printed when the toolchain does not mark them, or when it died without a t.Fatal (a panic, a timeout).
+function failureDetail(t) {
+  return headTail(t.errors && t.errors.length ? t.errors : t.lines, FAIL_HEAD, FAIL_TAIL);
+}
+
+// headline is the start of a failure's detail for one line of a log or a summary table: its first non-empty lines, joined.
+function headline(detail, lines = 3, width = 300) {
+  return detail.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, lines).map((l) => (l.length > width ? `${l.slice(0, width)}…` : l)).join(' | ');
 }
 
 // parseTap reads node --test's TAP output: the tests at indent 0 and their duration_ms.
@@ -487,4 +517,4 @@ function walk(dir) {
   return out;
 }
 
-module.exports = { REPO, SCHEMA, GATE_IDS, LEGS, GOOS_OF_LEG, definitions, readLegs, parseGoJson, parseTap, aggregate, validate, tail, entry, sh, dropIn8, walk };
+module.exports = { REPO, SCHEMA, GATE_IDS, LEGS, GOOS_OF_LEG, definitions, readLegs, parseGoJson, parseTap, aggregate, validate, tail, headTail, failureDetail, headline, FAIL_HEAD, FAIL_TAIL, entry, sh, dropIn8, walk };

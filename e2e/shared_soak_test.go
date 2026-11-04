@@ -108,7 +108,7 @@ func (r *sharedSoak) syncOne(n *node, killAfter time.Duration) {
 	out, code = n.run("sync", "--once", "--discover")
 	r.note("%s sync", n.name)
 	if code != 0 {
-		r.t.Fatalf("seed %s: %s's sync --once exited %d (it must succeed, even after a kill):\n%s\n\nops so far:\n%s", os.Getenv("FOLDER_SYNC_SOAK_SEED"), n.name, code, out, strings.Join(r.log, "\n"))
+		r.t.Fatalf("seed %s: %s's sync --once exited %d: %s (it must succeed, even after a kill); its output:\n%s\n\nops so far:\n%s", os.Getenv("FOLDER_SYNC_SOAK_SEED"), n.name, code, lastLine(out), out, strings.Join(r.log, "\n"))
 	}
 	r.dirty[n] = map[string]bool{}
 }
@@ -225,7 +225,7 @@ func (r *sharedSoak) doStep() {
 				continue
 			}
 			if codes[i] != 0 && codes[i] != 75 { // 75: another round holds the lock
-				r.t.Fatalf("seed %s: %s's concurrent sync exited %d:\n%s", os.Getenv("FOLDER_SYNC_SOAK_SEED"), m.name, codes[i], results[i])
+				r.t.Fatalf("seed %s: %s's concurrent sync exited %d: %s; its output:\n%s", os.Getenv("FOLDER_SYNC_SOAK_SEED"), m.name, codes[i], lastLine(results[i]), results[i])
 			}
 			if codes[i] == 0 {
 				r.dirty[m] = map[string]bool{}

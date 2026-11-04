@@ -28,8 +28,32 @@ var ErrNotFound = errors.New("no such object (404)")
 
 // retryWaits are the pauses before a call answered 5xx (501 Not Implemented is no busy moment: it is not retried) or 429 is sent again. WHY retry these calls and not the
 // manifest GET: a history copy that fails holds its path's upload for a round, and stores answer a busy moment with a
-// 500 or 503 that the next try gets through (the stand-in does, now and then, under eight copies at once).
+// 500 or 503 that the next try gets through (the stand-in does, now and then, under eight copies at once). The manifest
+// GET is read again by its caller instead (syncer's getManifest), and only when the store answered and the answer broke:
+// do() also sends again a call that never reached the store, which would hold an offline round for every peer.
 var retryWaits = []time.Duration{100 * time.Millisecond, 400 * time.Millisecond}
+
+// tryAgain is a status by which the store says "send it again": a 5xx other than 501 Not Implemented, or 429.
+func tryAgain(status int) bool {
+	return (status >= 500 && status != http.StatusNotImplemented) || status == http.StatusTooManyRequests
+}
+
+// StatusError is an answer whose status the call did not expect (a 404 and a 412 are ErrNotFound and ErrPreconditionFailed
+// instead). Its text is "<call> returned <status>: <the start of S3's XML error>".
+type StatusError struct {
+	Call   string // "GET <key>"
+	Code   int
+	Status string // "500 Internal Server Error"
+	Body   string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s returned %s: %s", e.Call, e.Status, e.Body)
+}
+
+// TryAgain reports the store's own "send it again" (a 5xx other than 501, or 429), the answers do() sends again: S3 and R2
+// document 500 InternalError and 503 SlowDown as transient. Any other status is the store's answer.
+func (e *StatusError) TryAgain() bool { return tryAgain(e.Code) }
 
 func (c *Client) do(req *http.Request, payloadHash string) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
@@ -43,7 +67,7 @@ func (c *Client) do(req *http.Request, payloadHash string) (*http.Response, erro
 		}
 		SignWithToken(try, c.AccessKeyID, c.SecretAccessKey, c.SessionToken, c.Region, c.now(), payloadHash)
 		resp, err := c.httpClient().Do(try)
-		if attempt == len(retryWaits) || (err == nil && (resp.StatusCode < 500 || resp.StatusCode == http.StatusNotImplemented) && resp.StatusCode != http.StatusTooManyRequests) {
+		if attempt == len(retryWaits) || (err == nil && !tryAgain(resp.StatusCode)) {
 			return resp, err
 		}
 		if err == nil {
@@ -63,7 +87,7 @@ func statusError(what string, resp *http.Response) error {
 	case http.StatusNotFound:
 		return fmt.Errorf("%s: %w", what, ErrNotFound)
 	}
-	return fmt.Errorf("%s returned %s: %s", what, resp.Status, strings.TrimSpace(string(snippet)))
+	return &StatusError{Call: what, Code: resp.StatusCode, Status: resp.Status, Body: strings.TrimSpace(string(snippet))}
 }
 
 // Copy copies srcKey to dstKey inside bucket, server side, with no custom metadata on the copy (a kept version is its
