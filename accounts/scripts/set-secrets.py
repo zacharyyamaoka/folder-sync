@@ -69,29 +69,32 @@ def sites(env, features=None):
         {
             "title": "Google: create the sign-in client",
             "url": f"https://console.cloud.google.com/auth/clients/create?project={GOOGLE_PROJECT}",
-            "picture": "google-create-client.jpg",
+            # WHY full-resolution PNGs, one per screen, numbers equal to the list's (Zach, /rate 2026-11-04: "low resolution
+            # screen shot and no screen shot for the cloud flare"): a picture he has to squint at, or a site without one, is a step he has to work out
+            "pictures": ["google-create-client.png"],
             "steps": [
                 ("Application type: <b>Web application</b>.", []),
-                ("<b>1</b> Name:", [domain]),
-                ("<b>2</b> Under Authorized JavaScript origins, press Add URI once per line:",
+                ("Name:", [domain]),
+                ("Under Authorized JavaScript origins, press Add URI once per line:",
                  [f"https://{domain}", f"https://www.{domain}", f"https://{worker_host(env)}"]),
-                ("<b>3</b> Under Authorized redirect URIs, press Add URI once per line:",
+                ("Under Authorized redirect URIs, press Add URI once per line:",
                  [f"https://{domain}/fs/api/auth/callback/google", f"https://www.{domain}/fs/api/auth/callback/google",
                   f"https://{worker_host(env)}/fs/api/auth/callback/google"]),
-                ("<b>4</b> Press <b>Create</b>. A box shows the Client ID and Client secret: paste both below.", []),
+                ("Press <b>Create</b>. A box shows the Client ID and Client secret: paste both below.", []),
             ],
             "secrets": [("GOOGLE_CLIENT_ID", "Client ID"), ("GOOGLE_CLIENT_SECRET", "Client secret")],
         },
         {
             "title": "Cloudflare: create the storage key",
             "url": f"https://dash.cloudflare.com/{ACCOUNT_ID}/r2/api-tokens",
-            "picture": None,
+            "pictures": ["cloudflare-token-list.png", "cloudflare-token-form.png"],
+            "note": "If asked, sign in with <b>Continue with Google</b> (zach.yamaoka@gmail.com).",
             "steps": [
-                ("If asked, sign in with <b>Continue with Google</b> (zach.yamaoka@gmail.com).", []),
-                ("Press <b>Create Account API token</b>. Token name:", [f"folder-sync-accounts-{env}"]),
-                ("Permissions: <b>Object Read &amp; Write</b>. Specify buckets: <b>Apply to specific buckets only</b>, "
-                 "then pick both:", ["folder-sync", "folder-sync-downloads"]),
-                ("Press <b>Create API Token</b>. The next page shows the keys once: paste both below.", []),
+                ("Press <b>Create Account API token</b>.", []),
+                ("Token name:", [f"folder-sync-accounts-{env}"]),
+                ("Permissions: <b>Object Read &amp; Write</b>.", []),
+                ("Specify bucket(s): <b>Apply to specific buckets only</b>, then pick both:", ["folder-sync", "folder-sync-downloads"]),
+                ("Press <b>Create Account API Token</b>. The next page shows the keys once: paste both below.", []),
             ],
             "secrets": [("R2_PARENT_ACCESS_KEY_ID", "Access Key ID"),
                         ("R2_PARENT_SECRET_ACCESS_KEY", "Secret Access Key")],
@@ -101,19 +104,19 @@ def sites(env, features=None):
         found.append({
             "title": "Stripe: test-mode keys, products and webhook",
             "url": "https://dashboard.stripe.com/test/apikeys",
-            "picture": None,
+            "pictures": [],
             "steps": [
                 ("Stay in <b>test mode</b> for every step (the Test mode / Sandbox switch at the top of the dashboard). "
                  "Real keys are refused by the Worker; payments here are rehearsal only.", []),
-                ("<b>1</b> On this page (Developers, API keys), copy the <b>Secret key</b> (starts with sk_test_) into the first box below.", []),
-                ("<b>2</b> Product catalog, Add product: one product per plan, a monthly recurring price, and under "
+                ("On this page (Developers, API keys), copy the <b>Secret key</b> (starts with sk_test_) into the first box below.", []),
+                ("Product catalog, Add product: one product per plan, a monthly recurring price, and under "
                  "Additional options set the <b>Lookup key</b>. Plus (10 GiB):", ["folder-sync-plus"]),
-                ("<b>3</b> A second product, Pro (100 GiB), lookup key:", ["folder-sync-pro"]),
-                ("<b>4</b> Developers, Webhooks, Add endpoint. Endpoint URL:", [f"https://{worker_host(env)}/fs/api/auth/stripe/webhook"]),
-                ("<b>5</b> Select these four events (search each, tick it):",
+                ("A second product, Pro (100 GiB), lookup key:", ["folder-sync-pro"]),
+                ("Developers, Webhooks, Add endpoint. Endpoint URL:", [f"https://{worker_host(env)}/fs/api/auth/stripe/webhook"]),
+                ("Select these four events (search each, tick it):",
                  ["checkout.session.completed", "customer.subscription.created",
                   "customer.subscription.updated", "customer.subscription.deleted"]),
-                ("<b>6</b> Press <b>Add endpoint</b>, then reveal the <b>Signing secret</b> (starts with whsec_) and paste it into the second box below.", []),
+                ("Press <b>Add endpoint</b>, then reveal the <b>Signing secret</b> (starts with whsec_) and paste it into the second box below.", []),
             ],
             "secrets": [("STRIPE_SECRET_KEY", "Secret key (sk_test_…)"), ("STRIPE_WEBHOOK_SECRET", "Signing secret (whsec_…)")],
         })
@@ -133,11 +136,15 @@ def have(env):
 
 
 def picture(name):
-    if not name or not os.path.exists(os.path.join(PICTURES, name)):
+    """One annotated screenshot at its native resolution; a click opens it full size."""
+    path = os.path.join(PICTURES, name)
+    if not os.path.exists(path):
         return ""
-    with open(os.path.join(PICTURES, name), "rb") as f:
+    with open(path, "rb") as f:
         data = base64.b64encode(f.read()).decode()
-    return f'<img alt="Annotated screenshot" src="data:image/jpeg;base64,{data}">'
+    kind = "png" if name.endswith(".png") else "jpeg"
+    return (f'<figure><img alt="Annotated screenshot: the red numbers match the steps" '
+            f'src="data:image/{kind};base64,{data}"><figcaption>Click to enlarge</figcaption></figure>')
 
 
 PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
@@ -146,13 +153,15 @@ PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=
 :root{{--bg:#fff;--fg:#1d1d1f;--muted:#6e6e73;--line:#e5e5ea;--accent:#0a66d8;--ok:#1f8a3b;--chip:#f2f2f7}}
 @media (prefers-color-scheme:dark){{:root{{--bg:#1c1c1e;--fg:#f2f2f7;--muted:#a1a1a6;--line:#38383a;--accent:#4c9bff;--ok:#4cc46a;--chip:#2c2c2e}}}}
 body{{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}}
-main{{max-width:760px;margin:28px auto;padding:0 16px}}
+main{{max-width:1120px;margin:28px auto;padding:0 16px}}
 h1{{font-size:20px;margin:0 0 4px}} p.sub{{color:var(--muted);margin:0 0 20px}}
 section{{border:1px solid var(--line);border-radius:12px;padding:16px;margin:0 0 16px}}
 h2{{font-size:17px;margin:0 0 10px;display:flex;justify-content:space-between;align-items:center;gap:8px}}
 a.open{{font-size:14px;font-weight:500;white-space:nowrap;padding:6px 12px;border-radius:6px;background:var(--accent);color:#fff;text-decoration:none}}
-img{{width:100%;max-width:420px;border-radius:8px;border:1px solid var(--line);float:right;margin:0 0 12px 16px}}
-@media (max-width:700px){{img{{float:none;max-width:100%;margin:0 0 12px}}}}
+figure{{margin:0 0 14px}} figure img{{display:block;max-width:100%;height:auto;border-radius:8px;border:1px solid var(--line);cursor:zoom-in}}
+figcaption{{color:var(--muted);font-size:12px;margin:4px 0 0}} p.note{{color:var(--muted);margin:0 0 10px}}
+dialog{{padding:0;border:0;background:transparent;max-width:98vw;max-height:98vh}} dialog::backdrop{{background:rgba(0,0,0,.8)}}
+dialog img{{display:block;max-width:98vw;max-height:98vh;cursor:zoom-out}}
 ol{{padding-left:20px;margin:0 0 12px}} li{{margin:0 0 8px}}
 .copy{{display:flex;gap:6px;align-items:center;margin:4px 0}} code{{background:var(--chip);padding:3px 6px;border-radius:5px;
 font:13px ui-monospace,monospace;overflow-wrap:anywhere}}
@@ -167,6 +176,8 @@ button.save{{font:inherit;padding:10px 22px;border:0;border-radius:8px;backgroun
 paste what it gives back into the boxes, then press Save once at the bottom.</p>
 {body}</main>
 <script>
+const zoom=document.createElement('dialog');document.body.append(zoom);zoom.onclick=()=>zoom.close()
+document.querySelectorAll('figure img').forEach(i=>i.onclick=()=>{{zoom.innerHTML='';zoom.append(i.cloneNode());zoom.showModal()}})
 document.querySelectorAll('button.c').forEach(b=>b.onclick=()=>{{navigator.clipboard.writeText(b.dataset.v);b.textContent='Copied';setTimeout(()=>b.textContent='Copy',1200)}})
 </script>"""
 
@@ -183,10 +194,11 @@ def form(env, todo, message="", features=None):
             chips = "".join(f'<div class=copy><code>{html.escape(v)}</code>'
                             f'<button type=button class=c data-v="{html.escape(v)}">Copy</button></div>' for v in values)
             steps.append(f"<li>{text}{chips}</li>")
+        note = f'<p class=note>{site["note"]}</p>' if site.get("note") else ""
         boxes = "".join(f'<div class=box><label for={n}>{html.escape(l)}</label>'
                         f'<input id={n} name={n} type=password autocomplete=off spellcheck=false></div>' for n, l in wanted)
         parts.append(f'<section><h2>{html.escape(site["title"])}<a class=open href="{site["url"]}" target=_blank '
-                     f'rel=noopener>Open page ↗</a></h2>{picture(site["picture"])}<ol>{"".join(steps)}</ol>{boxes}</section>')
+                     f'rel=noopener>Open page ↗</a></h2>{note}{"".join(picture(n) for n in site["pictures"])}<ol>{"".join(steps)}</ol>{boxes}</section>')
     parts.append("<button class=save>Save</button></form>")
     words = {1: "One website", 2: "Two websites", 3: "Three websites"}.get(len(shown), f"{len(shown)} websites")
     return PAGE.format(env=html.escape(env), headline=f"{words}, {len(todo)} value{'' if len(todo) == 1 else 's'}, one Save", body="".join(parts))
