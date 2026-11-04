@@ -455,7 +455,8 @@ Built on `lane/shared-tree-0010` by one lane, which took the Worker lane's and t
 (§10 had split them). Not built here: `lane/shared-view` (the element still shows the shared host as a device named "shared")
 and `lane/shared-bench` (the bench's `shared` direction and the hour-long H run). The barriers §10 lists were already met on
 the base: PEP 0009 is built, and `pullPeer`'s save-storm race is not reachable from the shared tree (§9: a base is a hash of
-bytes this machine wrote or sent). Deploys and the D1 migration stay Zach's: `0011_shared_tree.sql` only adds a table.
+bytes this machine wrote or sent). §10 had the contract (B0) land alone before any lane; this one did it in the same branch as
+the build (the schemas and fixtures with the Worker, `CONTRACT.md` and `API.md` last). Deploys and the D1 migration stay Zach's: `0011_shared_tree.sql` only adds a table.
 
 **Where it is.**
 

@@ -513,14 +513,15 @@ func TestSharedTree(t *testing.T) {
 		if status != 200 || first.Outcome != "accepted" {
 			t.Fatalf("page PUT from the current version: %d %s", status, data)
 		}
-		// a machine edits meanwhile; the page then saves again from the version it saw before
-		p.a.write("doc.md", "line 1\nline 2\nline 3\nline 4\nline FIVE\nline SIX\n")
+		// a machine edits the first line meanwhile (from the version before the page's, so the tree merges it); the page then saves
+		// again from the version it saw
+		p.a.write("doc.md", "line ONE\nline 2\nline 3\nline 4\nline 5\n")
 		p.a.sync()
 		status, _ = br.do("PUT", "/fs/v1/folders/page/shared/doc.md", []byte("stale\n"), map[string]string{"X-Folder-Sync-Base": first.Version, "X-Folder-Sync-Merge": "never"})
 		if status != 412 {
 			t.Fatalf("a stale page edit with Merge: never: %d", status)
 		}
-		status, data = br.do("PUT", "/fs/v1/folders/page/shared/doc.md", []byte("line ONE\nline 2\nline 3\nline 4\nline FIVE\n"), map[string]string{"X-Folder-Sync-Base": first.Version})
+		status, data = br.do("PUT", "/fs/v1/folders/page/shared/doc.md", []byte("line 1\nline 2\nline 3\nline 4\nline FIVE\nline SIX\n"), map[string]string{"X-Folder-Sync-Base": first.Version})
 		var second struct{ Outcome string }
 		json.Unmarshal(data, &second)
 		if status != 200 || second.Outcome != "merged" {
