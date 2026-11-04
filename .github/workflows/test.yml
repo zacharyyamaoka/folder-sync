@@ -10,8 +10,12 @@
 #   core               the `test (...)` matrix and the cross-OS pair below, plus `core, no server` (seam 1)
 #   server-cloudflare  `server-cloudflare` (the accounts Worker; its step "seam 2" is the identity adapter check)
 #   ui                 `ui` (the sync element, in Chromium)
-#   desktop            desktop-smoke.yml and desktop-release.yml (the installers)
+#   desktop            `desktop` (desktop-smoke.yml, called from here on every push: the installers built and installed on
+#                      Linux, macOS and Windows) and desktop-release.yml (the release)
 #   gates              `gates (linux)`: scripts/gates runs the proof of each gate G1..G12 (docs/GATES.md) and uploads gates.json
+# The three OS legs (docs/PLATFORMS.md): each `test (...)` job ends by writing gates-leg-<os> (its own G4 verdict) and g11-timer-<os>
+# (scripts/first-sync-timer: a clean HOME, install, sign in, add a folder, first file synced, 120 s or fewer). `gates (linux)`
+# downloads all three, and G4 passes only when linux, macos and windows each passed.
 # `test (...)` keeps its name: a required check may be pinned to it.
 # WHY every action pinned to a full commit SHA, with its release in the comment, at least two weeks old (Zach's rule for new
 # dependencies, 2026-10-28). desktop-release.yml pins the same releases by tag.
@@ -41,15 +45,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # goos: Go's spelling of the OS, the one first-sync-<goos>.json is named by
           - name: linux
-            # WHY 22.04: the oldest Ubuntu a release builds on (desktop-release.yml)
-            runner: ubuntu-22.04
+            # WHY -latest, not 22.04: the tests run the current Ubuntu; only a release needs the oldest glibc (desktop-release.yml)
+            runner: ubuntu-latest
+            goos: linux
           - name: macos
+            # WHY macos-latest: Apple silicon (arm64), the Mac a person has now; the first-sync file records the arch it ran on
             runner: macos-latest
+            goos: darwin
           - name: windows
             runner: windows-latest
+            goos: windows
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     defaults:
       run:
         # WHY bash everywhere: scripts/dev-tools is bash; Git Bash is what windows-latest ships
@@ -113,6 +122,53 @@ jobs:
           path: ${{ runner.temp }}/g11
           if-no-files-found: ignore
           retention-days: 7
+
+      # gate G11, the whole walk on a clean HOME: install (the README's go build), sign in against the local stack (wrangler dev,
+      # the R2 stand-in), add a folder, first file read back from the Worker; fails over 120 s. The stack needs the Worker's
+      # dependencies, with install scripts (workerd's postinstall), so this is not the --ignore-scripts install the other jobs use.
+      # continue-on-error: a slow first sync is G11's red (scripts/gates reads the file), not the Go suite's.
+      - name: npm ci (accounts, for the local stack)
+        run: npm ci --no-audit --no-fund
+        working-directory: accounts
+
+      - name: G11, first sync from a clean HOME (scripts/first-sync-timer)
+        id: first_sync
+        continue-on-error: true
+        run: node scripts/first-sync-timer --out "$RUNNER_TEMP/g11/first-sync-${{ matrix.goos }}.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: g11-timer-${{ matrix.name }}
+          path: ${{ runner.temp }}/g11/first-sync-${{ matrix.goos }}.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # gate G4, this OS's leg: scripts/gates writes gates-<os>.json holding G4 (this job's own result) and G11 (the timer's file).
+      # `if: always()` and job.status make it the verdict of every step above, including a red go test.
+      - name: G4, this OS's verdict (gates-${{ matrix.name }}.json)
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/leg"
+          node scripts/gates --os-leg "${{ matrix.name }}" --job-status "$JOB_STATUS" --no-gh --collect "$RUNNER_TEMP/g11" --out "$RUNNER_TEMP/leg/gates-${{ matrix.name }}.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: gates-leg-${{ matrix.name }}
+          path: ${{ runner.temp }}/leg/gates-${{ matrix.name }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  # Part desktop: the installers built and silently installed on Linux, macOS and Windows (desktop-smoke.yml, also runnable alone with
+  # workflow_dispatch). WHY called from here: G4 needs this very run's result, and a plain pull_request trigger there ran it only when
+  # app/** changed, so on most commits the gate would read an older run. It publishes nothing. To run it only on app changes, put an
+  # `if:` on this job that compares `git diff --name-only` in a first job; the cost is the Tauri build, about 20 minutes per OS.
+  desktop:
+    name: desktop
+    uses: ./.github/workflows/desktop-smoke.yml
 
   # Part core, seam 1 (PARTS.md): the core works with no server at all. scripts/check-core-alone copies the checkout WITHOUT
   # accounts/, demo/ and app/ and runs the core there: the e2e on bucket-key login against the local R2 stand-in, the Go
@@ -275,7 +331,7 @@ jobs:
   # A gate that is not_built or skipped does not fail the job: it says what is missing. A failed gate does.
   gates:
     name: gates (linux)
-    needs: [test, core-alone, server-cloudflare, ui, pair-pull]
+    needs: [test, desktop, core-alone, server-cloudflare, ui, pair-pull]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-22.04
     timeout-minutes: 45
@@ -313,14 +369,27 @@ jobs:
         run: npx playwright install --with-deps chromium
         working-directory: ui
 
-      - name: scripts/gates' own tests
-        run: node --test scripts/gates.test.mjs
+      # the desktop journey (G5) drives app/ui in Chromium; the Chromium above is the same Playwright version
+      - name: npm ci (app, for the desktop journey)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: app
 
+      - name: scripts/gates' own tests
+        run: node --test scripts/gates.test.mjs scripts/first-sync-timer.test.mjs app/test/shell.test.mjs
+
+      # g11-<os> (the Go test's number) and g11-timer-<os> (first-sync-<goos>.json) land in one folder: scripts/gates --collect
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: g11-*
           merge-multiple: true
           path: ${{ runner.temp }}/g11
+        continue-on-error: true
+
+      # the three OS legs, each its own folder: scripts/gates --os-results finds gates-<os>.json in them
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: gates-leg-*
+          path: ${{ runner.temp }}/legs
         continue-on-error: true
 
       # WHY the needs JSON through an environment variable: the shell never sees workflow text
@@ -329,7 +398,7 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           printf '%s' "$NEEDS" > "$RUNNER_TEMP/needs.json"
-          scripts/gates --profile ci --with-web --needs "$RUNNER_TEMP/needs.json" --collect "$RUNNER_TEMP/g11"
+          scripts/gates --profile ci --with-web --needs "$RUNNER_TEMP/needs.json" --collect "$RUNNER_TEMP/g11" --os-results "$RUNNER_TEMP/legs"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}

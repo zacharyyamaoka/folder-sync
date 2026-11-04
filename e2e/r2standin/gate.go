@@ -37,7 +37,9 @@ type Refusal struct {
 	Why    string
 }
 
-func refuse(status int, code, why string) *Refusal { return &Refusal{Status: status, Code: code, Why: why} }
+func refuse(status int, code, why string) *Refusal {
+	return &Refusal{Status: status, Code: code, Why: why}
+}
 
 func (r *Refusal) write(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/xml")
