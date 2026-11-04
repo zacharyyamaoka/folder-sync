@@ -1,0 +1,165 @@
+{
+  "schema": "folder-sync-gates/1",
+  "run_at": "2026-11-04T17:40:00Z",
+  "code_sha": "770a9a21e3fa",
+  "branch": "track/finish",
+  "gates": [
+    {
+      "id": "G1",
+      "name": "Nothing lost",
+      "status": "pass",
+      "summary": "Randomized soak: 40 seeds, no lost write",
+      "tests": [
+        {
+          "name": "soak seed 1-20",
+          "status": "pass",
+          "duration_ms": 61200,
+          "detail": ""
+        },
+        {
+          "name": "soak seed 21-40",
+          "status": "pass",
+          "duration_ms": 59800,
+          "detail": ""
+        },
+        {
+          "name": "soak kill -9 mid-sync",
+          "status": "pass",
+          "duration_ms": 8200,
+          "detail": "recovered on restart"
+        }
+      ],
+      "evidence": [
+        "https://example.com/runs/1234",
+        "reports/media/soak-2026-11-04.html"
+      ]
+    },
+    {
+      "id": "G2",
+      "name": "Version history",
+      "status": "fail",
+      "summary": "30 days at 5-min resolution: restore of deleted file fails",
+      "tests": [
+        {
+          "name": "history 5-min resolution",
+          "status": "pass",
+          "duration_ms": 1400,
+          "detail": ""
+        },
+        {
+          "name": "deleted file restorable for 30 d",
+          "status": "fail",
+          "duration_ms": 2300,
+          "detail": "expected 1 version, got 0 <script>alert(1)</script>"
+        },
+        {
+          "name": "prune keeps window",
+          "status": "skip",
+          "duration_ms": 0,
+          "detail": "needs R2 sandbox"
+        }
+      ],
+      "evidence": [
+        "reports/media/history-fail.txt"
+      ]
+    },
+    {
+      "id": "G3",
+      "name": "Private",
+      "status": "pass",
+      "summary": "No cross-account read",
+      "tests": [
+        {
+          "name": "account B cannot list account A",
+          "status": "pass",
+          "duration_ms": 900,
+          "detail": ""
+        }
+      ],
+      "evidence": []
+    },
+    {
+      "id": "G4",
+      "name": "Cross-platform",
+      "status": "skipped",
+      "summary": "CI matrix not run in this build",
+      "tests": [],
+      "evidence": []
+    },
+    {
+      "id": "G5",
+      "name": "Three surfaces",
+      "status": "not_built",
+      "summary": "Web journey missing",
+      "tests": [],
+      "evidence": []
+    },
+    {
+      "id": "G6",
+      "name": "Headless",
+      "status": "pass",
+      "summary": "Fresh machine syncs from a script",
+      "tests": [
+        {
+          "name": "fresh machine script",
+          "status": "pass",
+          "duration_ms": 14000,
+          "detail": ""
+        }
+      ],
+      "evidence": []
+    },
+    {
+      "id": "G7",
+      "name": "Storage swappable",
+      "status": "not_built",
+      "summary": "R2 only",
+      "tests": [],
+      "evidence": []
+    },
+    {
+      "id": "G8",
+      "name": "Drop-in",
+      "status": "pass",
+      "summary": "14 lines of app code",
+      "tests": [
+        {
+          "name": "line count <= 20",
+          "status": "pass",
+          "duration_ms": 20,
+          "detail": "14 lines"
+        }
+      ],
+      "evidence": []
+    },
+    {
+      "id": "G9",
+      "name": "Ignore rules",
+      "status": "fail",
+      "summary": "Quarantined: junk-files, unicode-normalization",
+      "tests": [
+        {
+          "name": "junk-files",
+          "status": "fail",
+          "duration_ms": 3100,
+          "detail": "quarantined"
+        },
+        {
+          "name": "unicode-normalization",
+          "status": "fail",
+          "duration_ms": 2900,
+          "detail": "quarantined"
+        }
+      ],
+      "evidence": []
+    },
+    {
+      "id": "G10",
+      "name": "Accounts",
+      "status": "pass",
+      "summary": "Google + email code",
+      "tests": [],
+      "evidence": []
+    }
+  ]
+}

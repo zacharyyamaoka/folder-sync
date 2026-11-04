@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# The dev view: regenerate from the real KPI series and the gate results, then serve it on loopback (docs/DEV-VIEW.md).
+# Override: PORT, KPI, GATES. Ctrl-C stops it; regenerate by running this again (or `scripts/status` alone, the server keeps serving the folder).
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+port="${PORT:-8137}"
+out="$root/site/dev"
+"$root/scripts/status" \
+	--kpi "${KPI:-$HOME/vt/zach/producers/folder-sync/kpi_series.jsonl}" \
+	--gates "${GATES:-/home/bam/folder-sync/reports/status/gates.json}" \
+	--out "$out"
+echo "http://127.0.0.1:$port/"
+exec python3 -m http.server "$port" --bind 127.0.0.1 --directory "$out"

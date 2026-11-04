@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// The dev view generator (docs/DEV-VIEW.md); the code is in status.mjs, status-model.mjs and status-render.mjs.
+import("./status.mjs").then((m) => { process.exitCode = m.main(process.argv.slice(2)); });
