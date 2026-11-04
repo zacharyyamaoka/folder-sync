@@ -210,6 +210,13 @@ its own storage partition. The ceiling comes from the person's subscription plan
 `QUOTA_BY_OWNER` is the stand-in until billing exists. Zach's words: "eventually though it would only be settable based
 on your subscription plan".
 
+**One account per app (Zach, 2026-11-04): "I feel we should have 1 account per application, no need to confuse things".**
+One sign-in shared by all of Zach's apps (option D in the vault note "folder-sync — Five KPIs and the Core-or-Turnkey
+Split") is declined. Better Auth is the drop-in for an app's login. This Worker adds what folder-sync needs on top: the
+device flow for machines, prefix-scoped storage keys and the per-person quota. It is deployed once per app, each
+deployment with its own D1. Today robotparts.dev and vibetracks.dev still share the one `folder-sync-accounts`
+deployment; splitting them would move data, so that is a separate step. Every new app gets its own deployment.
+
 ### 3.8 Go-live: production email codes
 
 Zach sets these himself; no value is ever in a file or a chat:
