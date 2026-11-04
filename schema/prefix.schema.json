@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://folder-sync.invalid/schema/folder-sync-prefix-1.json",
+  "title": "folder-sync prefix pointer, version 1",
+  "description": "The body of a <version>.<size>.prefix object under _history/ (PEP 0009): about 125 bytes saying that this version's bytes are the first `size` bytes of the path's next full object, the oldest keyframe (.zst or whole) after it in version order, or the live file when there is none. A reader fetches `bytes=0-(size-1)` of that object (a .zst anchor is decoded first) and accepts the result only if its sha256 is `sha256` and starts with the sha16 in the name. The engine writes it compact, as {\"schema\":\"folder-sync-prefix/1\",\"size\":<n>,\"sha256\":\"<64 hex>\"}, created once. See docs/CONTRACT.md, 'Deletions and history'.",
+  "type": "object",
+  "required": ["schema", "size", "sha256"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "folder-sync-prefix/1" },
+    "size": { "description": "This version's own size in bytes, the <size> in the object's name; at least 1.", "type": "integer", "minimum": 1 },
+    "sha256": { "description": "The sha256 of this version's bytes; the name's sha16 is its first 16 digits.", "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

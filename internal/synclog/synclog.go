@@ -284,12 +284,12 @@ func (l *Log) enrich(ev Event) Event {
 	return ev
 }
 
-// levelOf is an event's level when its caller set none. The schema fixes warn for skip, conflict, hold and truncated,
+// levelOf is an event's level when its caller set none. The schema fixes warn for skip, conflict, hold, truncated and history_lost,
 // and error for a failed restore. WHY a failed round offline is only a warning: the view is never red for offline
 // (docs/API.md, status); it waits it out, as the tray does.
 func levelOf(ev Event) string {
 	switch {
-	case ev.Event == "skip", ev.Event == "conflict", ev.Event == "hold", ev.Event == "truncated":
+	case ev.Event == "skip", ev.Event == "conflict", ev.Event == "hold", ev.Event == "truncated", ev.Event == "history_lost":
 		return "warn"
 	case ev.Event == "restore" && ev.Error != "":
 		return "error"

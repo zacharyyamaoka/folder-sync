@@ -4,6 +4,8 @@
 // testdata/retention/schedule.json and testdata/history/keys.json.
 //
 //   <root>_history/<project>/<host>/<path>/<written_at>_<sha16>    a kept version: the file's exact bytes
+//   <root>_history/<project>/<host>/<path>/<version>.<size>.zst    ... as one zstd frame (a keyframe; PEP 0009)
+//   <root>_history/<project>/<host>/<path>/<version>.<size>.prefix ... as a pointer to the start of the next full object
 //   <root>_changes/<project>/<host>/<seq, 12 digits>.json          what manifest version <seq> changed
 //   <root>_changes/<project>/<host>/pulls/<at>.json                 the peer files that host wrote in one round
 //   <root>_requests/<project>/<host>/<id>.json                      a restore that host is asked to make
@@ -14,8 +16,11 @@
 
 import { checkPath } from "../../readers/worker/src/folder-sync-read.ts";
 
-/** burst: a version that lived less than this inside a burst of saves may go (CONTRACT "What is kept"). */
-export const BURST_MS = 30_000;
+/** history_every: a version that lived less than this inside a burst of saves may go (CONTRACT "What is kept"). The
+ *  default is Zach's 5 minutes (2026-11-04); a machine's folder may set its own, at least MIN_EVERY_MS. The web host has no
+ *  .folder-sync.toml: it keeps the default. */
+export const EVERY_MS = 300_000;
+export const MIN_EVERY_MS = 30_000;
 /** keep_days: nothing older is kept. */
 export const KEEP_DAYS = 30;
 /** The web host has no .folder-sync.toml: it keeps the default. */
@@ -24,6 +29,8 @@ const HOUR_MS = 3600_000;
 const DAY_MS = 24 * HOUR_MS;
 
 export const VERSION_ID = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z_([0-9a-f]{16}|unlisted)$/;
+/** An object's name under …/<path>/: a version id, then for a keyframe or a pointer .<size>.<form> (no leading zero). */
+const OBJECT_NAME = /^(.+?)(?:\.(0|[1-9][0-9]*)\.(zst|prefix))?$/;
 const PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const HOST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ROOT_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -70,6 +77,32 @@ export function parseVersion(id: string): Version | null {
 	return tail === "unlisted" ? { id, unlisted: true } : { id, written_at: at, sha16: tail, unlisted: false };
 }
 
+/** The form of the object a kept version is stored as (PEP 0009). */
+export type Kind = "full" | "zst" | "prefix";
+
+export interface ObjectName {
+	/** The version id. */
+	id: string;
+	kind: Kind;
+	/** The version's own size, from the name: null for a whole copy (its size is the object's). */
+	size: number | null;
+}
+
+/** An object's name taken apart, or null when it is not one. An unlisted version is always a whole copy. */
+export function parseName(name: string): ObjectName | null {
+	const m = OBJECT_NAME.exec(name);
+	if (!m || !parseVersion(m[1])) return null;
+	if (!m[3]) return { id: m[1], kind: "full", size: null };
+	if (m[1].endsWith("_unlisted")) return null;
+	const size = Number(m[2]);
+	return Number.isSafeInteger(size) ? { id: m[1], kind: m[3] as Kind, size } : null;
+}
+
+/** The name of a version stored as `kind`. */
+export function objectName(id: string, kind: Kind, size: number): string {
+	return kind === "full" ? id : `${id}.${size}.${kind}`;
+}
+
 /** A published path as history keys may hold it: the contract's rules, and never a ":". */
 export function historyPath(path: string): boolean {
 	try {
@@ -98,7 +131,11 @@ export interface HistoryKey {
 	project: string;
 	host: string;
 	path: string;
+	/** The version id, whatever form the object is. */
 	version: string;
+	kind: Kind;
+	/** The version's own size from the name (.zst and .prefix); absent for a whole copy. */
+	size?: number;
 }
 
 /** A history key taken apart (testdata/history/keys.json), or null when it is not one. The root ends where the first
@@ -111,10 +148,10 @@ export function parseHistoryKey(key: string): HistoryKey | null {
 	if (!rootParts.every((s) => ROOT_SEGMENT.test(s))) return null;
 	const [project, host, ...rest] = parts.slice(at + 1);
 	if (!project || !PROJECT.test(project) || !host || !HOST_ID.test(host) || rest.length < 2) return null;
-	const version = rest[rest.length - 1];
+	const name = parseName(rest[rest.length - 1]);
 	const path = rest.slice(0, -1).join("/");
-	if (!parseVersion(version) || !historyPath(path)) return null;
-	return { root: rootParts.length ? `${rootParts.join("/")}/` : "", project, host, path, version };
+	if (!name || !historyPath(path)) return null;
+	return { root: rootParts.length ? `${rootParts.join("/")}/` : "", project, host, path, version: name.id, kind: name.kind, ...(name.size === null ? {} : { size: name.size }) };
 }
 
 export function changesKey(root: string, project: string, host: string, seq: number): string {
@@ -192,15 +229,25 @@ export interface Leaving {
 	/** The left_at (ms) of the last version of this path this writer kept, or null. */
 	lastKeptLeftAt: number | null;
 	noHistory?: string[];
+	/** history_every in ms: the burst window (default EVERY_MS). */
+	everyMs?: number;
+	/** The pin's two halves (PEP 0009 §4.3): the newest version this writer kept of the path is a pointer, and the new
+	 *  bytes are an append the writer uploads itself. The web host writes no pointers, so it leaves both unset. */
+	newestKeptIsPointer?: boolean;
+	appendUploaded?: boolean;
 }
 
-/** When a version leaves: kept, or not and why (CONTRACT "What is kept", the five rules in order). */
+/** When a version leaves: kept, or not and why (CONTRACT "What is kept", the six rules in order). */
 export function keepOnWrite(leaving: Leaving): { keep: true } | { keep: false; why: "no_history" | "burst" } {
+	const every = leaving.everyMs ?? EVERY_MS;
 	if (matchesAny(leaving.path, leaving.noHistory ?? NO_HISTORY_DEFAULT)) return { keep: false, why: "no_history" };
 	if (leaving.op === "delete" || leaving.op === "restore") return { keep: true };
+	// WHY before the throttle: a pointer rests on the live file, and a rewrite could replace it with bytes that do not
+	// start with the pointer's; dropping this version would lose the only copy that does
+	if (leaving.newestKeptIsPointer && !leaving.appendUploaded) return { keep: true };
 	const lived = leaving.now - Date.parse(leaving.writtenAt);
-	if (lived >= BURST_MS) return { keep: true };
-	if (leaving.lastKeptLeftAt !== null && leaving.lastKeptLeftAt > leaving.now - BURST_MS) return { keep: false, why: "burst" };
+	if (lived >= every) return { keep: true };
+	if (leaving.lastKeptLeftAt !== null && leaving.lastKeptLeftAt > leaving.now - every) return { keep: false, why: "burst" };
 	return { keep: true };
 }
 
@@ -232,4 +279,133 @@ export function trashStampTime(stamp: string): number | null {
 	if (!m) return null;
 	const time = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], m[7] ? +m[7] : 0);
 	return Number.isFinite(time) ? time : null;
+}
+
+// ------------------------------------------------------------------------------------------------ anchors (PEP 0009 §7)
+
+/** One object under a path's history, in any form. `name` is the object's whole name. */
+export interface StoredVersion {
+	name: string;
+	id: string;
+	kind: Kind;
+	left_at: number;
+}
+
+const FORM_RANK: Record<Kind, number> = { full: 0, zst: 1, prefix: 2 };
+
+/** The full object a pointer rests on: the oldest version of its path newer than it, in version order, that is not itself
+ *  a pointer. Null when there is none: the pointer then rests on the live file, or, when the path is gone, on nothing. */
+export function anchorOf<T extends StoredVersion>(versions: T[], pointerId: string): T | null {
+	let best: T | null = null;
+	for (const v of versions) {
+		if (v.kind === "prefix" || v.id <= pointerId) continue;
+		if (!best || v.id < best.id || (v.id === best.id && FORM_RANK[v.kind] < FORM_RANK[best.kind])) best = v;
+	}
+	return best;
+}
+
+export interface GroupPlan<T extends StoredVersion = StoredVersion> {
+	keep: T[];
+	/** Deleted first, then `drop`: a prune cut off halfway never strands a pointer. */
+	dropPointers: T[];
+	drop: T[];
+	/** Pointers in `dropPointers` whose bytes are gone: no full object after them and no live file. */
+	lost: T[];
+	/** Kept pointers with no full object after them: they rest on the live file, or are lost if the path is gone. */
+	unanchored: T[];
+}
+
+/** The schedule with PEP 0009's anchors, for the versions of one (host, path) in any form. The schedule decides by
+ *  version id; a keyframe stays while a kept pointer rests on it; a pointer beside a whole copy of the same version goes;
+ *  a pointer with nothing to rest on is dropped and reported lost. `live`: the path is in the host's manifest (the live
+ *  file is what a last pointer rests on); null: not known, so a pointer with no anchor is kept. */
+export function pruneGroup<T extends StoredVersion>(versions: T[], now: number, keepDays: number, live: boolean | null): GroupPlan<T> {
+	const byId = new Map<string, T[]>();
+	for (const v of versions) byId.set(v.id, [...(byId.get(v.id) ?? []), v]);
+	const ids = [...byId.keys()].sort();
+	const rep = new Map<string, T>();
+	for (const id of ids) rep.set(id, byId.get(id)!.reduce((best, f) => (FORM_RANK[f.kind] < FORM_RANK[best.kind] ? f : best)));
+	const reps = ids.map((id) => rep.get(id)!);
+	const keepId = pruneVersions(reps, now, keepDays);
+	const lost = new Set<string>();
+	const unanchored: T[] = [];
+	for (const id of ids) {
+		if (!keepId.has(id) || rep.get(id)!.kind !== "prefix") continue;
+		const anchor = anchorOf(reps, id);
+		if (anchor) keepId.add(anchor.id); // the keyframe stays while this pointer does, however the schedule sees it
+		else if (live === false) lost.add(id);
+		else unanchored.push(rep.get(id)!);
+	}
+	const plan: GroupPlan<T> = { keep: [], dropPointers: [], drop: [], lost: [], unanchored };
+	for (const id of ids) {
+		for (const v of byId.get(id)!) {
+			if (lost.has(id)) {
+				plan.dropPointers.push(v);
+				plan.lost.push(v);
+			} else if (!keepId.has(id)) (v.kind === "prefix" ? plan.dropPointers : plan.drop).push(v);
+			else if (v.kind === "prefix" && rep.get(id)!.kind !== "prefix") plan.dropPointers.push(v); // the whole copy is the version
+			else plan.keep.push(v);
+		}
+	}
+	return plan;
+}
+
+// ------------------------------------------------------------------------------------------------ the pointer's body
+
+export const PREFIX_SCHEMA = "folder-sync-prefix/1";
+
+/** A .prefix object's body (schema/prefix.schema.json): this version is the first `size` bytes of the path's next full
+ *  object, and they hash to `sha256`. */
+export interface PrefixBody {
+	schema: typeof PREFIX_SCHEMA;
+	size: number;
+	sha256: string;
+}
+
+/** A pointer's body, or null when it is not one: exactly the three fields, a size of at least 1, a lowercase sha256. */
+export function parsePrefixBody(text: string): PrefixBody | null {
+	let doc: unknown;
+	try {
+		doc = JSON.parse(text);
+	} catch {
+		return null;
+	}
+	if (!doc || typeof doc !== "object" || Array.isArray(doc)) return null;
+	const { schema, size, sha256, ...rest } = doc as Record<string, unknown>;
+	if (Object.keys(rest).length || schema !== PREFIX_SCHEMA) return null;
+	if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 1) return null;
+	if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256)) return null;
+	return { schema: PREFIX_SCHEMA, size, sha256 };
+}
+
+// ------------------------------------------------------------------------------------------------ listings
+
+/** One object of a listing under a path's history, taken apart. `size` is the version's own size (the name's for a
+ *  keyframe or a pointer, the object's for a whole copy); `stored` is the object's. */
+export interface ListedObject extends StoredVersion {
+	key: string;
+	size: number;
+	stored: number;
+}
+
+/** An object listed directly under `prefix` (…/<path>/), or null when its name is not a version's. */
+export function listedObject(prefix: string, object: { key: string; size: number; lastModified: number }): ListedObject | null {
+	const name = parseName(object.key.slice(prefix.length));
+	if (!name || object.key.slice(prefix.length).includes("/")) return null;
+	return { name: object.key.slice(prefix.length), id: name.id, kind: name.kind, left_at: object.lastModified, key: object.key, size: name.size ?? object.size, stored: object.size };
+}
+
+/** One object per version id, the whole form first (a version stored in two forms is read from its best). */
+export function preferred<T extends StoredVersion>(objects: T[]): T[] {
+	const best = new Map<string, T>();
+	for (const o of objects) {
+		const had = best.get(o.id);
+		if (!had || FORM_RANK[o.kind] < FORM_RANK[had.kind]) best.set(o.id, o);
+	}
+	return [...best.values()];
+}
+
+/** Every version stored in `kind`-first order for a read: the whole copy, then the keyframe, then the pointer. */
+export function readOrder<T extends StoredVersion>(objects: T[]): T[] {
+	return [...objects].sort((a, b) => FORM_RANK[a.kind] - FORM_RANK[b.kind]);
 }

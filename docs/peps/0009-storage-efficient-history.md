@@ -1,8 +1,10 @@
 # 0009 · History that costs what changed: a pointer for an append, one version per 5 minutes, zstd for the rest
 
 - **Date:** 2026-11-04
-- **Status:** Draft, 2026-11-04, on `lane/peps-0009-0010` (cut from `claude/folder-sync-v0` at 6e1baf3). Nothing is
-  built. Until Zach accepts it, PEP 0007 and `docs/CONTRACT.md` stand as written.
+- **Status:** Accepted and implemented, 2026-11-04, on `lane/history-0009` (cut from `track/finish`; not merged). Zach
+  approved building it: "Version control timestamps, every X min? (5 by default)", "Up to X days back (30 by
+  default?)". See "As built" before §15 for what differs from the design below; where they disagree, the code and
+  `docs/CONTRACT.md` win.
 - **Amends:** PEP 0007 §3.1 (what a kept version's object may be), §3.2 (the write-time rule and the pruner) and §3.5
   (what history costs); `docs/CONTRACT.md` "Bucket layout", "Deletions and history" and "What is kept". The rest of
   PEP 0007 stands.
@@ -493,6 +495,55 @@ Each one has a recommendation, and the default that holds if he says nothing.
 - **Appended files over 64 MiB show up in H:** keep the newest kept version whole for them (§4.2 (b)).
 - **Workers get a stock zstd encoder:** compress the web host's and the shared tree's keyframes.
 - **R2 ships object versioning:** PEP 0007's revisit.
+
+## As built
+
+Built on `lane/history-0009`, 2026-11-04: engine (`internal/history`, `internal/syncer`, `internal/s3`,
+`internal/config`, `internal/serve`) and Worker (`accounts/src/{history,prune,view,webhost,storage}.ts`, fzstd vendored).
+The contract is amended in `docs/CONTRACT.md`. Everything in §0 holds. What differs or was added:
+
+- **B0 and the build in one lane.** The contract files of §11 had not landed, so this lane wrote them: `schema/prefix.schema.json`,
+  `schema/zstd-frames.schema.json`, the object-name pattern in `schema/history.schema.json`, `history_lost` in
+  `schema/event.schema.json`, `corrupt` (502) in `schema/view-api.schema.json`, the new cases in
+  `testdata/retention/schedule.json` (every_ms, the pin, `anchor_cases`), `testdata/history/keys.json`,
+  `testdata/prefix/`, `testdata/zstd/`.
+- **The A and H fixtures are Go tests, not `testdata/efficiency/` generators** (§9.3): `internal/syncer/workload_test.go`
+  runs whole rounds (`Push`) against an in-memory S3 on a fake clock, with a stand-in for the rclone binary (`fakerclone_test.go`);
+  `e2e/history_test.go` `TestHistoryForms` runs the same forms on the real rclone and the stand-in. Only the append
+  workload has a gate. The markdown and rewrite rows were not built.
+  - **Append workload** (a log that grows for an hour): A = 0.0006 with the throttle on, 12 pointers (1,488 bytes) for
+    2.46 MB changed. The code before the PEP wrote 230 times what changed on the full workload (4 MiB log, 1.2 KB every 2 s, 1,800
+    rounds: 678,891,844 bytes of history for 2,950,330 changed). The default run is the same hour at a third of the rounds on a
+    1 MiB log; `FOLDER_SYNC_WORKLOAD_FULL=1` runs §9.3's numbers.
+  - **30-day workload** (`TestThirtyDayStorageEfficiency`: 31 days of day logs appended to, one old log rewritten daily, a bundle
+    whose counters change every round, a note edited twice a day; the engine's own daily prune): H (versions) peaked at 0.206 and
+    0.221 with the change records the run wrote. With records at §8's 761 rounds a day from the 1,300 bytes each really
+    takes, H is 0.47 against the recorded folder's 108 MiB. The same run with whole copies only (no pointers, no keyframes) peaks
+    at H = 6.07. All 166 kept versions restored byte-identical from their sha256.
+- **The pin and the race** are tested as designed (§4.3): `TestAPointerNeverRestsOnBytesTheEngineDidNotUpload` rewrites the file while
+  the native PUT is in flight (the bucket still gets the hashed bytes) and, with the native limit lowered, while rclone uploads (no
+  pointer is written, and the old version restores). A kept pointer whose manifest never landed is written a whole copy beside
+  it when the next bytes are not the append it rests on.
+- **Native PUT:** `s3.Client.PutFile` sends `x-amz-meta-mtime` as rclone does; `object_etag` is recorded from the PUT's own answer
+  when it is the MD5 of the buffer (no HEAD).
+- **Restore of every form** is `syncer.FetchVersion`, used by `restore` (a machine's own, and a peer's request) and `folder-sync serve`. It lists once, picks the best form, reads a pointer by one Range GET (`If-Match` on the live file's `object_etag`,
+  listing again once on a 412), decodes a keyframe with klauspost, and checks the sha256 and the `sha16` in the name. A mismatch is
+  `mismatch` for a restore and 502 `corrupt` for serve and the Worker.
+- **The Worker** decodes `.zst` with fzstd 0.1.1 (vendored, MIT, `accounts/src/vendor/fzstd.js`; a klauspost frame from
+  `testdata/zstd/frames.json` decodes under it) and reads pointers the same way, buffering at most 32 MiB: a keyframe or pointer
+  over that is answered 413 `too_large` ("restore it from a machine, which checks it") rather than served unchecked, since a Worker
+  has no streaming SHA-256. A whole copy still streams. Its prune keeps anchors, deletes pointers in a call of their own before
+  keyframes, reads a host's manifest only when a kept pointer has nothing after it, and logs `history_lost` with `console.warn` and in
+  its result; it writes no activity event for it. A purge of a version takes its other forms and the pointers resting on it.
+- **The web host writes whole copies only**, throttled to the same 5 minutes (it has no pointers and no encoder, §6): §4.3's
+  "web host writes the pointer" is not built, nor PEP 0010's. Its `recent` memory now holds history_every, not 30 s.
+- **Measured here (the "not verified" list of §14):** klauspost's encoder at `SpeedDefault`, window 8 MiB, one goroutine, spends
+  15 ms extra per 4 MiB of JSONL (275 MB/s; 5.3x on the test's lines, 11x on the PEP's real files), on top of 6 ms for the
+  sha256 and MD5. **Not verified:** R2's answers to a native PUT's ETag, a Range GET with `If-Match`, and `If-None-Match: *` on a
+  pointer: `internal/s3/r2check_test.go` now checks them (`scripts/check-r2`), and was not run against a real bucket. That Workers have no
+  zstd decoder at runtime is still the typings' word.
+- **Smaller changes:** records are written compact (`writeCompactJSON`); `history.json` remembers a path's kind and
+  `max(1 h, history_every)`; an old pruner leaves the new names alone because they do not parse as versions.
 
 ## Sources
 

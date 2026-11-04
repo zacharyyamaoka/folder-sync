@@ -51,12 +51,14 @@ func TestSharedModeIsRefusedInV0(t *testing.T) {
 
 func TestLoadRejects(t *testing.T) {
 	cases := map[string]string{
-		"unknown key":   "project = \"demo\"\nbucket = \"folder-sync\"\npasword = \"x\"\n",
-		"bad project":   "project = \"_trash\"\nbucket = \"folder-sync\"\n",
-		"bad bucket":    "project = \"demo\"\nbucket = \"Folder_Sync\"\n",
-		"bad peers dir": "project = \"demo\"\nbucket = \"folder-sync\"\npeers_dir = \"../x\"\n",
-		"bad interval":  "project = \"demo\"\nbucket = \"folder-sync\"\ninterval = \"100ms\"\n",
-		"bad mode":      "project = \"demo\"\nbucket = \"folder-sync\"\n[modes]\nx = \"mirror\"\n",
+		"unknown key":              "project = \"demo\"\nbucket = \"folder-sync\"\npasword = \"x\"\n",
+		"bad project":              "project = \"_trash\"\nbucket = \"folder-sync\"\n",
+		"bad bucket":               "project = \"demo\"\nbucket = \"Folder_Sync\"\n",
+		"bad peers dir":            "project = \"demo\"\nbucket = \"folder-sync\"\npeers_dir = \"../x\"\n",
+		"history_every under 30s":  "project = \"demo\"\nbucket = \"folder-sync\"\nhistory_every = \"10s\"\n",
+		"history_every not a time": "project = \"demo\"\nbucket = \"folder-sync\"\nhistory_every = \"often\"\n",
+		"bad interval":             "project = \"demo\"\nbucket = \"folder-sync\"\ninterval = \"100ms\"\n",
+		"bad mode":                 "project = \"demo\"\nbucket = \"folder-sync\"\n[modes]\nx = \"mirror\"\n",
 	}
 	for name, body := range cases {
 		dir := t.TempDir()
@@ -124,5 +126,27 @@ func TestNoHistoryDefaultAndEmpty(t *testing.T) {
 	}
 	if New("demo", "folder-sync").NoHistory[0] != "*.log" {
 		t.Error("a new config starts with no_history = [\"*.log\"]")
+	}
+}
+
+// TestHistoryEvery (PEP 0009 §5): five minutes unless the file says otherwise, and never less than 30 s.
+func TestHistoryEvery(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, FileName), []byte("project = \"demo\"\nbucket = \"folder-sync\"\n"), 0o644)
+	c, err := Load(dir)
+	if err != nil || c.HistoryEvery != "5m" || c.HistoryEveryDuration().Minutes() != 5 {
+		t.Fatalf("absent: %+v %v", c, err)
+	}
+	os.WriteFile(filepath.Join(dir, FileName), []byte("project = \"demo\"\nbucket = \"folder-sync\"\nhistory_every = \"45s\"\n"), 0o644)
+	c, err = Load(dir)
+	if err != nil || c.HistoryEveryDuration().Seconds() != 45 {
+		t.Fatalf("45s: %+v %v", c, err)
+	}
+	c.HistoryEvery = "2m"
+	if err := Write(dir, c); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := Load(dir); err != nil || again.HistoryEvery != "2m" {
+		t.Fatalf("written and read back: %+v %v", again, err)
 	}
 }

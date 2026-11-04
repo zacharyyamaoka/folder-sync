@@ -23,6 +23,7 @@
       "no_history": [
         "*.log"
       ],
+      "every_ms": 30000,
       "leaving": {
         "written_at": "2026-10-28T11:59:30.000Z"
       },
@@ -37,6 +38,7 @@
       "no_history": [
         "*.log"
       ],
+      "every_ms": 30000,
       "leaving": {
         "written_at": "2026-10-28T11:59:30.001Z"
       },
@@ -66,6 +68,7 @@
       "no_history": [
         "*.log"
       ],
+      "every_ms": 30000,
       "leaving": {
         "written_at": "2026-10-28T11:59:55.000Z"
       },
@@ -80,6 +83,7 @@
       "no_history": [
         "*.log"
       ],
+      "every_ms": 30000,
       "leaving": {
         "written_at": "2026-10-28T11:59:55.000Z"
       },
@@ -185,6 +189,191 @@
       },
       "last_kept_left_at": null,
       "keep": true
+    },
+    {
+      "name": "5 min: lived exactly 5 min is kept, whatever was kept just before",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-28T11:55:00.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:59:50.000Z",
+      "keep": true
+    },
+    {
+      "name": "5 min: lived 4 min 59.999 s, nothing kept yet: kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-28T11:55:00.001Z"
+      },
+      "last_kept_left_at": null,
+      "keep": true
+    },
+    {
+      "name": "5 min: lived 2 min, a version kept 4 min ago: not kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-28T11:58:00.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:56:00.000Z",
+      "keep": false,
+      "why": "burst"
+    },
+    {
+      "name": "5 min: lived 2 min, the last kept exactly 5 min ago: kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-28T11:58:00.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:55:00.000Z",
+      "keep": true
+    },
+    {
+      "name": "5 min: lived 2 min, the last kept 4 min 59.999 s ago: not kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "leaving": {
+        "written_at": "2026-10-28T11:58:00.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:55:00.001Z",
+      "keep": false,
+      "why": "burst"
+    },
+    {
+      "name": "history_every = 30 s (the least): lived 20 s, a version kept 40 s ago: kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "every_ms": 30000,
+      "leaving": {
+        "written_at": "2026-10-28T11:59:40.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:59:20.000Z",
+      "keep": true
+    },
+    {
+      "name": "history_every = 10 min: lived 8 min, a version kept 9 min ago: not kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "every_ms": 600000,
+      "leaving": {
+        "written_at": "2026-10-28T11:52:00.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:51:00.000Z",
+      "keep": false,
+      "why": "burst"
+    },
+    {
+      "name": "the pin: the newest kept version is a pointer and the new bytes are a rewrite: kept, inside the window",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "newest_kept_is_pointer": true,
+      "append_uploaded": false,
+      "leaving": {
+        "written_at": "2026-10-28T11:58:00.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:59:00.000Z",
+      "keep": true
+    },
+    {
+      "name": "the pin: the same, and the new bytes are an append the engine did not upload itself: kept",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "newest_kept_is_pointer": true,
+      "leaving": {
+        "written_at": "2026-10-28T11:58:00.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:59:00.000Z",
+      "keep": true
+    },
+    {
+      "name": "the pin lifts when the new bytes are an append the writer uploads itself: throttled as usual",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "newest_kept_is_pointer": true,
+      "append_uploaded": true,
+      "leaving": {
+        "written_at": "2026-10-28T11:58:00.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:59:00.000Z",
+      "keep": false,
+      "why": "burst"
+    },
+    {
+      "name": "the pin does not matter when the newest kept version is not a pointer",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "notes/plan.md",
+      "no_history": [
+        "*.log"
+      ],
+      "newest_kept_is_pointer": false,
+      "append_uploaded": false,
+      "leaving": {
+        "written_at": "2026-10-28T11:58:00.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:59:00.000Z",
+      "keep": false,
+      "why": "burst"
+    },
+    {
+      "name": "no_history outranks the pin",
+      "now": "2026-10-28T12:00:00.000Z",
+      "op": "replace",
+      "path": "logs/run.log",
+      "no_history": [
+        "*.log"
+      ],
+      "newest_kept_is_pointer": true,
+      "append_uploaded": false,
+      "leaving": {
+        "written_at": "2026-10-28T11:58:00.000Z"
+      },
+      "last_kept_left_at": "2026-10-28T11:59:00.000Z",
+      "keep": false,
+      "why": "no_history"
     }
   ],
   "prune_cases": [
@@ -433,6 +622,175 @@
       "keep": [
         "2026-10-22T11:59:00.000Z_7ac0a205723219c7"
       ]
+    }
+  ],
+  "anchor_cases": [
+    {
+      "name": "an anchor stays past its tier while a kept pointer rests on it",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "live": true,
+      "versions": [
+        {
+          "name": "2026-10-25T09:00:00.000Z_aaaaaaaaaaaaaaaa.1000.prefix",
+          "left_at": "2026-10-25T23:00:00.000Z"
+        },
+        {
+          "name": "2026-10-25T09:30:00.000Z_bbbbbbbbbbbbbbbb.1500.zst",
+          "left_at": "2026-10-25T10:00:00.000Z"
+        }
+      ],
+      "keep": [
+        "2026-10-25T09:00:00.000Z_aaaaaaaaaaaaaaaa.1000.prefix",
+        "2026-10-25T09:30:00.000Z_bbbbbbbbbbbbbbbb.1500.zst"
+      ],
+      "drop_pointers": [],
+      "drop": [],
+      "lost": []
+    },
+    {
+      "name": "a pointer the schedule drops takes no anchor with it; pointers are deleted before the keyframes",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "live": true,
+      "versions": [
+        {
+          "name": "2026-10-25T08:00:00.000Z_cccccccccccccccc",
+          "left_at": "2026-10-25T08:10:00.000Z"
+        },
+        {
+          "name": "2026-10-25T09:00:00.000Z_dddddddddddddddd.1000.prefix",
+          "left_at": "2026-10-25T09:05:00.000Z"
+        },
+        {
+          "name": "2026-10-25T09:30:00.000Z_eeeeeeeeeeeeeeee.1200.zst",
+          "left_at": "2026-10-25T23:30:00.000Z"
+        }
+      ],
+      "keep": [
+        "2026-10-25T09:30:00.000Z_eeeeeeeeeeeeeeee.1200.zst"
+      ],
+      "drop_pointers": [
+        "2026-10-25T09:00:00.000Z_dddddddddddddddd.1000.prefix"
+      ],
+      "drop": [
+        "2026-10-25T08:00:00.000Z_cccccccccccccccc"
+      ],
+      "lost": []
+    },
+    {
+      "name": "a pointer with no full object after it rests on the live file when the path is live",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "live": true,
+      "versions": [
+        {
+          "name": "2026-10-28T11:40:00.000Z_ffffffffffffffff.2000.prefix",
+          "left_at": "2026-10-28T11:50:00.000Z"
+        }
+      ],
+      "keep": [
+        "2026-10-28T11:40:00.000Z_ffffffffffffffff.2000.prefix"
+      ],
+      "drop_pointers": [],
+      "drop": [],
+      "lost": []
+    },
+    {
+      "name": "a dangling pointer (no full object after it, path not live) is dropped and reported lost",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "live": false,
+      "versions": [
+        {
+          "name": "2026-10-28T11:40:00.000Z_ffffffffffffffff.2000.prefix",
+          "left_at": "2026-10-28T11:50:00.000Z"
+        }
+      ],
+      "keep": [],
+      "drop_pointers": [
+        "2026-10-28T11:40:00.000Z_ffffffffffffffff.2000.prefix"
+      ],
+      "drop": [],
+      "lost": [
+        "2026-10-28T11:40:00.000Z_ffffffffffffffff.2000.prefix"
+      ]
+    },
+    {
+      "name": "everything older than keep_days goes, the pointer first, and none of it is lost",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "live": false,
+      "versions": [
+        {
+          "name": "2026-09-01T09:00:00.000Z_1111111111111111.1000.prefix",
+          "left_at": "2026-09-01T09:05:00.000Z"
+        },
+        {
+          "name": "2026-09-01T09:30:00.000Z_2222222222222222.1500.zst",
+          "left_at": "2026-09-01T09:35:00.000Z"
+        }
+      ],
+      "keep": [],
+      "drop_pointers": [
+        "2026-09-01T09:00:00.000Z_1111111111111111.1000.prefix"
+      ],
+      "drop": [
+        "2026-09-01T09:30:00.000Z_2222222222222222.1500.zst"
+      ],
+      "lost": []
+    },
+    {
+      "name": "a pointer beside a whole copy of the same version: the whole copy is the version, the pointer goes",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "live": true,
+      "versions": [
+        {
+          "name": "2026-10-28T11:40:00.000Z_3333333333333333.2000.prefix",
+          "left_at": "2026-10-28T11:50:00.000Z"
+        },
+        {
+          "name": "2026-10-28T11:40:00.000Z_3333333333333333.2000.zst",
+          "left_at": "2026-10-28T11:50:00.100Z"
+        }
+      ],
+      "keep": [
+        "2026-10-28T11:40:00.000Z_3333333333333333.2000.zst"
+      ],
+      "drop_pointers": [
+        "2026-10-28T11:40:00.000Z_3333333333333333.2000.prefix"
+      ],
+      "drop": [],
+      "lost": []
+    },
+    {
+      "name": "two pointers rest on one anchor; a plain copy counts as an anchor too",
+      "now": "2026-10-28T12:00:00.000Z",
+      "keep_days": 30,
+      "live": false,
+      "versions": [
+        {
+          "name": "2026-10-28T11:00:00.000Z_4444444444444444.100.prefix",
+          "left_at": "2026-10-28T11:10:00.000Z"
+        },
+        {
+          "name": "2026-10-28T11:20:00.000Z_5555555555555555.200.prefix",
+          "left_at": "2026-10-28T11:30:00.000Z"
+        },
+        {
+          "name": "2026-10-28T11:40:00.000Z_6666666666666666",
+          "left_at": "2026-10-28T11:50:00.000Z"
+        }
+      ],
+      "keep": [
+        "2026-10-28T11:00:00.000Z_4444444444444444.100.prefix",
+        "2026-10-28T11:20:00.000Z_5555555555555555.200.prefix",
+        "2026-10-28T11:40:00.000Z_6666666666666666"
+      ],
+      "drop_pointers": [],
+      "drop": [],
+      "lost": []
     }
   ]
 }

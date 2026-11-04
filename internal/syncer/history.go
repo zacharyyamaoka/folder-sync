@@ -5,7 +5,9 @@ package syncer
 // being the version the manifest lists; each published manifest gets a change record, and each round that wrote
 // peer files a pull record; restore requests are carried out and answered; and once a day the engine prunes its own
 // host's history to the schedule. WHY native S3 calls and not rclone's --backup-dir: --backup-dir can only append to
-// a name, so it cannot put a version under its path, and it has no conditional copy.
+// a name, so it cannot put a version under its path, and it has no conditional copy. A kept version is one of three
+// objects (docs/peps/0009): a pointer when the new bytes are an append the engine uploads itself, a zstd keyframe
+// from the copy made while the version was hashed, or the plain CopyObject of PEP 0007.
 
 import (
 	"context"
@@ -38,8 +40,9 @@ const (
 	// PruneEvery is how often the engine prunes its own host's history (with an hourly reconcile, so it adds its
 	// listings to a round that already lists).
 	PruneEvery = 24 * time.Hour
-	// keptFor is how long history.json remembers a path's last kept version: the burst rule reads 30 s of it, and
-	// a round whose manifest PUT failed reads it again in the next round to skip a second copy.
+	// keptFor is how long history.json remembers a path's last kept version, at the least: the throttle reads
+	// history_every of it, the pin reads the kind of it, and a round whose manifest PUT failed reads it again in the next
+	// round to skip a second copy. The record is kept for max(keptFor, history_every) (PEP 0009 §4.3).
 	keptFor = time.Hour
 )
 
@@ -52,6 +55,8 @@ type keptState struct {
 type keptPath struct {
 	At      string `json:"at"`      // when it left, RFC 3339
 	Version string `json:"version"` // its id under _history/
+	// Kind is the form it was kept in; "prefix" is the pin's trigger (PEP 0009 §4.3). Absent: a whole copy.
+	Kind history.Kind `json:"kind,omitempty"`
 }
 
 func (p *Project) loadKept() keptState {
@@ -66,8 +71,9 @@ func (p *Project) loadKept() keptState {
 }
 
 func (p *Project) saveKept(state keptState, now time.Time) error {
+	remember := max(keptFor, p.Config.HistoryEveryDuration())
 	for path, kept := range state.Paths {
-		if at, err := time.Parse(time.RFC3339Nano, kept.At); err != nil || now.Sub(at) > keptFor {
+		if at, err := time.Parse(time.RFC3339Nano, kept.At); err != nil || now.Sub(at) > remember {
 			delete(state.Paths, path)
 		}
 	}
@@ -87,6 +93,11 @@ type leaving struct {
 	Kept string // its version id under _history/; "" when not kept
 	Why  string // why not kept
 	Err  error  // the copy failed: the path is held this round
+	// Append: the new bytes are an append that this round uploads itself, from the bytes it hashed. Only then may the
+	// old version be kept as a pointer, and the pin lifts (docs/peps/0009 §4).
+	Append bool
+	// Form is the form the version was kept in.
+	Form history.Kind
 }
 
 // keepLeaving applies the write-time rule to each leaving version and copies the ones it keeps, eight at once.
@@ -99,6 +110,7 @@ func (p *Project) keepLeaving(ctx context.Context, items []*leaving, now time.Ti
 		return err
 	}
 	state := p.loadKept()
+	every := p.Config.HistoryEveryDuration()
 	var copies []*leaving
 	for _, it := range items {
 		written, err := time.Parse(time.RFC3339Nano, it.Old.WrittenAt)
@@ -111,51 +123,93 @@ func (p *Project) keepLeaving(ctx context.Context, items []*leaving, now time.Ti
 		if seen {
 			lastKept, _ = time.Parse(time.RFC3339Nano, last.At)
 		}
-		keep, why := history.Keep(it.Op, it.Path, written, now, lastKept, matcher)
+		keep, why := history.Keep(history.Write{Op: it.Op, Path: it.Path, WrittenAt: written, At: now, LastKept: lastKept, Every: every,
+			NewestKeptIsPointer: seen && last.Kind == history.KindPrefix, AppendUploaded: it.Append}, matcher)
 		if !keep {
 			it.Why = why
 			continue
 		}
 		if id, err := history.VersionID(it.Old.WrittenAt, it.Old.SHA256); err == nil && seen && last.Version == id {
-			it.Kept = id // kept by a round whose manifest never landed: copying again could overwrite it with the new bytes
-			continue
+			// kept by a round whose manifest never landed: copying again could overwrite it with the new bytes. But a
+			// pointer rests on the start of what is live, so it only stands if these new bytes are that append too;
+			// otherwise this version needs a whole copy beside it.
+			if last.Kind != history.KindPrefix || it.Append {
+				it.Kept, it.Form = id, last.Kind
+				continue
+			}
 		}
 		copies = append(copies, it)
 	}
 	parallel(len(copies), func(i int) { copies[i].Err = p.keepVersion(ctx, copies[i]) })
 	for _, it := range copies {
 		if it.Err == nil && it.Kept != "" {
-			state.Paths[it.Path] = keptPath{At: manifest.FormatTime(now), Version: it.Kept}
+			state.Paths[it.Path] = keptPath{At: manifest.FormatTime(now), Version: it.Kept, Kind: it.Form}
 		}
 	}
 	return p.saveKept(state, now)
 }
 
-// keepVersion copies one leaving version to _history/. The copy is conditioned on the live object being the version
-// the manifest lists (its object_etag); a 412 means it is not, and whatever is there is kept as <LastModified>_unlisted
-// instead, so nothing is lost and nothing is mislabelled. A source that is gone asks the next round to reconcile.
+// keepVersion keeps one leaving version in _history/, in the form PEP 0009 §4-§6 picks:
+//   - an append this round uploads itself: a pointer, about 125 bytes, created once;
+//   - a version whose compressed copy was made while it was hashed: that copy as <version>.<size>.zst, created once;
+//   - anything else: a server-side copy of the live object, as PEP 0007 does.
+//
+// The copy is conditioned on the live object being the version the manifest lists (its object_etag); a 412 means it is
+// not, and whatever is there is kept as <LastModified>_unlisted instead, so nothing is lost and nothing is mislabelled.
+// A source that is gone asks the next round to reconcile.
 func (p *Project) keepVersion(ctx context.Context, it *leaving) error {
 	id, err := history.VersionID(it.Old.WrittenAt, it.Old.SHA256)
 	if err != nil {
 		return err
 	}
-	key := history.Key(p.Root, p.Config.Project, p.Host.ID, it.Path, id)
+	form := history.KindFull
+	var body []byte
+	switch {
+	case it.Append && it.Old.Size > 0:
+		form = history.KindPrefix
+		body = history.PrefixBody{Schema: history.PrefixSchema, Size: it.Old.Size, SHA256: it.Old.SHA256}.Marshal()
+	default:
+		if data, err := os.ReadFile(p.shadowPath(it.Old.SHA256)); err == nil && it.Old.Size > 0 {
+			form, body = history.KindZst, data
+		}
+	}
+	key := history.KeyOf(p.Root, p.Config.Project, p.Host.ID, it.Path, id, form, it.Old.Size)
+	if len(key) > history.MaxKeyBytes && form != history.KindFull {
+		// the suffix pushed the key past R2's limit; the whole copy's name may still fit (and the live object is still the
+		// old version here: the upload comes after)
+		form, body = history.KindFull, nil
+		key = history.Key(p.Root, p.Config.Project, p.Host.ID, it.Path, id)
+	}
 	if len(key) > history.MaxKeyBytes {
 		it.Why = history.WhyKeyTooLong
 		return nil
 	}
+	if form != history.KindFull {
+		contentType := "application/zstd"
+		if form == history.KindPrefix {
+			contentType = "application/json"
+		}
+		// WHY created once: a round that kept this version and lost its answer writes it again, and the name says what
+		// the bytes are, so the object that is there is the object wanted.
+		if _, err := p.S3.Put(p.Config.Bucket, key, body, contentType, "*", ""); err != nil && !errors.Is(err, s3.ErrPreconditionFailed) {
+			return err
+		}
+		it.Kept, it.Form = id, form
+		return nil
+	}
 	src := p.HostPrefix(p.Host.ID) + "/" + it.Path
+	key = history.Key(p.Root, p.Config.Project, p.Host.ID, it.Path, id)
 	if it.Old.Size > maxCopyBytes {
 		if _, err := p.Rclone.Run(ctx, "copyto", rclone.Path(p.Config.Bucket, src), rclone.Path(p.Config.Bucket, key)); err != nil {
 			return err
 		}
-		it.Kept = id
+		it.Kept, it.Form = id, history.KindFull
 		return nil
 	}
 	err = p.S3.Copy(p.Config.Bucket, src, key, it.Old.ObjectETag)
 	switch {
 	case err == nil:
-		it.Kept = id
+		it.Kept, it.Form = id, history.KindFull
 		return nil
 	case errors.Is(err, s3.ErrPreconditionFailed):
 		stat, err := p.S3.HeadObject(p.Config.Bucket, src)
@@ -167,7 +221,7 @@ func (p *Project) keepVersion(ctx context.Context, it *leaving) error {
 			return err
 		}
 		p.say("history: %s in the bucket was not the version the manifest listed; kept as %s", it.Path, unlisted)
-		it.Kept = unlisted
+		it.Kept, it.Form = unlisted, history.KindFull
 		return nil
 	case errors.Is(err, s3.ErrNotFound):
 		p.requestReconcile()
@@ -318,7 +372,7 @@ func (p *Project) queueChanges(m manifest.Manifest, events []synclog.Event) erro
 	}
 	record := history.ChangeRecord{Schema: history.ChangesSchema, Project: m.Project, HostID: m.HostID, HostName: m.HostName,
 		Seq: m.Seq, At: m.GeneratedAt, By: "machine", Events: events}
-	return writeJSON(filepath.Join(p.pendingDir(), fmt.Sprintf("seq-%012d.json", m.Seq)), record)
+	return writeCompactJSON(filepath.Join(p.pendingDir(), fmt.Sprintf("seq-%012d.json", m.Seq)), record)
 }
 
 // queuePulls keeps the pull record of a round that wrote or removed peer files.
@@ -341,7 +395,7 @@ func (p *Project) queuePulls(events []synclog.Event, at time.Time) error {
 	stamp := history.FormatMs(at)
 	record := history.PullRecord{Schema: history.PullsSchema, Project: p.Config.Project, HostID: p.Host.ID, HostName: p.Host.Name,
 		At: stamp, Events: pulls}
-	return writeJSON(filepath.Join(p.pendingDir(), fmt.Sprintf("pull-%d.json", at.UnixMilli())), record)
+	return writeCompactJSON(filepath.Join(p.pendingDir(), fmt.Sprintf("pull-%d.json", at.UnixMilli())), record)
 }
 
 // FlushRecords PUTs every pending change and pull record, each created once (If-None-Match: *: a record whose PUT
@@ -646,10 +700,18 @@ func (p *Project) restoreOne(ctx context.Context, stamp string, item history.Req
 	}
 	tmp := filepath.Join(filepath.Dir(local), restoreTempPrefix+newJobID()[:8])
 	defer os.Remove(tmp)
-	key := history.Key(p.Root, p.Config.Project, p.Host.ID, path, item.Version)
-	if err := p.S3.GetToFile(p.Config.Bucket, key, tmp); errors.Is(err, s3.ErrNotFound) {
+	liveETag := ""
+	if published, ok := p.publishedEntry(path); ok {
+		liveETag = published.ObjectETag
+	}
+	// whatever form the version is stored in (a pointer, a keyframe, a whole copy), the bytes that come back are checked
+	// against its name; the sha16 check below stays, for an unlisted version's other bytes
+	switch err := p.FetchVersion(ctx, p.Host.ID, path, item.Version, tmp, liveETag); {
+	case errors.Is(err, ErrVersionGone):
 		return false, history.ErrPruned, ""
-	} else if err != nil {
+	case errors.Is(err, ErrVersionMismatch):
+		return false, history.ErrMismatch, err.Error()
+	case err != nil:
 		return false, history.ErrFailed, err.Error()
 	}
 	sum, err := HashFile(tmp)
@@ -701,17 +763,27 @@ func (p *Project) publishedEntry(path string) (manifest.Entry, bool) {
 
 // History reads.
 
-// Versions lists one path's kept versions on host (one delimiter listing), oldest first.
+// Versions lists one path's kept versions on host (one delimiter listing), oldest first, one per version id: the whole
+// form when a version is stored in more than one (docs/peps/0009 §4.3).
 func (p *Project) Versions(host, path string) ([]history.Version, error) {
-	listed, err := p.S3.List(p.Config.Bucket, history.PathPrefix(p.Root, p.Config.Project, host, path), "/")
+	all, err := p.versionObjects(host, path)
 	if err != nil {
 		return nil, err
 	}
-	return parseVersions(listed.Objects), nil
+	return collapse(all), nil
 }
 
-// AllVersions lists every kept version of host (one listing per 1,000 versions).
+// AllVersions lists every kept version of host (one listing per 1,000 versions), one per version id.
 func (p *Project) AllVersions(host string) ([]history.Version, error) {
+	all, err := p.allObjects(host)
+	if err != nil {
+		return nil, err
+	}
+	return collapse(all), nil
+}
+
+// allObjects lists every object under host's history, in every form.
+func (p *Project) allObjects(host string) ([]history.Version, error) {
 	listed, err := p.S3.List(p.Config.Bucket, history.Prefix(p.Root, p.Config.Project, host), "")
 	if err != nil {
 		return nil, err
@@ -719,6 +791,8 @@ func (p *Project) AllVersions(host string) ([]history.Version, error) {
 	return parseVersions(listed.Objects), nil
 }
 
+// parseVersions reads the listed history objects. A version's Size is its own: the object's for a whole copy, the one in
+// the name for a keyframe or a pointer; Stored is the object's.
 func parseVersions(objects []s3.Object) []history.Version {
 	var out []history.Version
 	for _, obj := range objects {
@@ -726,10 +800,30 @@ func parseVersions(objects []s3.Object) []history.Version {
 		if err != nil {
 			continue
 		}
-		v.LeftAt, v.Size = obj.LastModified, obj.Size
+		v.LeftAt, v.Stored = obj.LastModified, obj.Size
+		if v.Kind == history.KindFull {
+			v.Size = obj.Size
+		}
 		out = append(out, v)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Version != out[j].Version {
+			return out[i].Version < out[j].Version
+		}
+		return formOrder(out[i].Kind) < formOrder(out[j].Kind)
+	})
+	return out
+}
+
+// collapse keeps one object per version id (parseVersions sorts the whole form first).
+func collapse(versions []history.Version) []history.Version {
+	var out []history.Version
+	for _, v := range versions {
+		if len(out) > 0 && out[len(out)-1].Version == v.Version {
+			continue
+		}
+		out = append(out, v)
+	}
 	return out
 }
 
@@ -805,22 +899,41 @@ func (p *Project) pruneDue(now time.Time) bool {
 	return due(state.At, PruneEvery, now)
 }
 
-// Prune deletes what has aged out of this host's history (the schedule, docs/CONTRACT.md "What is kept"), its
-// change and pull records, its restore requests (bucket and local) 30 days after their at, and its legacy _trash/
-// 30 days after each stamp. WHY each engine too, not only the folder's object: a v0 bucket-key folder has no
-// accounts server, so this is its only pruner; two pruners on one key are harmless (the rule is deterministic).
-func (p *Project) Prune() (int, error) {
+// Prune deletes what has aged out of this host's history (the schedule and its anchors, docs/CONTRACT.md "What is
+// kept"), its change and pull records, its restore requests (bucket and local) 30 days after their at, and its legacy
+// _trash/ 30 days after each stamp. WHY each engine too, not only the folder's object: a v0 bucket-key folder has no
+// accounts server, so this is its only pruner; two pruners on one key are harmless (the rule is deterministic). Pointers
+// go before the keyframes they rest on, so a prune cut off halfway strands none; a pointer whose bytes are already gone
+// is deleted and reported to result as a history_lost event (PEP 0009 §7).
+func (p *Project) Prune(result *Result) (int, error) {
 	now := p.Now()
 	cutoff := now.Add(-history.KeepDays * 24 * time.Hour)
-	var drop []string
-	all, err := p.AllVersions(p.Host.ID)
+	var pointers, drop []string
+	all, err := p.allObjects(p.Host.ID)
 	if err != nil {
 		return 0, err
 	}
-	for _, group := range history.ByPath(all) {
-		_, gone := history.Prune(group, now, history.KeepDays)
-		for _, v := range gone {
+	live := map[string]bool{}
+	if m, err := p.ownManifest(); err == nil {
+		for _, e := range m.Files {
+			live[e.Path] = true
+		}
+	}
+	for path, group := range history.ByPath(all) {
+		plan := history.PruneGroup(group, now, history.KeepDays, live[path])
+		for _, v := range plan.DropPointers {
+			pointers = append(pointers, v.Key)
+		}
+		for _, v := range plan.Drop {
 			drop = append(drop, v.Key)
+		}
+		for _, v := range plan.Lost {
+			p.say("history: %s: the version of %s is gone (its bytes were the start of a file that is no longer there)", path, v.Version)
+			if result != nil {
+				ev := p.fileEvent("history_lost", now)
+				ev.Level, ev.Path, ev.From, ev.Why = "warn", path, v.Version, "its bytes are gone: no full copy after this prefix pointer, and the file is not published"
+				result.Events = append(result.Events, ev)
+			}
 		}
 	}
 	changes := history.ChangesPrefix(p.Root, p.Config.Project, p.Host.ID)
@@ -861,16 +974,21 @@ func (p *Project) Prune() (int, error) {
 			drop = append(drop, obj.Key)
 		}
 	}
-	errs := make([]error, len(drop))
-	parallel(len(drop), func(i int) { errs[i] = p.S3.Delete(p.Config.Bucket, drop[i]) })
-	if err := errors.Join(errs...); err != nil {
-		return 0, err
+	// WHY two batches: a pointer is always deleted before the keyframe it rests on, so a prune that stops halfway
+	// never leaves one resting on nothing
+	deleted := len(pointers) + len(drop)
+	for _, batch := range [][]string{pointers, drop} {
+		errs := make([]error, len(batch))
+		parallel(len(batch), func(i int) { errs[i] = p.S3.Delete(p.Config.Bucket, batch[i]) })
+		if err := errors.Join(errs...); err != nil {
+			return 0, err
+		}
 	}
 	p.pruneLocalRequests(cutoff)
-	if len(drop) > 0 {
-		p.logf("prune: deleted %d objects older than the schedule keeps", len(drop))
+	if deleted > 0 {
+		p.logf("prune: deleted %d objects older than the schedule keeps", deleted)
 	}
-	return len(drop), writeJSON(p.statePath("prune.json"), pruneState{At: manifest.FormatTime(now)})
+	return deleted, writeJSON(p.statePath("prune.json"), pruneState{At: manifest.FormatTime(now)})
 }
 
 func (p *Project) pruneLocalRequests(cutoff time.Time) {

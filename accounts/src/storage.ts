@@ -18,7 +18,7 @@
 import type { App } from "./apps.ts";
 import { bucketFor, fail, json, READ_TTL_S, session, type Deps, type Env } from "./app.ts";
 import { userRoot } from "./creds.ts";
-import { parseVersion } from "./history.ts";
+import { parseName, parseVersion } from "./history.ts";
 import { overQuota, quotaOf } from "./quota.ts";
 import type { S3Bucket } from "./s3-bucket.ts";
 
@@ -73,7 +73,9 @@ function classify({ key, size, lastModified }: Listed, root: string): Item {
 	const base = { size, modified: lastModified, keyed: null as number | null };
 	const [top, project, host] = parts;
 	if (top === "_history" && parts.length >= 5) {
-		const version = parseVersion(parts[parts.length - 1]);
+		// WHY the name, not the id: an object may be <version>.<size>.zst or .prefix (PEP 0009); its id is what carries the time
+		const name = parseName(parts[parts.length - 1]);
+		const version = name ? parseVersion(name.id) : null;
 		return { ...base, kind: "history", project, host, path: parts.slice(3, -1).join("/"), keyed: version?.written_at ? Date.parse(version.written_at) : null };
 	}
 	const stamp = parts.length >= 5 ? STAMP.exec(parts[3]) : null;

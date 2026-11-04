@@ -1,0 +1,44 @@
+{
+  "fixture": "folder-sync-prefix-bodies/1",
+  "valid": [
+    {
+      "name": "2026-10-28T20:31:00.117Z_9f2c1a3b4c5d6e7f.4194304.prefix",
+      "json": "{\"schema\":\"folder-sync-prefix/1\",\"size\":4194304,\"sha256\":\"9f2c1a3b4c5d6e7f00112233445566778899aabbccddeeff0011223344556677\"}",
+      "body": {
+        "schema": "folder-sync-prefix/1",
+        "size": 4194304,
+        "sha256": "9f2c1a3b4c5d6e7f00112233445566778899aabbccddeeff0011223344556677"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "why": "size 0",
+      "json": "{\"schema\":\"folder-sync-prefix/1\",\"size\":0,\"sha256\":\"9f2c1a3b4c5d6e7f00112233445566778899aabbccddeeff0011223344556677\"}"
+    },
+    {
+      "why": "an unknown schema",
+      "json": "{\"schema\":\"folder-sync-prefix/2\",\"size\":10,\"sha256\":\"9f2c1a3b4c5d6e7f00112233445566778899aabbccddeeff0011223344556677\"}"
+    },
+    {
+      "why": "a short sha256",
+      "json": "{\"schema\":\"folder-sync-prefix/1\",\"size\":10,\"sha256\":\"9f2c1a3b4c5d6e7f\"}"
+    },
+    {
+      "why": "an upper-case sha256",
+      "json": "{\"schema\":\"folder-sync-prefix/1\",\"size\":10,\"sha256\":\"9F2C1A3B4C5D6E7F00112233445566778899AABBCCDDEEFF0011223344556677\"}"
+    },
+    {
+      "why": "an extra field",
+      "json": "{\"schema\":\"folder-sync-prefix/1\",\"size\":10,\"sha256\":\"9f2c1a3b4c5d6e7f00112233445566778899aabbccddeeff0011223344556677\",\"anchor\":\"x\"}"
+    },
+    {
+      "why": "a fractional size",
+      "json": "{\"schema\":\"folder-sync-prefix/1\",\"size\":10.5,\"sha256\":\"9f2c1a3b4c5d6e7f00112233445566778899aabbccddeeff0011223344556677\"}"
+    },
+    {
+      "why": "not JSON",
+      "json": "folder-sync-prefix/1"
+    }
+  ]
+}

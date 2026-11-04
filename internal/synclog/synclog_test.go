@@ -415,3 +415,11 @@ func TestConcurrentEmitsWriteWholeLines(t *testing.T) {
 		generic(t, line)
 	}
 }
+
+// TestHistoryLostIsAWarning: the pruner's report of a prefix pointer whose bytes are gone (docs/peps/0009 §7.4) is a warn
+// by the schema, whether or not its caller says so.
+func TestHistoryLostIsAWarning(t *testing.T) {
+	if got := levelOf(Event{Event: "history_lost", Path: "logs/a.jsonl"}); got != "warn" {
+		t.Fatalf("level %q, want warn", got)
+	}
+}

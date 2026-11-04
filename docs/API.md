@@ -97,7 +97,10 @@ public), each with what their role may see.
   1,000 (`more`). `?version=<id>` answers that version's bytes, typed by suffix as the files route is, with
   `X-Folder-Sync-Version: <id>`, `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff` and, for
   `.html`/`.htm`/`.svg`, `Content-Security-Policy: sandbox`. A version that has been pruned is `410 pruned`; an id that
-  is not one is `400 bad_version`.
+  is not one is `400 bad_version`. A version's `size` is its own whatever form the bucket keeps it in (a whole copy, a
+  `.zst` keyframe or a `.prefix` pointer, docs/CONTRACT.md "Deletions and history"); the bytes are decoded and checked
+  against the version's name before they are sent, bytes that fail are `502 corrupt`, and on the Worker a keyframe or pointer over
+  32 MiB is `413 too_large` (restore it from a machine).
 - **`files`** is a live file's bytes, as PEP 0003 §3.3 serves them online: typed by suffix, `ETag: "<sha256>"`,
   `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox` for
   `.html`/`.htm`/`.svg`, `Accept-Ranges: bytes` with one `Range` (`206`), `If-None-Match` (`304`), `If-Range` and
@@ -147,6 +150,7 @@ Every non-2xx JSON answer is `{ "error": "<code>", "why": "<sentence>" }` (PEP 0
 | 415 | `json_only` | a `POST` body that is not JSON | both |
 | 421 | `wrong_host` | `Host` is not `127.0.0.1:<port>` | serve |
 | 501 | `online_only` | purge | serve |
+| 502 | `corrupt` | the bytes stored for a version are not that version's: a `.zst` that does not open to its size, or a prefix pointer whose anchor does not hash to its `sha256` (PEP 0009 §4.3). Something outside folder-sync changed the history; the version is not served | both |
 | 503 | `recovering` | the web host is settling a cut-off change (PEP 0003) | Worker |
 | 503 | `unavailable` | a route that reads the bucket (`history`, `files`, `deleted`) could not reach it: no network, or sync's credentials did not open the folder | serve |
 

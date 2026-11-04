@@ -207,7 +207,8 @@ const rules = [
 			if (doc.fixture !== "folder-sync-history-keys/1") errors.push("fixture must be folder-sync-history-keys/1");
 			for (const [i, v] of (doc.valid ?? []).entries()) {
 				errors.push(...valid(v, "history.schema.json").map((e) => `valid[${i}]: ${e}`));
-				const key = `${v.root}_history/${v.project}/${v.host}/${v.path}/${v.version}`;
+				const suffix = v.kind && v.kind !== "full" ? `.${v.size}.${v.kind}` : "";
+				const key = `${v.root}_history/${v.project}/${v.host}/${v.path}/${v.version}${suffix}`;
 				if (v.key !== key) errors.push(`valid[${i}]: key must be ${key}`);
 				if (!v.unlisted && v.version !== `${v.written_at}_${v.sha16}`) errors.push(`valid[${i}]: version must be <written_at>_<sha16>`);
 				if (v.unlisted && v.version !== v.version.replace(/_.*$/, "_unlisted")) errors.push(`valid[${i}]: an unlisted version ends _unlisted`);
@@ -236,6 +237,40 @@ const rules = [
 		},
 	},
 	{ dir: "retention", ext: ".json", run: (path) => valid(json(path), "retention.schema.json") },
+	{ dir: "zstd", ext: ".json", run: (path) => valid(json(path), "zstd-frames.schema.json") },
+	{
+		dir: "prefix",
+		ext: ".json",
+		run: (path) => {
+			const doc = json(path);
+			const errors = [];
+			if (doc.fixture !== "folder-sync-prefix-bodies/1") errors.push("fixture must be folder-sync-prefix-bodies/1");
+			for (const [i, v] of (doc.valid ?? []).entries()) {
+				let body;
+				try {
+					body = JSON.parse(v.json);
+				} catch {
+					errors.push(`valid[${i}]: json is not JSON`);
+					continue;
+				}
+				errors.push(...valid(body, "prefix.schema.json").map((e) => `valid[${i}]: ${e}`));
+				if (JSON.stringify(body) !== v.json) errors.push(`valid[${i}]: json must be the compact form the engine writes`);
+				if (JSON.stringify(v.body) !== v.json) errors.push(`valid[${i}]: body must be json parsed`);
+				if (!new RegExp(`^.{24}_${body.sha256.slice(0, 16)}\\.${body.size}\\.prefix$`).test(v.name)) errors.push(`valid[${i}]: name must be <version>.<size>.prefix for this body`);
+			}
+			for (const [i, v] of (doc.invalid ?? []).entries()) {
+				let body;
+				try {
+					body = JSON.parse(v.json);
+				} catch {
+					continue;
+				}
+				if (valid(body, "prefix.schema.json").length === 0) errors.push(`invalid[${i}] (${v.why}) is accepted`);
+			}
+			if (!doc.valid?.length || !doc.invalid?.length) errors.push("valid and invalid must each be non-empty");
+			return errors;
+		},
+	},
 	{ dir: "serve", ext: ".json", run: (path) => valid(json(path), "view-api.schema.json#/$defs/serve_json") },
 ];
 

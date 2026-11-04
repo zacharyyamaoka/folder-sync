@@ -219,7 +219,7 @@ func (p *Project) Round(ctx context.Context, opts Options) (Result, error) {
 		p.say("change records: %v (sent again next round)", p.Creds.Scrub(err.Error()))
 	}
 	if result.Reconciled && runErr == nil && p.pruneDue(p.Now()) {
-		if _, err := p.Prune(); err != nil {
+		if _, err := p.Prune(&result); err != nil {
 			p.say("prune: %v (tried again with the next reconcile)", p.Creds.Scrub(err.Error()))
 		}
 	}

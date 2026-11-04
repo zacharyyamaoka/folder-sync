@@ -1,0 +1,1 @@
+{"schema":"folder-sync-event/1","event":"history_lost","at":"2026-11-04T04:00:00.000Z","level":"warn","project":"notes","host":"b55e9683-7854-4121-a56a-9bae7c3ab1da","host_name":"bam-GPU","path":"logs/events.jsonl","from":"2026-11-04T03:40:00.000Z_ffffffffffffffff","why":"its bytes are gone: no full copy after this prefix pointer, and the file is not published"}
