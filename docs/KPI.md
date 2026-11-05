@@ -102,6 +102,20 @@ once this lane is merged.
 
 Tests: `node --test 'bench/**/*.test.mjs'`.
 
+## Is it syncing? (health checks, not objectives)
+
+Zach, 2026-11-04, after a killed sync left an empty lock that blocked a folder for 30 minutes and nothing noticed: "monitor live ... that it's actually syncing ... if things never propagate it times out after like 10 minutes". Two new KPI names in the same `vt-kpi-point/1` shape (the shape is unchanged); they have no target and no card, they are alarms. `bench/kpi/canary.mjs`, every 5 minutes (`folder-sync-canary.timer`):
+
+| KPI | Meaning | Points |
+|---|---|---|
+| `sync_canary_ms` | A small file `canary.txt` is rewritten in a dedicated folder (project `canary-sync`, `~/.local/share/folder-sync-canary/canary-sync`, never one of Zach's own) synced by the **installed** engine (`folder-sync sync --watch`, started for the check and stopped after it); the clock runs until `GET /fs/v1/folders/canary-sync/files/<host>/canary.txt` serves the same bytes (the production propagation stage's reader, `bench/latency/harness.mjs` `Online`). | `labels.result`: `ok` (value in ms), `stalled` (not online in **10 minutes**, or a cause found sooner: over quota, signed out, server error), `offline` (no route to the server). A stalled or offline run is a `failed` point with `labels.reason`; `labels.cause` is `lock` (every round refused by a held lock, holder in `detail`), `engine_exited`, `no_propagation`, `quota`, `auth`, `server` or `offline`. |
+| `sync_stalled_folders` | Every synced folder in `folder-sync status --json` (not the bench's own and not the canary's): no clean round (`last_clean_run`) for more than max(10 minutes, 3 x the folder's interval) **while online**, or a round holding its lock for longer than that. | `value` = the number stalled, `labels.checked`, `labels.stalled` = `[{project, folder, cause, detail, age_min, interval_s}]` (`cause`: `lock` with pid and age from the project's lock file, `quota`, `auth`, `round_failed` with the error, `no_rounds` when nothing is running rounds for it), `labels.result` `ok`/`stalled`/`offline`. |
+
+- **Offline is not red.** Reachability is one `GET /fs/v1/usage` (retried twice on a 5xx; a refused connection, DNS failure or timeout is "no route"). With no route both checks write a `failed` point reading "offline, not measured" and raise no alert; if the network drops during the 10-minute wait the result is `offline`, not `stalled`.
+- **The alert reaches Zach once per episode.** A key (`canary`, `folder:<project>`) first seen stalled opens an episode and fires one `notify-send` (no focus steal; `FOLDER_SYNC_NOTIFY_CMD`, a JSON argv, replaces it in tests); later stalled checks stay quiet; an `ok` check closes it; offline leaves it open. The episodes are in `~/.local/state/folder-sync-kpi/canary-alerts.json`. The dev view shows a red "Sync stalled" bar with the causes at the top; a check that has not run for 20 minutes reads "not being checked", never "fine".
+- **Install** (this repo ships the units and does not enable them): `node bench/kpi/canary.mjs install-timer` writes `folder-sync-canary.service` and `.timer` to `~/.config/systemd/user` and enables the timer (`--print` shows them, writes nothing); `node bench/kpi/canary.mjs run` is one check by hand (`--no-canary`, `--no-folders`, `--no-notify`, `--timeout-s`); `status` prints the newest points and the open episodes. The first run creates the project `canary-sync` on the account.
+- **Tests**: `bench/kpi/health.test.mjs` (the classifiers: canary ok / stalled / offline and its causes, a folder's verdict from its last clean round and lock, one alert per episode, the point shapes) and `bench/kpi/canary.e2e.test.mjs` (the local stack: a healthy canary is timed; a lock held by a live process makes it `stalled` with cause `lock` within the 12 s test timeout, with the quiet folder beside it named, and one notification; the holder dies and it recovers; a closed port is `offline` with no alert).
+
 ## What is red (first full run, 2026-11-04, code `18aabfc`)
 
 | | Result | vs target |

@@ -5,6 +5,8 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 port="${PORT:-8137}"
 out="$root/site/dev"
+# the gate history: the CI runs' gates.json (gh, cached by run id) and the local run; offline it falls back to the cache
+"$root/scripts/gates-history" --gates "${GATES:-/home/bam/folder-sync/reports/status/gates.json}" --out "$(dirname "${GATES:-/home/bam/folder-sync/reports/status/gates.json}")/gates-history.jsonl" || echo "dev-view: gates-history failed; showing what is cached" >&2
 "$root/scripts/status" \
 	--kpi "${KPI:-$HOME/vt/zach/producers/folder-sync/kpi_series.jsonl}" \
 	--gates "${GATES:-/home/bam/folder-sync/reports/status/gates.json}" \
