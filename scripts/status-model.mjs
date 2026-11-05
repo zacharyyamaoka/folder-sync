@@ -54,10 +54,10 @@ const LEGACY = {
 };
 const LEGACY_ENV = { local: "test", prod: "prod" };
 const KNOWN_KPIS = new Set(OBJECTIVES.flatMap((o) => o.metrics.map((m) => m.kpi)));
-// Health checks (docs/KPI.md "Is it syncing?"): not objectives, so they have no card and no target; they get the live strip.
-export const HEALTH_KPIS = ["sync_canary_ms", "sync_stalled_folders"];
-// a check that has not run for 4 timer periods (5 minutes each) is not "ok", it is not being run
-export const HEALTH_STALE_MS = 20 * 60_000;
+// Health check (docs/KPI.md "Is it syncing?"): not an objective, so it has no card and no target; it gets the live bar.
+export const HEALTH_KPIS = ["sync_stalled_folders"];
+// WHY 90 minutes: a quiet check writes one heartbeat point an hour (bench/kpi/health.mjs), so nothing for 90 minutes means it is not running
+export const HEALTH_STALE_MS = 90 * 60_000;
 export const HISTORY_RUNS = 40;
 const HISTORY_POINTS = 600;
 const ENVS = ["test", "prod"];
@@ -307,39 +307,22 @@ function buildGates(source, warnings) {
 	return { gates, gateSummary, run: doc ? { run_at: doc.run_at ?? null, code_sha: doc.code_sha ?? null, branch: doc.branch ?? null } : null };
 }
 
-// "Is it syncing?": the live stall check's two health KPIs (bench/kpi/canary.mjs). The verdict is the newest production point of
-// each: a stalled canary or any stalled folder is red; nothing recent is "not being checked" (the timer is off), not "fine".
+// "Is it syncing?": the passive stall check's health KPI (bench/kpi/stall.mjs). The verdict is the newest production point: any stalled
+// folder is red; nothing recent is "not being checked" (the timer is off), not "fine"; offline is never red.
 function buildHealth(points, nowMs) {
 	const mine = points.filter((p) => HEALTH_KPIS.includes(p.kpi) && p.env === "prod").sort((a, b) => a.t - b.t);
-	const of = (kpi) => mine.filter((p) => p.kpi === kpi);
 	const result = (p) => (typeof p.labels.result === "string" ? p.labels.result : p.failed ? "stalled" : "ok");
-	const shape = (p) => ({ t: iso(p.t), value: p.v, result: result(p), cause: p.labels.cause ?? null, detail: String(p.labels.detail ?? p.labels.reason ?? ""), sha: p.sha });
-	const canaryAll = of("sync_canary_ms");
-	const foldersAll = of("sync_stalled_folders");
-	const latestCanary = canaryAll.at(-1);
-	const latestFolders = foldersAll.at(-1);
-	const canary = latestCanary ? shape(latestCanary) : null;
-	const folders = latestFolders ? {
-		...shape(latestFolders), checked: Number(latestFolders.labels.checked ?? 0),
-		stalled: (Array.isArray(latestFolders.labels.stalled) ? latestFolders.labels.stalled : []).map((f) => ({ project: String(f?.project ?? ""), cause: String(f?.cause ?? ""), detail: String(f?.detail ?? ""), age_min: Number.isFinite(f?.age_min) ? f.age_min : null })),
+	const latest = mine.at(-1);
+	const folders = latest ? {
+		t: iso(latest.t), value: latest.v, result: result(latest), sha: latest.sha, checked: Number(latest.labels.checked ?? 0), pending: Number(latest.labels.pending ?? 0),
+		stalled: (Array.isArray(latest.labels.stalled) ? latest.labels.stalled : []).map((f) => ({ project: String(f?.project ?? ""), cause: String(f?.cause ?? ""), detail: String(f?.detail ?? ""), age_min: Number.isFinite(f?.age_min) ? f.age_min : null })),
 	} : null;
-	const newest = Math.max(latestCanary?.t ?? 0, latestFolders?.t ?? 0);
-	const red = (canary && canary.result === "stalled") || (folders && folders.result === "stalled");
-	const offline = [canary, folders].filter(Boolean).length > 0 && [canary, folders].filter(Boolean).every((c) => c.result === "offline");
 	let status = "none";
-	if (mine.length) status = red ? "red" : nowMs - newest > HEALTH_STALE_MS ? "stale" : offline ? "offline" : "ok";
-	const lines = [];
-	if (canary?.result === "stalled") lines.push(`Canary file did not reach the server: ${canary.detail}`);
-	for (const f of folders?.stalled ?? []) lines.push(`${f.project}: ${f.detail}`);
-	// the strip: the last 48 canary checks, oldest to newest (4 hours at 5 minutes)
-	const strip = canaryAll.slice(-48).map((p) => ({ t: iso(p.t), result: result(p), value: p.v }));
-	const spanMs = canaryAll.length ? nowMs - canaryAll[0].t : 0;
-	return {
-		status, canary, folders, lines, strip, newest: newest ? iso(newest) : null, stale: status === "stale", points: mine.length,
-		// the canary's own history for the chart: every measured time (a stalled check has no time)
-		canaryHistory: canaryAll.filter((p) => !p.failed).slice(-HISTORY_POINTS).map((p) => ({ t: iso(p.t), v: p.v, sha: p.sha })),
-		stalledChecks: canaryAll.filter((p) => result(p) === "stalled").length, spanDays: Math.round(spanMs / DAY_MS * 10) / 10,
-	};
+	if (latest) status = folders.result === "stalled" ? "red" : nowMs - latest.t > HEALTH_STALE_MS ? "stale" : folders.result === "offline" ? "offline" : "ok";
+	const lines = (folders?.stalled ?? []).map((f) => `${f.project}: ${f.detail}`);
+	// the strip: the last 48 points, oldest to newest (a point is written when the result changes and once an hour while it does not)
+	const strip = mine.slice(-48).map((p) => ({ t: iso(p.t), result: result(p), value: p.v }));
+	return { status, folders, lines, strip, newest: latest ? iso(latest.t) : null, stale: status === "stale", points: mine.length, stalledChecks: mine.filter((p) => result(p) === "stalled").length };
 }
 
 // The gates' history (scripts/gates-history): one column per run, newest HISTORY_RUNS of them, oldest to newest.
@@ -392,6 +375,8 @@ function buildCompetitors(source, objectives, warnings) {
 		name: i.name, vendor: String(i.vendor ?? i.name), plan: String(i.plan ?? ""), price_usd_month: num(i.price_usd_month), billing: String(i.billing ?? ""), storage_gb: num(i.storage_gb),
 		per_gb_month_usd: num(i.per_gb_month_usd), per_person_month_10gb_usd: num(i.per_person_month_10gb_usd), notes: String(i.notes ?? ""),
 		source_url: typeof i.source_url === "string" && /^https:\/\//.test(i.source_url) ? i.source_url : null, accessed: String(i.accessed ?? ""),
+		// the optional per-tier shape: [{storage_gb, price_usd_month, per_gb_month_usd}], smallest first; an item without it stays valid
+		tiers: (Array.isArray(i.tiers) ? i.tiers : []).filter((x) => x && num(x.storage_gb) !== null).map((x) => ({ storage_gb: x.storage_gb, price_usd_month: num(x.price_usd_month), per_gb_month_usd: num(x.per_gb_month_usd) })).sort((a, b) => a.storage_gb - b.storage_gb),
 	}));
 	items.sort((a, b) => (a.per_person_month_10gb_usd ?? Infinity) - (b.per_person_month_10gb_usd ?? Infinity));
 	const cheapestByVendor = new Map();

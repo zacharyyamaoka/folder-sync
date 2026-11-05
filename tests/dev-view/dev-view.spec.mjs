@@ -13,6 +13,7 @@ let page_url;
 let empty_url;
 let ok_url;
 let stalled_url;
+let stale_url;
 
 test.beforeAll(() => {
 	const fixtures = join(root, "tests/fixtures/dev-view");
@@ -30,6 +31,7 @@ test.beforeAll(() => {
 	page_url = make(join(fixtures, "kpi-series.jsonl"), join(fixtures, "gates.json"));
 	ok_url = make(withHealth("ok"), join(fixtures, "gates.json"));
 	stalled_url = make(withHealth("stalled"), join(fixtures, "gates.json"));
+	stale_url = make(withHealth("stale"), join(fixtures, "gates.json"));
 	empty_url = make("/nonexistent/kpi.jsonl", "/nonexistent/gates.json");
 });
 
@@ -106,28 +108,32 @@ test("gate history: a grid of gates by runs, green red or grey, with a tooltip n
 	await expect(page.locator("#tip")).toContainText("go ./e2e TestSharedTree");
 });
 
-test("is it syncing: calm when ok, a red bar naming the cause when a check is stalled, the strip and the chart in the drill-down", async ({ page }) => {
+test("is it syncing: calm when ok, a red bar naming the cause when a folder is stalled, the strip and the folder table in the drill-down", async ({ page }) => {
 	await page.goto(ok_url);
 	await expect(page.locator(".alert")).toHaveCount(0);
-	await expect(page.locator(".livebar")).toContainText("canary file online in");
-	await expect(page.locator(".livebar")).toContainText("3 folders checked, none stalled");
+	await expect(page.locator(".livebar")).toContainText("3 folders watched");
+	await expect(page.locator(".livebar")).toContainText("no change waiting to be pushed");
 	await page.goto(stalled_url);
 	const alert = page.locator(".alert");
 	await expect(alert).toBeVisible();
 	await expect(alert).toContainText("Sync stalled");
+	await expect(alert).toContainText("zach: 1 changed file not pushed for 14 min");
 	await expect(alert).toContainText("lock held by pid 4242");
 	expect(await alert.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe("rgb(208, 59, 59)");
 	await alert.click();
 	const live = page.locator("#live");
 	await expect(live).toBeVisible();
-	await expect(live.locator(".sc")).toHaveCount(40 + 3); // the strip and its three legend swatches
-	await expect(live.locator(".strip .sc[data-result='stalled']")).toHaveCount(3);
+	await expect(live.locator(".strip .sc")).toHaveCount(30);
+	await expect(live.locator(".strip .sc[data-result='stalled']")).toHaveCount(1);
 	await expect(live.locator(".strip .sc[data-result='offline']")).toHaveCount(1);
 	await expect(live.locator("tr", { hasText: "zach" })).toContainText("held lock");
-	await expect(live.locator("canvas")).toHaveCount(1);
+	await expect(live).toContainText("writes nothing, makes no request");
 });
 
-test("the live check that has not run for hours is not 'ok'; with no points it says not measured yet", async ({ page }) => {
+test("a check that has not run for hours is not 'ok'; with no points it says not measured yet", async ({ page }) => {
+	await page.goto(stale_url);
+	await expect(page.locator(".livebar")).toHaveAttribute("data-live", "stale");
+	await expect(page.locator(".livebar")).toContainText("is the folder-sync-stall timer running");
 	await page.goto(empty_url);
 	await expect(page.locator(".livebar")).toContainText("not measured yet");
 	await expect(page.locator(".livebar")).toHaveAttribute("data-live", "none");
@@ -137,10 +143,15 @@ test("competitor prices: one line under O3 and a table with folder-sync's own ro
 	await page.goto(page_url);
 	await expect(page.locator("#card-o3 [data-competitors]")).toContainText("per person-month at 10 GB");
 	await page.locator("#card-o3").click();
-	const table = page.locator("#m-competitors table");
+	const table = page.locator("#m-competitors table:not([data-tiers])");
 	await expect(table.locator("tr.own")).toContainText("folder-sync");
 	await expect(table.locator("tbody tr")).toHaveCount(4);
 	await expect(table).toContainText("FIXTURE");
+	// the per-tier comparison: the item with tiers appears once per size, an item without them does not
+	const tiers = page.locator("#m-competitors table[data-tiers]");
+	await expect(tiers.locator("tbody tr")).toHaveCount(3);
+	await expect(tiers.locator("tr", { hasText: "200 GB" })).toContainText("$3.00");
+	await expect(tiers).not.toContainText("Fixture Box Plus");
 });
 
 test("drill into a gate: its tests with status, duration, detail, evidence", async ({ page }) => {

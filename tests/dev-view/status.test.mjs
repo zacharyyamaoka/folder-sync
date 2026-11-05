@@ -241,29 +241,27 @@ test("the KPI series points carry their commit and the whole measured history, f
 	assert.deepEqual(series.history.at(-1), { ...series.points.at(-1) });
 });
 
-test("health: a stalled canary or folder is red and says why; healthy is ok; offline gaps are not red", () => {
+test("health: a stalled folder is red and says why; healthy is ok; an offline gap is not red", () => {
 	const ok = healthOf("ok");
 	assert.equal(ok.status, "ok");
-	assert.equal(ok.canary.result, "ok");
+	assert.equal(ok.folders.result, "ok");
 	assert.equal(ok.folders.checked, 3);
-	assert.equal(ok.strip.length, 40);
+	assert.equal(ok.strip.length, 30);
 	assert.deepEqual(ok.strip.filter((c) => c.result !== "ok").map((c) => c.result), ["offline"]);
 	assert.equal(ok.stalledChecks, 0);
 	assert.deepEqual(ok.lines, []);
 	const red = healthOf("stalled");
 	assert.equal(red.status, "red");
-	assert.equal(red.canary.cause, "lock");
-	assert.equal(red.stalledChecks, 3);
-	assert.match(red.lines[0], /lock \(pid 4242/);
-	assert.match(red.lines[1], /^zach: .*lock held by pid 4242/);
 	assert.equal(red.folders.stalled[0].project, "zach");
-	assert.equal(red.canaryHistory.length, 36); // 40 checks less the offline one and the three stalled ones
+	assert.equal(red.folders.stalled[0].cause, "lock");
+	assert.equal(red.stalledChecks, 1);
+	assert.match(red.lines[0], /^zach: 1 changed file not pushed for 14 min; a lock held by pid 4242/);
 });
 
-test("health: nothing recent is 'not being checked', not fine; no points is 'none'", () => {
+test("health: nothing for 90 minutes is 'not being checked', not fine; no points is 'none'", () => {
 	assert.equal(healthOf("stale").status, "stale");
 	assert.equal(healthOf(null).status, "none");
-	assert.equal(healthOf(null).canary, null);
+	assert.equal(healthOf(null).folders, null);
 });
 
 test("health points are not objectives: they add no card and no 'unknown KPI' note", () => {
@@ -293,6 +291,8 @@ test("gate history: a column per run, oldest first, with the failing tests; a ru
 test("competitor prices: rows by per-person price, folder-sync's own number beside them, one line for the three Zach named", () => {
 	const m = buildModel(loadSources({ kpi: KPI, gates: GATES, competitors: join(FIXTURES, "competitors.json") }), { now: NOW });
 	assert.deepEqual(m.competitors.items.map((i) => i.name), ["Fixture Drive A", "Fixture Box Plus", "Fixture Vault Sync"]);
+	assert.deepEqual(m.competitors.items[0].tiers.map((t) => [t.storage_gb, t.price_usd_month, t.per_gb_month_usd]), [[100, 2, 0.02], [200, 3, 0.015], [2000, 10, 0.005]]);
+	assert.deepEqual(m.competitors.items[1].tiers, [], "an item without tiers stays valid");
 	assert.equal(m.competitors.own.per_person_month_10gb_usd, 0.15);
 	assert.equal(m.competitors.own.env, "prod");
 	assert.equal(m.competitors.line, "vs Fixture Drive A $2.00, Fixture Box Plus $12.00, Fixture Vault Sync $40.00 per person-month at 10 GB");

@@ -181,8 +181,12 @@ function competitorsTable(c) {
 		<td data-label="Per person-month, 10 GB"><b>${esc(usd(i.per_person_month_10gb_usd))}</b></td>
 		<td data-label="Source">${own ? "this build, the dev view's O3 numbers" : `${i.source_url ? `<a href="${esc(i.source_url)}" rel="noreferrer">price page</a>` : "–"} <small>${esc(i.accessed)}</small>${i.notes ? ` <small>${esc(i.notes)}</small>` : ""}`}</td></tr>`;
 	const rows = [...(c.own ? [row(c.own, true)] : []), ...c.items.map((i) => row(i, false))].join("");
+	// the per-tier comparison, for the items that carry tiers: the same size across vendors reads straight across
+	const tiered = c.items.filter((i) => i.tiers.length);
+	const tierRows = tiered.flatMap((i) => i.tiers.map((t) => `<tr><td data-label="Service">${esc(i.name)}${i.plan ? ` <small>${esc(i.plan)}</small>` : ""}</td><td data-label="Storage"><b>${esc(String(t.storage_gb))} GB</b></td><td data-label="Per month">${esc(usd(t.price_usd_month))}</td><td data-label="Per GB-month">${esc(usd(t.per_gb_month_usd))}</td></tr>`)).join("");
+	const tierTable = tierRows ? `<h3>By plan size</h3><table data-tiers><thead><tr><th>Service</th><th>Storage</th><th>Per month</th><th>Per GB-month</th></tr></thead><tbody>${tierRows}</tbody></table>` : "";
 	return `<section class="metric" id="m-competitors"><h3>What the others cost</h3><p class="sub">List prices as of ${esc(c.as_of || "an unknown date")}; folder-sync's row is its own current number on the provider each folder is on.</p>
-		<table><thead><tr><th>Service</th><th>Per month</th><th>Storage</th><th>Per GB-month</th><th>Per person-month, 10 GB</th><th>Source</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+		<table><thead><tr><th>Service</th><th>Per month</th><th>Storage</th><th>Per GB-month</th><th>Per person-month, 10 GB</th><th>Source</th></tr></thead><tbody>${rows}</tbody></table>${tierTable}</section>`;
 }
 
 function evidenceItem(e) {
@@ -207,7 +211,7 @@ function gateDetail(g, model) {
 
 const LIVE_WORD = { red: "stalled", ok: "syncing", stale: "not being checked", offline: "offline, not measured", none: "not measured yet" };
 const STRIP_WORD = { ok: "ok", stalled: "stalled", offline: "offline, not measured" };
-const CAUSE_WORD = { lock: "held lock", quota: "over quota", auth: "signed out", round_failed: "failing rounds", no_rounds: "no engine running", engine_exited: "engine exited", no_propagation: "not online in time", server: "server error" };
+const CAUSE_WORD = { lock: "held lock", quota: "over quota", auth: "signed out", round_failed: "failing rounds", no_rounds: "no engine running", not_pushing: "engine not pushing", held_deletes: "held deletes" };
 const liveDot = (h) => (h.status === "red" ? "red" : h.status === "ok" ? "ok" : h.status === "stale" ? "amber" : "none");
 
 // WHY a bar only when it is red: a page that is calm when nothing is wrong is one where a red bar is seen (Zach: Notion/Obsidian restraint)
@@ -216,33 +220,30 @@ function liveBar(h, nowMs) {
 		return `<a class="alert" href="#live" role="alert" data-live="red"><b>Sync stalled</b><span>${h.lines.map(esc).join(" · ") || "a sync check failed"}</span><span class="more">details ›</span></a>`;
 	}
 	const bits = [];
-	if (h.canary?.result === "ok") bits.push(`canary file online in ${esc(fmt("ms", h.canary.value))}`);
-	else if (h.canary?.result === "offline") bits.push("offline, not measured");
-	if (h.folders && h.folders.result !== "offline") bits.push(`${h.folders.checked} folder${h.folders.checked === 1 ? "" : "s"} checked, none stalled`);
-	if (h.status === "stale") bits.push(`last checked ${esc(ago(h.newest, nowMs))}: is the folder-sync-canary timer running?`);
-	else if (h.newest) bits.push(esc(ago(h.newest, nowMs)));
-	const text = h.status === "none" ? "Live sync check: not measured yet (install it with node bench/kpi/canary.mjs install-timer)" : bits.join(" · ");
-	return `<a class="livebar" href="#live" data-live="${h.status}"><span class="dot" data-status="${liveDot(h)}"></span><b>Sync</b> <span>${text}</span><span class="more">history ›</span></a>`;
+	const f = h.folders;
+	if (f && f.result === "offline") bits.push("offline, not measured");
+	else if (f) bits.push(`${f.checked} folder${f.checked === 1 ? "" : "s"} watched, ${f.pending ? `${f.pending} with a change on its way, none stalled` : "no change waiting to be pushed"}`);
+	if (h.status === "stale") bits.push(`last checked ${esc(ago(h.newest, nowMs))}: is the folder-sync-stall timer running?`);
+	else if (h.newest) bits.push(`checked ${esc(ago(h.newest, nowMs))}`);
+	const text = h.status === "none" ? "Sync check: not measured yet (install it with node bench/kpi/stall.mjs install-timer)" : bits.join(" · ");
+	return `<a class="livebar" href="#live" data-live="${h.status}"><span class="dot" data-status="${liveDot(h)}"></span><b>Sync</b> <span>${text}</span><span class="more">details ›</span></a>`;
 }
 
-function liveDetail(h, nowMs, registry) {
+function liveDetail(h, nowMs) {
 	const strip = h.strip.length
-		? `<div class="strip" role="img" aria-label="the last ${h.strip.length} canary checks">${h.strip.map((c) => `<span class="sc" data-result="${esc(c.result)}" data-tip="${esc(`${stamp(c.t)} · ${STRIP_WORD[c.result] ?? c.result}${c.value !== null ? ` · ${fmt("ms", c.value)}` : ""}`)}"></span>`).join("")}</div><p class="cap">The last ${h.strip.length} checks, oldest to newest: <span class="sc" data-result="ok"></span> ok <span class="sc" data-result="stalled"></span> stalled <span class="sc" data-result="offline"></span> offline, not measured.</p>`
+		? `<div class="strip" role="img" aria-label="the last ${h.strip.length} points of the sync check">${h.strip.map((c) => `<span class="sc" data-result="${esc(c.result)}" data-tip="${esc(`${stamp(c.t)} · ${STRIP_WORD[c.result] ?? c.result}`)}"></span>`).join("")}</div><p class="cap">The last ${h.strip.length} points, oldest to newest (one when the result changes, else one an hour): <span class="sc" data-result="ok"></span> ok <span class="sc" data-result="stalled"></span> stalled <span class="sc" data-result="offline"></span> offline, not measured.</p>`
 		: `<p class="empty">no checks yet</p>`;
-	const chart = h.canaryHistory.length ? chartFigure([{ env: "prod", label: "Canary file, saved to online", latest: h.canaryHistory.at(-1).v, history: h.canaryHistory }], { title: "Sync canary", unit: "ms" }, registry, { caption: "Canary file, saved to online (prod)" }) : "";
-	const stalledRows = (h.folders?.stalled ?? []).map((f) => `<tr><td data-label="Folder">${esc(f.project)}</td><td data-label="Cause">${esc(CAUSE_WORD[f.cause] ?? f.cause)}</td><td data-label="Last clean round">${f.age_min === null ? "never" : `${f.age_min} min ago`}</td><td data-label="Detail">${esc(f.detail)}</td></tr>`).join("");
-	const now = h.status === "none" ? `<p class="empty">The check has not run yet. Install it: <code>node bench/kpi/canary.mjs install-timer</code>.</p>` : `<p class="heads">
+	const stalledRows = (h.folders?.stalled ?? []).map((f) => `<tr><td data-label="Folder">${esc(f.project)}</td><td data-label="Cause">${esc(CAUSE_WORD[f.cause] ?? f.cause)}</td><td data-label="Waiting">${f.age_min === null ? "–" : `${f.age_min} min`}</td><td data-label="Detail">${esc(f.detail)}</td></tr>`).join("");
+	const now = h.status === "none" ? `<p class="empty">The check has not run yet. Install it: <code>node bench/kpi/stall.mjs install-timer</code>.</p>` : `<p class="heads">
 		<span class="hl"><span class="dot" data-status="${liveDot(h)}"></span><b>${esc(LIVE_WORD[h.status])}</b></span>
-		${h.canary ? `<span class="hl">canary <b>${h.canary.result === "ok" ? esc(fmt("ms", h.canary.value)) : esc(h.canary.result)}</b> <small>${esc(ago(h.canary.t, nowMs))}</small></span>` : ""}
-		${h.folders ? `<span class="hl">folders <b>${h.folders.result === "offline" ? "offline" : `${h.folders.stalled.length} stalled of ${h.folders.checked}`}</b> <small>${esc(ago(h.folders.t, nowMs))}</small></span>` : ""}</p>
-		${h.canary && h.canary.result !== "ok" ? `<p class="sub ${h.canary.result === "stalled" ? "bad" : ""}">Canary: ${esc(h.canary.detail || h.canary.result)}</p>` : ""}`;
+		${h.folders ? `<span class="hl">folders <b>${h.folders.result === "offline" ? "offline" : `${h.folders.value} stalled of ${h.folders.checked}`}</b> <small>${esc(ago(h.folders.t, nowMs))}</small></span>` : ""}
+		${h.folders && h.folders.result !== "offline" ? `<span class="hl">changes on their way <b>${h.folders.pending}</b></span>` : ""}</p>`;
 	return `<section class="detail" id="live">
 		<header><h2><span class="dot" data-status="${liveDot(h)}"></span>Is it syncing?</h2><a class="close" href="#">Close ×</a></header>
-		<p class="sub">Every 5 minutes a small file is saved in a dedicated canary folder, synced by the installed engine, and timed until the server serves its bytes; ten minutes without it is a stall. Each synced folder's last clean round is checked the same way. With no route to the server nothing is measured and nothing is red.</p>
+		<p class="sub">Passive and quiet: this watches each synced folder's own changes and writes nothing, makes no request and costs no storage. A folder is stalled when a change has sat on this disk unpushed for ten minutes while this machine is online, and the cause is named from the engine's state. With no route to the server nothing is measured and nothing is red. Pushed changes also feed the propagation charts as real-use samples (slice "machine->web · real").</p>
 		${now}
-		<h3>Recent checks</h3>${strip}
-		${chart ? `<h3>Canary time over time</h3>${axisToggle()}<div class="charts">${chart}</div>` : ""}
-		${stalledRows ? `<h3>Folders that have stopped</h3><table><thead><tr><th>Folder</th><th>Cause</th><th>Last clean round</th><th>Detail</th></tr></thead><tbody>${stalledRows}</tbody></table>` : ""}
+		<h3>Recent points</h3>${strip}
+		${stalledRows ? `<h3>Folders that have stopped</h3><table><thead><tr><th>Folder</th><th>Cause</th><th>Waiting</th><th>Detail</th></tr></thead><tbody>${stalledRows}</tbody></table>` : ""}
 	</section>`;
 }
 
@@ -450,7 +451,7 @@ export function renderPage(model) {
 	const g = model.inputs.gates;
 	const registry = { specs: [] };
 	const objectives = model.objectives.map((o) => objectiveDetail(o, nowMs, registry, model.competitors)).join("\n");
-	const live = liveDetail(model.health, nowMs, registry);
+	const live = liveDetail(model.health, nowMs);
 	return `<!doctype html>
 <html lang="en">
 <head>
