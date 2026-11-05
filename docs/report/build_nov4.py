@@ -15,6 +15,19 @@ series, the dev view's model, gates.json, git); the prose around them is written
 Needs python3 with Pillow, and ffmpeg with libvpx-vp9.
 WHY WebM/VP9 for the hero and WebP for the stills: the page must stay under ~1.9 MB to open in the desktop preview
 (feedback_show_dont_tell), and headless Chromium, which renders this page for checking, plays VP9 but not H.264.
+
+The evening page (the current one): a new top section, "Evening, Nov 4", over the 15:30 page's body, unchanged.
+
+    python3 docs/report/build_nov4.py \\
+        --earlier reports/media/folder-sync-2026-11-04-1530.html   # the 15:30 page, kept beside this one
+        --evening-status <dir>/status.json   # scripts/status --out <dir>, on the real series
+        --evening-shots <dir>                # node docs/report/shoot_evening.mjs <dir>/index.html <dir>
+        [--media reports/media] [--work <cache dir>] [--out reports/media/folder-sync-2026-11-04.html]
+
+WHY the afternoon is read from the 15:30 page and not rebuilt: its numbers, gate states and live checks were true at 15:12
+and its prose says so (Wave 3 "not merged", G4 "not built"). Rebuilt from today's series and gates.json it would print
+evening numbers under afternoon words. The builder above still makes that page from its own inputs; this mode keeps it
+byte for byte and puts the evening on top. Sources continue the numbering: the afternoon keeps 1-21, the evening is 22 on.
 """
 import argparse
 import base64
@@ -35,16 +48,27 @@ LOCAL = timezone(timedelta(hours=-7))  # this machine's clock (git and the dispa
 
 def args():
     p = argparse.ArgumentParser()
-    p.add_argument("--status", required=True)
-    p.add_argument("--dev-shots", required=True)
-    p.add_argument("--demo", required=True)
-    p.add_argument("--demo-json", required=True)
+    # the afternoon page (15:12): all four are needed when --earlier is not given
+    p.add_argument("--status")
+    p.add_argument("--dev-shots")
+    p.add_argument("--demo")
+    p.add_argument("--demo-json")
     p.add_argument("--kpi", default=os.path.expanduser("~/vt/zach/producers/folder-sync/kpi_series.jsonl"))
     p.add_argument("--gates", default=f"{REPO}/reports/status/gates.json")
+    # the evening page
+    p.add_argument("--earlier", help="the 15:30 page; when given, build the evening page over its body")
+    p.add_argument("--evening-status", help="status.json from scripts/status --out <dir>, on the real series")
+    p.add_argument("--evening-shots", help="the dir shoot_evening.mjs wrote (evening-shots.json and its PNGs)")
     p.add_argument("--media", default=f"{REPO}/reports/media")
     p.add_argument("--work", default="/tmp/folder-sync-report-nov4")
     p.add_argument("--out", default=f"{REPO}/reports/media/folder-sync-2026-11-04.html")
-    return p.parse_args()
+    parsed = p.parse_args()
+    if parsed.earlier:
+        if not (parsed.evening_status and parsed.evening_shots):
+            p.error("--earlier needs --evening-status and --evening-shots")
+    elif not all((parsed.status, parsed.dev_shots, parsed.demo, parsed.demo_json)):
+        p.error("the afternoon page needs --status, --dev-shots, --demo and --demo-json")
+    return parsed
 
 
 A = args()
@@ -106,11 +130,13 @@ def img(uri, w, h, alt, klass=""):
 
 
 # ------------------------------------------------------------------------------------------------------------ data
-STATUS = json.load(open(A.status))
-GATES = json.load(open(A.gates))
-DEMO = json.load(open(A.demo_json))
-POINTS = [json.loads(line) for line in open(A.kpi) if line.strip()]
-OBJ = {o["id"]: o for o in STATUS["objectives"]}
+# The afternoon page's inputs. The evening page never reads them: its afternoon comes from the 15:30 page (see the docstring).
+if not A.earlier:
+    STATUS = json.load(open(A.status))
+    GATES = json.load(open(A.gates))
+    DEMO = json.load(open(A.demo_json))
+    POINTS = [json.loads(line) for line in open(A.kpi) if line.strip()]
+    OBJ = {o["id"]: o for o in STATUS["objectives"]}
 
 
 def metric(oid, kpi):
@@ -185,10 +211,11 @@ def http_status(url):
         return None
 
 
-LIVE = {path: http_status(f"https://vibetracks.dev{path}") for path in ("/fs/api/auth/ok", "/fs/account", "/fs/v1/usage", "/fs/files")}
-PAGES = http_status("https://zacharyyamaoka.github.io/folder-sync/")
-SECRETS_PAGE = http_status("http://127.0.0.1:33163/")
 CHECKED_AT = datetime.now(LOCAL).strftime("%H:%M")
+if not A.earlier:
+    LIVE = {path: http_status(f"https://vibetracks.dev{path}") for path in ("/fs/api/auth/ok", "/fs/account", "/fs/v1/usage", "/fs/files")}
+    PAGES = http_status("https://zacharyyamaoka.github.io/folder-sync/")
+    SECRETS_PAGE = http_status("http://127.0.0.1:33163/")
 
 
 def sync_state():
@@ -1144,5 +1171,680 @@ plan (Conflicted copy bam-laptop-2 202611040908) 2.md</pre>
     print(A.out, os.path.getsize(A.out))
 
 
+# ============================================================================================================ the evening page
+EV_FIRST_SOURCE = 22  # the afternoon's Source index ends at 21; the evening's sources continue from here
+GH_REPO = "zacharyyamaoka/folder-sync"
+EV_DATE = datetime(2026, 11, 4).date()
+
+
+def sh(*argv, timeout=90):
+    """A command's stdout, or None when it is missing, fails or times out."""
+    try:
+        done = subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def sh_json(*argv, timeout=90):
+    out = sh(*argv, timeout=timeout)
+    try:
+        return json.loads(out) if out else None
+    except json.JSONDecodeError:
+        return None
+
+
+def rev(ref):
+    return sh("git", "-C", REPO, "rev-parse", "--short", ref)
+
+
+def remote_head(ref):
+    """What the remote holds now (git ls-remote, read only), short."""
+    out = sh("git", "-C", REPO, "ls-remote", "origin", ref, timeout=30)
+    return out.split()[0] if out else None
+
+
+def strip_ansi(text):
+    return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
+
+
+# Read by hand for this page, 19:00-19:30, and not re-read at build time (wrangler and D1 need a login and a round trip).
+BY_HAND = {
+    "worker_live": "bed0a34c",            # npx wrangler deployments list (accounts/): 22:32:40Z, 100%
+    "worker_revert_first": "939afe92",    # 22:17:55Z: the quota revert's first deploy; QUOTA_BY_OWNER 10737418240 (versions view)
+    "worker_12gib": "0a0f5357-6279-4e71-909b-6a43ab1dc61a",  # versions view: QUOTA_BY_OWNER 12884901888, the Wave 2 version
+    "robotparts_live": "e16f68d0",        # --env robotparts: 23:03:43Z, 100%
+    "robotparts_d1": "1 user, 1 Google account, 1 session (created 00:08Z, 17:08 here)",  # read-only COUNT query on folder-sync-accounts-robotparts
+    "flake_local": "30 of 30",            # go test -run 'TestWatcherSignalsOnceAfterABurst$' -count=30 ./internal/push: ok, 12.2 s
+    "ui_flake_local": "1 of 30",          # 19:29, npx playwright test test/files.spec.mjs -g "on a machine the tab says" --repeat-each 30 --workers 4: 29 passed, 1 failed (repeat 27, the same assertion)
+}
+
+RUN_NOTES = {
+    41926097553: "G1 red: <code>TestSoakNothingLost</code>, a <code>sync --once</code> that exited non-zero under load. The job kept only the failure's last 30 lines, so the cause was not in it.",
+    41931254703: "G1 red again, the same test.",
+    41934416132: "The first all-green run: the <code>lane/g1-soak</code> merge. Its 12 of 12 is what <code>reports/status/gates.json</code> holds.",
+    41936156828: "The same commit on <code>main</code>.",
+    41949468638: "Attempt 1: <code>TestWatcherSignalsOnceAfterABurst</code> (“a burst of writes signalled twice”) failed <code>core, no server</code>. G4 reads that job, so <code>gates</code> said 11 pass, 1 fail. Attempt 2: every job green, 12 pass.",
+    41951804190: "<code>desktop-release</code>, started by the tag: built the five installers and published <code>desktop-v0.2.0</code>.",
+    41952712798: "The current tip on the branch: every job green, 12 pass.",
+    41952714897: "The same tip on <code>main</code>: <code>ui (linux)</code> failed one test, <code>files.spec.mjs:210</code> (a machine's menu still showed “Files”), so G4 read red: 11 pass. A second timing flake: it failed 1 of 30 times here.",
+}
+
+
+def ev_runs(tip_sha):
+    """The CI runs this section names, as GitHub has them now, plus whatever runs on the current tip."""
+    rows = []
+    for run_id in RUN_NOTES:
+        r = sh_json("gh", "run", "view", str(run_id), "-R", GH_REPO, "--json", "databaseId,headSha,headBranch,conclusion,status,attempt,createdAt,workflowName,url,jobs")
+        rows.append((run_id, r))
+    tip = sh_json("gh", "run", "list", "-R", GH_REPO, "--commit", tip_sha or "", "-L", "10", "--json", "databaseId,headSha,headBranch,conclusion,status,createdAt,workflowName,url") or []
+    return rows, tip
+
+
+def ev_journey_lines():
+    """The macOS journey job's own step lines from run 41949468638."""
+    jobs = sh_json("gh", "api", f"repos/{GH_REPO}/actions/runs/41949468638/attempts/2/jobs")
+    if not jobs:
+        return None, []
+    job = next((j for j in jobs["jobs"] if j["name"] == "desktop journey (macos)"), None)
+    if not job:
+        return None, []
+    log = strip_ansi(sh("gh", "api", "--allow-escape-sequences", f"repos/{GH_REPO}/actions/jobs/{job['id']}/logs", timeout=60))
+    lines = [re.sub(r"^\S+Z ok\s+", "", line) for line in log.splitlines() if re.match(r"^\S+Z ok  \S", line)]
+    return job, lines
+
+
+def ev_stall():
+    """The timer's state and its first and newest runs, from systemd and the journal."""
+    enabled = sh("systemctl", "--user", "is-enabled", "folder-sync-stall.timer")
+    active = sh("systemctl", "--user", "is-active", "folder-sync-stall.timer")
+    journal = sh("journalctl", "--user", "-u", "folder-sync-stall.service", "--no-pager", "-o", "short-iso") or ""
+    runs = [(m.group(1), m.group(2)) for m in re.finditer(r"^(\S+) \S+ node\[\d+\]: (folders: .*)$", journal, flags=re.M)]
+    return {"enabled": enabled, "active": active, "first": runs[0] if runs else None, "last": runs[-1] if runs else None, "count": len(runs)}
+
+
+def ev_installed():
+    import hashlib
+
+    def sha(path):
+        if not os.path.exists(path):
+            return None
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    appimage = os.path.expanduser("~/.local/opt/folder-sync/folder-sync-desktop-0.2.0.AppImage")
+    local_build = f"{A.media}/folder-sync_0.2.0_amd64.AppImage"
+    menu = os.path.expanduser("~/.local/share/applications/folder-sync.desktop")
+    menu_exec = None
+    if os.path.exists(menu):
+        menu_exec = next((line.split("=", 1)[1] for line in open(menu) if line.startswith("Exec=")), None)
+    cli = os.path.expanduser("~/.local/bin/folder-sync")
+    return {
+        "appimage": appimage, "appimage_bytes": os.path.getsize(appimage) if os.path.exists(appimage) else None,
+        "appimage_sha": sha(appimage), "local_build_sha": sha(local_build),
+        "menu": menu if os.path.exists(menu) else None, "menu_exec": menu_exec,
+        "cli_version": (sh(cli, "version") or "").split(",")[0].split(" (")[0],
+        "cli_backup": os.path.exists(cli + ".v0-29b6e83-backup"),
+    }
+
+
+def readme_by_size():
+    """The README's "By size" table: [(size, {column: value})], read from the generated block."""
+    text = open(f"{REPO}/README.md", encoding="utf-8").read()
+    after = text[text.index("By size:"):].splitlines()[1:]
+    first = next(i for i, line in enumerate(after) if line.startswith("|"))
+    lines = []
+    for line in after[first:]:  # the table is the run of "|" lines right after the "By size:" paragraph
+        if not line.startswith("|"):
+            break
+        lines.append(line)
+    rows = []
+    head = [c.strip() for c in lines[0].strip("|").split("|")]
+    for line in lines[2:]:
+        cells = [c.strip().strip("*") for c in line.strip("|").split("|")]
+        if len(cells) != len(head):
+            break
+        rows.append((cells[0], dict(zip(head[1:], cells[1:]))))
+    return head, rows
+
+
+def money(text):
+    return float(text.replace("$", "")) if text and text.startswith("$") else None
+
+
+def competitor_rows():
+    """bench/cost/competitors.json, one row per plan with its yearly and monthly prices side by side."""
+    data = json.load(open(f"{REPO}/bench/cost/competitors.json"))
+    plans = {}
+    for item in data["items"]:
+        key = (item["vendor"], item["plan"])
+        plan = plans.setdefault(key, {"vendor": item["vendor"], "plan": item["plan"], "gb": item["storage_gb"], "source": item["source_url"], "accessed": item["accessed"]})
+        plan[item["billing"]] = item["price_usd_month"]
+        if item["billing"] == "monthly":
+            plan["per_gb"] = item["per_gb_month_usd"]
+        plan.setdefault("per_gb", item["per_gb_month_usd"])
+    return data["as_of"], list(plans.values())
+
+
+def gb_text(gb):
+    return f"{gb / 1000:g} TB" if gb >= 1000 else f"{gb:g} GB"
+
+
+def svg_uri(path):
+    with open(path, "rb") as handle:
+        return "data:image/svg+xml;base64," + base64.b64encode(handle.read()).decode()
+
+
+def ev_hero(mp4):
+    """The desktop journey clip as VP9 (and the original H.264 beside it), and a poster frame."""
+    out = os.path.join(A.work, "ev-hero.webm")
+    if not os.path.exists(out) or os.path.getmtime(out) < os.path.getmtime(mp4):
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", mp4, "-vf", "scale=1120:-2", "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "40",
+                        "-row-mt", "1", "-deadline", "good", "-cpu-used", "2", "-an", out], check=True)
+    poster_png = os.path.join(A.work, "ev-poster.png")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", "9", "-i", mp4, "-frames:v", "1", "-vf", "scale=1120:-2", poster_png], check=True)
+    poster, _, _ = webp(poster_png, "ev-poster", 1120, quality=70)
+    return data_uri(out, "video/webm"), os.path.getsize(out), data_uri(mp4, "video/mp4"), os.path.getsize(mp4), poster
+
+
+EV_CSS = r"""
+.part{margin:34px 0 16px;padding:0 2px}
+.part .eyebrow{margin-bottom:4px}
+.part-title{font-size:24px;line-height:1.25;margin:0 0 6px;font-weight:700;letter-spacing:-.01em}
+.part p{color:var(--ink-2);margin:0 0 8px}
+.five{list-style:none;padding:0;margin:4px 0 6px;counter-reset:five}
+.five li{position:relative;padding:9px 0 9px 36px;border-top:1px solid var(--line);margin:0;font-size:15.5px}
+.five li:first-child{border-top:0}
+.five li::before{counter-increment:five;content:counter(five);position:absolute;left:0;top:10px;width:24px;height:24px;border-radius:50%;background:var(--surface-2);border:1px solid var(--line-2);color:var(--ink-2);font-size:12.5px;font-weight:650;display:flex;align-items:center;justify-content:center}
+.five li.good::before{background:var(--ok);border-color:var(--ok);color:var(--surface)}
+.five li.mixed::before{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-ink)}
+.windows{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:14px 0 10px;align-items:start}
+.windows img{display:block;width:100%;height:auto;border-radius:10px;border:1px solid var(--line);box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.phones{display:grid;grid-template-columns:repeat(2,minmax(0,280px));gap:18px;justify-content:center;margin:14px 0 10px;align-items:start}
+.phones img{display:block;width:100%;height:auto;border-radius:12px;border:1px solid var(--line)}
+.sparks{display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center;margin:10px 0 14px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:#fbfbf9}
+.sparks figure{display:flex;align-items:center;gap:8px;font-size:13px;color:#52514e}
+.sparks img{display:block;height:36px;width:auto}
+.sparks img.gh{height:76px}
+.since{margin:10px 0 0}
+.tag.ok-tag{color:var(--ok)} .tag.bad-tag{color:var(--bad)} .tag.run-tag{color:var(--ink-3)}
+.earlier{font-size:14.5px}
+pre.term.wrap{white-space:pre-wrap;overflow-wrap:anywhere}
+#afternoon{border-top:2px solid var(--line-2);padding-top:26px;margin-top:40px}
+.tag.need{color:var(--warn-ink);border-color:var(--warn-line);background:var(--warn-bg)}
+@media (max-width:640px){
+  .windows{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .phones{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .part-title{font-size:21px}
+}
+"""
+
+
+def build_evening():
+    M = A.media
+    shots_dir = A.evening_shots
+    SHOTS = json.load(open(f"{shots_dir}/evening-shots.json"))
+    EV = json.load(open(A.evening_status))
+    EOBJ = {o["id"]: o for o in EV["objectives"]}
+
+    def ev_headline(oid, kpi, env):
+        return next(m for m in EOBJ[oid]["metrics"] if m["kpi"] == kpi)["env"][env]
+
+    gates_now = json.load(open(A.gates))
+    history = [json.loads(line) for line in open(f"{REPO}/reports/status/gates-history.jsonl") if line.strip()]
+    n = iter(range(EV_FIRST_SOURCE, 100))
+    S = {key: next(n) for key in ("git", "ci", "gates", "g1", "release", "desktop", "installed", "stall", "cost", "status", "wrangler", "robotparts", "secrets", "landing", "devview", "flake", "brief")}
+
+    # ---- facts read now
+    refs = {name: rev(name) for name in ("claude/folder-sync-v0", "origin/main", "origin/claude/folder-sync-v0", "main", "origin/gh-pages", "archive/origin-main-pre-v0-land", "archive/origin-gh-pages-pre-wave3", "desktop-v0.2.0^{commit}")}
+    remote_full = {name: remote_head(name) for name in ("refs/heads/main", "refs/heads/claude/folder-sync-v0", "refs/heads/gh-pages")}
+    remote = {name: (sha[:7] if sha else None) for name, sha in remote_full.items()}
+    tip = remote["refs/heads/main"] or refs["origin/main"]
+    # gh run list --commit wants the full sha
+    runs, tip_runs = ev_runs(remote_full["refs/heads/main"] or sh("git", "-C", REPO, "rev-parse", "origin/main"))
+    release = sh_json("gh", "release", "view", "desktop-v0.2.0", "-R", GH_REPO, "--json", "tagName,name,isPrerelease,isDraft,publishedAt,url,targetCommitish,assets")
+    journey_job, journey_lines = ev_journey_lines()
+    stall = ev_stall()
+    inst = ev_installed()
+    head, by_size = readme_by_size()
+    as_of, plans = competitor_rows()
+    vault_note = "/home/bam/zach_brain/Sources/Notes/folder-sync — Sync Service Pricing vs Dropbox, Google Drive and Obsidian Sync (2026-11-04).md"
+    vault_ok = os.path.exists(vault_note)
+    real_window = json.load(open(f"{M}/desktop-real-window-2026-11-04.json"))
+    rw = {s["step"]: s for s in real_window["steps"]}
+    files_online_s = next((s["seconds"] for s in real_window["steps"] if "rows on the Files page" in s["step"]), None)
+
+    run_by_id = {run_id: r for run_id, r in runs}
+    green = run_by_id.get(41949468638) or {}
+    green_jobs = [j for j in green.get("jobs", [])]
+    green_ok = sum(1 for j in green_jobs if j.get("conclusion") == "success")
+    summary_now = sum(1 for g in gates_now["gates"] if g["status"] == "pass")
+
+    o1p, o1t = ev_headline("O1", "propagation_p50_ms", "prod"), ev_headline("O1", "propagation_p50_ms", "test")
+    o1p95 = ev_headline("O1", "propagation_p95_ms", "prod")
+    o3p = ev_headline("O3", "cost_per_person_month_usd", "prod")
+    o3t = ev_headline("O3", "cost_per_person_month_usd", "test")
+    health = EV.get("health", {})
+
+    # ---- media
+    hero, hero_bytes, hero_mp4, mp4_bytes, poster = ev_hero(f"{M}/desktop-journey-2026-11-04.mp4")
+    win = {name: webp(f"{M}/desktop-2026-11-04-{name}.png", f"ev-win-{name}", 460, quality=80)
+           for name in ("picker-light", "picker-dark", "synced-with-files-dark", "picker-online-light", "download-light", "downloaded-light")}
+    web_files = webp(f"{M}/desktop-2026-11-04-web-files.png", "ev-web-files", 832, quality=78)
+    dev_top = webp(f"{shots_dir}/devreal-top.png", "ev-devtop", 880, crop=(0, 0, 1100, 1330), quality=74)
+    dev_o1 = webp(f"{shots_dir}/devreal-o1.png", "ev-devo1", 880, crop=(0, 0, 1100, 425), quality=74)
+    fx_bar = webp(f"{M}/history-2026-11-04-light-live-stalled.png", "ev-fx-bar", 880, crop=(0, 56, 1100, 116), quality=78)
+    fx_panel = webp(f"{M}/history-2026-11-04-light-live-stalled.png", "ev-fx-panel", 880, crop=(0, 1212, 1100, 1536), quality=74)
+    land_top = webp(f"{shots_dir}/landing-desktop-top.png", "ev-land-top", 880, crop=(0, 0, 1280, 760), quality=74)
+    land_dl = webp(f"{shots_dir}/landing-desktop-desktop.png", "ev-land-dl", 880, crop=(0, 60, 1280, 800), quality=74)
+    land_phone_top = webp(f"{shots_dir}/landing-phone-dark-top.png", "ev-land-phone-top", 300, quality=74)
+    land_phone_dl = webp(f"{shots_dir}/landing-phone-desktop.png", "ev-land-phone-dl", 300, quality=74)
+    sec_google = webp(f"{REPO}/accounts/scripts/set-secrets/google-create-client.png", "ev-sec-google", 400, quality=74)
+    sec_cf = webp(f"{REPO}/accounts/scripts/set-secrets/cloudflare-token-form.png", "ev-sec-cf", 620, quality=72)
+    sec_cf_list = webp(f"{REPO}/accounts/scripts/set-secrets/cloudflare-token-list.png", "ev-sec-cf-list", 620, quality=72)
+    sparks = {k: svg_uri(f"{REPO}/docs/status/{k}.svg") for k in ("spark-o1", "spark-o2", "spark-o3", "gate-history")}
+
+    # ---- pieces
+    def run_row(run_id, r):
+        if not r:
+            return f'<tr><td><a href="https://github.com/{GH_REPO}/actions/runs/{run_id}">{run_id}</a></td><td colspan="3"><span class="muted">not read at build time</span></td><td>{RUN_NOTES[run_id]}</td></tr>'
+        result = r.get("conclusion") or r.get("status")
+        cls = "ok" if result == "success" else ("miss" if result == "failure" else "na")
+        attempt = f" (attempt {r['attempt']})" if r.get("attempt", 1) > 1 else ""
+        return (f'<tr><td><a href="{r["url"]}">{run_id}</a></td><td><code>{r["headSha"][:7]}</code><br><span class="small muted">{esc(r["headBranch"])}</span></td>'
+                f'<td class="num">{hhmm(r["createdAt"])}</td><td><span class="{cls}">{esc(result)}</span>{attempt}</td><td>{RUN_NOTES[run_id]}</td></tr>')
+
+    tip_line = ", ".join(f'<a href="{r["url"]}">{esc(r["workflowName"])} {r["databaseId"]}</a> on <code>{esc(r["headBranch"])}</code>: {esc(r.get("conclusion") or r.get("status"))}' for r in tip_runs) or "none found"
+
+    hist_cols = []
+    for h in history:
+        gates = h.get("gates") or {}
+        passing = sum(1 for g in gates.values() if g["status"] == "pass")
+        failing = [gid for gid, g in gates.items() if g["status"] == "fail"]
+        open_ = [gid for gid, g in gates.items() if g["status"] not in ("pass", "fail")]
+        if not gates:
+            word = "no gates file (its gates job never ran)"
+        else:
+            word = f"{passing} pass" + (f"; red: {', '.join(failing)}" if failing else "") + (f"; not built: {', '.join(open_)}" if open_ else "")
+        where = "CI on main" if h.get("branch") == "main" and h["source"] == "ci" else ("CI" if h["source"] == "ci" else "local")
+        hist_cols.append(f"<li>{hhmm(h['t'])} <code>{h['sha'][:7]}</code>, {where}: {word}</li>")
+
+    plan_rows = []
+    for p in plans:
+        yearly = f"${p['annual']:.2f}" if "annual" in p else "–"
+        monthly = f"${p['monthly']:.2f}" if "monthly" in p else "–"
+        per_gb = f"${p['per_gb']:.4f}".rstrip("0").rstrip(".") if p["per_gb"] else "$0"
+        host = re.sub(r"^https?://(www\.)?", "", p["source"]).split("/")[0]
+        plan_rows.append(f'<tr><td><b>{esc(p["vendor"])}</b> {esc(p["plan"])}</td><td class="num">{gb_text(p["gb"])}</td><td class="num">{monthly}</td><td class="num">{yearly}</td>'
+                         f'<td class="num">{per_gb}</td><td><a href="{esc(p["source"])}">{esc(host)}</a>, {esc(p["accessed"])}</td></tr>')
+
+    size_rows = "".join("<tr><td><b>{}</b></td>{}</tr>".format(esc(size), "".join(
+        f'<td class="num">{"<b>" + esc(v) + "</b>" if k.startswith("folder-sync") else esc(v)}</td>' for k, v in cols.items())) for size, cols in by_size)
+    size_head = "".join(f"<th>{esc(h)}</th>" for h in head)
+    bs = {size: cols for size, cols in by_size}
+    tb1, tb2, gb10, gb100 = bs.get("1 TB", {}), bs.get("2 TB", {}), bs.get("10 GB", {}), bs.get("100 GB", {})
+
+    assets = (release or {}).get("assets", [])
+
+    def asset_size(fragment):
+        a = next((a for a in assets if fragment in a["name"]), None)
+        return f"{a['size'] / 1e6:.1f} MB" if a else "?"
+
+    asset_list = "".join(f"<li><code>{esc(a['name'])}</code> ({a['size'] / 1e6:.1f} MB)</li>" for a in assets if a["name"] != "SHA256SUMS")
+    appimage_release = next((a["size"] for a in assets if a["name"].endswith(".AppImage")), None)
+    same_bytes = inst["appimage_sha"] and inst["appimage_sha"] == inst["local_build_sha"]
+    widths = SHOTS["landing"]["widths"]
+    phone_w = widths.get("phone", {})
+    phone_dark_w = widths.get("phone-dark", {})
+    no_sideways = all(w.get("scrollWidth") == w.get("clientWidth") and not w.get("wide") for w in (phone_w, phone_dark_w))
+    shot_at = hhmm(SHOTS["shotAt"])
+    downloads = SHOTS["landing"].get("downloads", [])
+    first_stall, last_stall = stall["first"], stall["last"]
+
+    def jt(iso):
+        return datetime.fromisoformat(iso).astimezone(LOCAL).strftime("%H:%M")
+
+    evening = f"""
+<div class="part" id="evening">
+  <p class="eyebrow">New this evening</p>
+  <h2 class="part-title">Evening, Nov 4: the desktop app, live sync check, cost by size</h2>
+  <p>Everything here was read when the page was built ({CHECKED_AT}), unless it says “read by hand”. The afternoon's page follows it unchanged.</p>
+</div>
+
+<section id="ev-verdict">
+  <h2>Verdict</h2>
+  <ol class="five">
+    <li class="mixed"><b>v0 is on <code>main</code>, pushed.</b> <code>origin/main</code> = <code>claude/folder-sync-v0</code> @ <code>{tip}</code>. CI run 41949468638 on <code>{(green.get('headSha') or '?')[:7]}</code> is green on {green_ok} of {len(green_jobs)} jobs after one rerun of a known timing flake. But the tip's own run on <code>main</code> went red on a second flake, in a UI test (1 failure in 30 runs here); the same commit's branch run is all green.{cite(S['git'], S['ci'], S['flake'])}</li>
+    <li class="good"><b>{summary_now} of 12 gates pass.</b> G1 turned green with <code>lane/g1-soak</code>: under load, 2 failures in 94 seeds before the fix, 0 in 85 after.{cite(S['gates'], S['g1'])}</li>
+    <li class="good"><b>The desktop app 0.2.0 is a public, unsigned pre-release</b> for macOS, Windows and Linux. Your journey test passes in CI on a real Mac (there, Node stands in for the window's Rust shell; the real app ran the journey on this machine). It is installed here; you have not opened it yet.{cite(S['release'], S['desktop'], S['installed'])}</li>
+    <li class="good"><b>A passive stall check runs every 5 minutes</b>: no network requests, nothing written to your folders. Its first run{(' at ' + jt(first_stall[0])) if first_stall else ''}: 0 stalled, 1 pending, 2 idle of 3.{cite(S['stall'])}</li>
+    <li class="mixed"><b>Cost by size:</b> pennies at 10–100 GB; at 1–2 TB Google's {tb1.get('Google', '?')} and Dropbox's {tb1.get('Dropbox', '?')} beat R2's {tb1.get('folder-sync on R2', '?')} and {tb2.get('folder-sync on R2', '?')}. Still missed: production O1 at {ms(o1p['value'])} (target 1 s) and O3 on R2 at ${o3p['value']:.2f} a person-month (target $0.50).{cite(S['cost'], S['status'])}</li>
+  </ol>
+</section>
+
+<nav class="jump" aria-label="Evening sections">
+  <a href="#ev-status">Status and CI</a><a href="#ev-desktop">Desktop app</a><a href="#ev-stall">Stall check</a><a href="#ev-history">History</a><a href="#ev-cost">Cost by size</a><a href="#ev-robotparts">robotparts.dev</a><a href="#ev-landing">Landing page</a><a href="#ev-decided">Decided for you</a><a href="#ev-left">Left</a><a href="#afternoon">Afternoon (15:30 page)</a><a href="#sources">Sources</a>
+</nav>
+
+<section id="ev-status">
+  <h2>Status: on main, 12 of 12, two timing flakes left</h2>
+  <ul>
+    <li><b>Branches, as GitHub has them now</b> (<code>git ls-remote</code>): <code>main</code> {remote['refs/heads/main'] or '?'}, <code>claude/folder-sync-v0</code> {remote['refs/heads/claude/folder-sync-v0'] or '?'}, <code>gh-pages</code> {remote['refs/heads/gh-pages'] or '?'}. The tag <code>desktop-v0.2.0</code> is on <code>{refs['desktop-v0.2.0^{commit}'] or '?'}</code>.{cite(S['git'])}</li>
+    <li><b>This checkout's own <code>main</code> branch is stale:</b> it still points at <code>{refs['main'] or '?'}</code> (Oct 20). <code>origin/main</code> is the truth; nothing here reads the local one.</li>
+    <li><b>The current tip <code>{tip}</code></b> (the landing page's size table scrolls in its own box at phone width): {tip_line}. Both are in the table below.{cite(S['ci'])}</li>
+  </ul>
+  <div class="tbl"><table>
+    <thead><tr><th>CI run</th><th>Commit</th><th>Started</th><th>Result</th><th>What it says</th></tr></thead>
+    <tbody>{''.join(run_row(run_id, r) for run_id, r in runs)}</tbody>
+  </table></div>
+
+  <h3>G1: what the fix changed</h3>
+  <p>Run 41926097553 went red on the soak. Run under load (8 to 16 soaks at once, some on 2 or 4 CPUs, 94 seeds), it failed twice, two different ways.{cite(S['g1'])}</p>
+  <ol class="ladder">
+    <li><b>A manifest read that a racing write broke is now read again.</b><span>Seed 4: a pull read a peer's manifest while the peer was rewriting it, and got “unexpected EOF”. Over about 166k reads a probe saw 681 short bodies, 283 cut in transit and 622 “try again” answers. Now all three are read again; a 4xx or an unreachable store still fails at once, so offline stays offline.</span></li>
+    <li><b>The lock is never seen without its pid.</b><span>Seed 81: the lock file was created first and its pid written after, so a kill in between left an empty lock that blocked the folder for 30 minutes. Now the pid is written to its own file and hard-linked into place. Before the fix, a test saw the lock empty 17,766 times in 47,875 reads.</span></li>
+  </ol>
+  <ul>
+    <li><b>Under the same load after the fix:</b> 85 seeds, 0 failures. A deliberately broken merge (<code>keepLocalEdit</code> made to delete) still turns the soak red.{cite(S['g1'])}</li>
+    <li><b>The flake that needed the rerun:</b> <code>TestWatcherSignalsOnceAfterABurst</code> in <code>internal/push</code>. Re-run here for this page: {BY_HAND['flake_local']} pass. It is still in the code; it is listed under Left.{cite(S['ci'], S['flake'])}</li>
+    <li><b>The full gate history</b> is <code>reports/status/gates-history.jsonl</code>, {len(history)} runs:
+      <ul class="small">{''.join(hist_cols)}</ul>
+      Run 41949468638 is not in that file yet; its gates job log reads “12 pass”.{cite(S['gates'])}</li>
+  </ul>
+</section>
+
+<section id="ev-desktop">
+  <h2>Desktop app 0.2.0: pick a folder like an Obsidian vault</h2>
+  <figure class="hero">
+    <video autoplay muted loop playsinline controls preload="auto" poster="{poster}" aria-label="The folder-sync desktop app: create a folder, it syncs, Open online shows its three files on the web Files page">
+      <source src="{hero}" type="video/webm">
+      <source src="{hero_mp4}" type="video/mp4">
+      <img src="{poster}" alt="The desktop app synced beside the web Files page with three files">
+    </video>
+    <figcaption>{real_window['steps'][-1].get('seconds', 0):.1f} s, muted, looping. <b>The real app</b>: the Tauri binary with its engine, on an invisible display on this machine, beside Chrome on the web Files page (<code>app/scripts/real_window.mjs</code>). It ran against the local stack on 127.0.0.1 as a test person, not your account.
+      <ul>
+        <li>Create new folder; the window says Synced.</li>
+        <li>Three files dropped in the folder were rows on the Files page <b>{files_online_s} s</b> later.</li>
+        <li>VP9 here ({hero_bytes / 1024:.0f} KB), with the original MP4 ({mp4_bytes / 1024:.0f} KB) as a fallback: <code>reports/media/desktop-journey-2026-11-04.mp4</code>.{cite(S['desktop'])}</li>
+      </ul>
+    </figcaption>
+  </figure>
+
+  <h3>The first run, and the second computer</h3>
+  <div class="windows">
+    <figure>{img(*win['picker-light'], alt="First run: Create new folder, Open existing folder, Your folders online")}<figcaption>First run: create new, open existing, or “Your folders online”.</figcaption></figure>
+    <figure>{img(*win['picker-dark'], alt="The same picker in dark")}<figcaption>The same, dark. The sign-in survived a relaunch.</figcaption></figure>
+    <figure>{img(*win['synced-with-files-dark'], alt="Machine 1: Synced, folder ~/folder-sync/journey-notes")}<figcaption>Machine 1 after Create folder: Synced.</figcaption></figure>
+    <figure>{img(*win['picker-online-light'], alt="Machine 2: Your folders online lists journey-notes")}<figcaption>Machine 2: “Your folders online” lists it.</figcaption></figure>
+    <figure>{img(*win['download-light'], alt="Machine 2: download journey-notes into ~/folder-sync/journey-notes")}<figcaption>Download, with the place it goes.</figcaption></figure>
+    <figure>{img(*win['downloaded-light'], alt="Machine 2: Synced, 1 other machine")}<figcaption>Machine 2 synced: “1 other machine”.</figcaption></figure>
+  </div>
+  <figure class="shot" style="max-width:620px">{img(*web_files, alt="The web Files page: ideas.md, todo.md, welcome.md, shared, synced from a device")}<figcaption>“Open online”: the web Files page with the three files.{cite(S['desktop'])}</figcaption></figure>
+
+  <h3>Your success criterion, as an automated test</h3>
+  <p>The journey (<code>app/test/journey.mjs</code>) ran in CI as <b>desktop journey (macos)</b> on a GitHub Apple-silicon runner{(', job ' + str(journey_job['id']) + ', ' + esc(journey_job['conclusion'])) if journey_job else ''}. Its own lines:{cite(S['ci'], S['desktop'])}</p>
+  {('<pre class="term wrap">' + ''.join(f'<span class="g">ok</span>  {esc(line)}' + chr(10) for line in journey_lines) + '</pre>') if journey_lines else '<p class="muted">The job log could not be read at build time.</p>'}
+  <ul>
+    <li><b>What is real in that test:</b> the app's page in Chromium, the folder-sync engine, the local accounts stack (<code>wrangler dev</code>, the R2 stand-in) and the web Files page.</li>
+    <li><b>What is stood in:</b> the Rust shell around the page (keychain, tray, native dialog), played by <code>app/test/shell.mjs</code>. Its own tests check it says and does what <code>core.rs</code> does.</li>
+    <li><b>What proves the Rust:</b> the real-window run above (Linux), and <code>desktop / smoke</code>, which builds the installers and installs them on Linux, macOS and Windows on every push.</li>
+    <li><b>Sign-in:</b> the app signs in to vibetracks.dev by default. Every run above used a local stack; none used your account.</li>
+  </ul>
+
+  <h3>Downloads, and this machine</h3>
+  <ul>
+    <li><b>Release:</b> <a href="{esc((release or {}).get('url', 'https://github.com/' + GH_REPO + '/releases/tag/desktop-v0.2.0'))}">desktop-v0.2.0</a>, {'a public pre-release' if (release or {}).get('isPrerelease') else 'NOT marked pre-release'}, published {hhmm(release['publishedAt']) if release else '?'}. The installers are not signed, so macOS and Windows ask you to confirm the first time.{cite(S['release'])}
+      <ul class="small">{asset_list}</ul></li>
+    <li><b>Installed here</b> as <code>{esc(inst['appimage'])}</code>{', with the menu entry “folder-sync”' if inst['menu'] else ', but the menu entry is MISSING'}. You have not run it yet.{cite(S['installed'], S['brief'])}
+      <ul class="small">
+        <li>It is the AppImage built on this machine ({inst['appimage_bytes'] / 1e6 if inst['appimage_bytes'] else 0:.1f} MB{', the same bytes as <code>reports/media/folder-sync_0.2.0_amd64.AppImage</code>' if same_bytes else ''}), not the release's ({appimage_release / 1e6 if appimage_release else 0:.1f} MB), which CI built.</li>
+        <li>It signs in to vibetracks.dev: your real account.</li>
+      </ul></li>
+  </ul>
+</section>
+
+<section id="ev-stall">
+  <h2>The passive stall check, live</h2>
+  <p class="lead">Your ask after the canary file: watch the changes you make anyway, and stay quiet when nothing changes. <code>bench/kpi/stall.mjs</code> runs from the systemd user timer <code>folder-sync-stall</code> every 5 minutes: {esc(stall['enabled'] or '?')}, {esc(stall['active'] or '?')}.{cite(S['stall'])}</p>
+  <ul>
+    <li><b>Passive:</b> it makes no network requests and writes nothing to any folder. It compares what is on disk with what the last push holds, using the engine's own test.</li>
+    <li><b>Stalled</b> means a change seen on disk that is still unpushed after 10 minutes while this machine is online.</li>
+    <li><b>The cause is named</b> from the engine's state: a held lock with its pid and age, quota, signed out, held deletes, a failing round with its error, or no engine at all.</li>
+    <li><b>The alert:</b> one <code>notify-send</code> per episode (no window, no focus taken) and a red bar in the dev view. Offline is never red.</li>
+    <li><b>Real use becomes data:</b> each push it sees is a propagation sample with op “real”. Those stay out of O1's headline, because they measure save → pushed, not save → the other disk.</li>
+  </ul>
+  <pre class="term wrap"><span class="p">journalctl --user -u folder-sync-stall.service</span>
+{esc(jt(first_stall[0])) if first_stall else '?'}  {esc(first_stall[1]) if first_stall else 'no run found'}
+<span class="p">… {max(stall['count'] - 2, 0)} more …</span>
+{esc(jt(last_stall[0])) if last_stall else '?'}  {esc(last_stall[1]) if last_stall else ''}</pre>
+  <p class="small muted">The first line is its first live run; the last is the newest at build time. The dev view's own reading: {esc(str(health.get('folders', {}).get('checked', '?')))} folders watched, {esc(str(health.get('folders', {}).get('pending', '?')))} with a change on its way, {len(health.get('folders', {}).get('stalled', []) or [])} stalled.</p>
+  <figure class="shot">{img(*fx_bar, alt="Dev view red bar: Sync stalled, zach: 1 changed file not pushed for 14 min; a lock held by pid 4242 for 14 min")}{img(*fx_panel, alt="Is it syncing? panel: 1 stalled of 3, recent points, the stopped folder with its cause")}
+    <figcaption><b>What red looks like</b>, on the dev view's seeded fixture (pid 4242 is made up). Nothing has been red for real; the live view is green, in History below.{cite(S['devview'])}</figcaption></figure>
+</section>
+
+<section id="ev-history">
+  <h2>History: every KPI over time, every gate by run</h2>
+  <ul>
+    <li><b>The dev view</b> (<code>scripts/dev-view</code>) now draws a Chart.js line per KPI slice, test and production, against time or against commits, with the target dashed. Chart.js 4.4.7 is vendored and inlined, so the page is still one file.</li>
+    <li><b>The gate grid</b> shows G1–G12 for each of the last 8 runs; the top edge of each column says CI on the branch, CI on main or local.</li>
+    <li><b>Below, rendered for this page from your real series</b> ({esc(SHOTS['devView'].get('builtLine') or '')}). The screenshots in <code>reports/media/history-2026-11-04-*.png</code> are the same views on the seeded fixture.{cite(S['devview'])}</li>
+  </ul>
+  <figure class="shot">{img(*dev_top, alt="Dev view on the real series: sync bar green, O1 584 ms test and 3.2 s production, O2, O3, twelve gates passing, the gate history grid")}
+    <figcaption>The overview: the stall check's bar, the three objectives, the 12 gates and the gate grid. In the grid, G1 is red on <code>29b6e83</code>, <code>aca22dd</code> and <code>29dac21</code>, and green from <code>0c9c02b</code> on.</figcaption></figure>
+  <figure class="shot">{img(*dev_o1, alt="Dev view O1 detail: propagation p50 over time per slice, production orange above the dashed 1 s target, test blue under it")}
+    <figcaption>O1's detail, its first row of charts (machine → machine add, delete, edit): production (orange) at 2–3 s since its first runs, test (blue) under the dashed 1 s line.</figcaption></figure>
+  <h3>The README and the landing page carry the same, small</h3>
+  <div class="sparks">
+    <figure><span>O1</span><img src="{sparks['spark-o1']}" alt="O1 p50 sparkline, last 30 days"></figure>
+    <figure><span>O2</span><img src="{sparks['spark-o2']}" alt="O2 sparkline, last 30 days"></figure>
+    <figure><span>O3</span><img src="{sparks['spark-o3']}" alt="O3 sparkline, last 30 days"></figure>
+    <figure><span>Gates</span><img class="gh" src="{sparks['gate-history']}" alt="Gate history strip, the last 7 runs"></figure>
+  </div>
+  <p class="small muted"><code>docs/status/*.svg</code>, written by <code>scripts/readme-status</code>, embedded here as they are: blue test, orange production, dashed the target; the strip is G1 (top) to G12 by run, oldest left.</p>
+</section>
+
+<section id="ev-cost">
+  <h2>Cost by size: pennies to 100 GB, retail wins at 1–2 TB</h2>
+  <p class="lead">The cheapest monthly plan of each service that holds each size, beside what keeping that much costs folder-sync. Storage only: no requests.{cite(S['cost'])}</p>
+  <div class="tbl"><table>
+    <thead><tr>{size_head}</tr></thead>
+    <tbody>{size_rows}</tbody>
+  </table></div>
+  <ul>
+    <li><b>10 GB and 100 GB:</b> {gb10.get('folder-sync on R2', '?')} and {gb100.get('folder-sync on R2', '?')} a month on R2 ({gb10.get('folder-sync on B2', '?')} and {gb100.get('folder-sync on B2', '?')} on B2), against up to {gb10.get('Dropbox', '?')} for a plan.</li>
+    <li><b>1 TB and 2 TB:</b> Google's {tb1.get('Google', '?')} and Dropbox's {tb1.get('Dropbox', '?')} beat R2's {tb1.get('folder-sync on R2', '?')} and {tb2.get('folder-sync on R2', '?')}. B2 is about level: {tb1.get('folder-sync on B2', '?')} at 1 TB (under both), {tb2.get('folder-sync on B2', '?')} at 2 TB (over both).</li>
+    <li><b>Storage is not the whole bill.</b> On R2 most of it is requests: production O3 is ${o3p['value']:.2f} a person-month at 10 GB (test ${o3t['value']:.2f}), against the {gb10.get('folder-sync on R2', '?')} the table shows for storage.{cite(S['status'])}</li>
+  </ul>
+  <h3>The prices behind it</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Plan</th><th>Storage</th><th>Monthly</th><th>Yearly, per month</th><th>Per GB-month</th><th>Source, accessed</th></tr></thead>
+    <tbody>{''.join(plan_rows)}</tbody>
+  </table></div>
+  <ul class="small">
+    <li><code>bench/cost/competitors.json</code>, as of {esc(as_of)}. dropbox.com and one.google.com show CA$ from this machine; the USD figures are the same pages as a US index serves them, and Google's were checked against the CA$ prices.</li>
+    <li>The write-up is in your vault: <a href="obsidian://open?path={esc(vault_note.replace(' ', '%20'))}">folder-sync — Sync Service Pricing vs Dropbox, Google Drive and Obsidian Sync (2026-11-04)</a>{'' if vault_ok else ' (NOT FOUND at build time)'}.{cite(S['cost'])}</li>
+  </ul>
+</section>
+
+<section id="ev-robotparts">
+  <h2>robotparts.dev: its own accounts, and you signed in</h2>
+  <ul>
+    <li><b>Its own Worker:</b> <code>folder-sync-accounts-robotparts</code>, live version <code>{BY_HAND['robotparts_live']}</code> (16:03), with its own Google client and its own D1 database. Payments and bring-your-own-bucket are off there too.{cite(S['wrangler'])}</li>
+    <li><b>You signed in.</b> Its database holds {BY_HAND['robotparts_d1']}: read by hand with a read-only count.{cite(S['robotparts'])}</li>
+    <li><b>The set-secrets page</b> (<code>accounts/scripts/set-secrets.py</code>) now shows a full-resolution annotated screenshot for every site, numbered like its steps; click one to enlarge it.{cite(S['secrets'])}</li>
+  </ul>
+  <div class="gallery">
+    <figure>{img(*sec_google, alt="Google Cloud: create an OAuth client, steps 1 to 5 marked")}<figcaption>Google: the new OAuth client, five numbered steps.</figcaption></figure>
+    <figure>{img(*sec_cf, alt="Cloudflare: create an R2 account token, steps 2 to 5 marked")}<figcaption>Cloudflare: the R2 token, Object Read &amp; Write on chosen buckets.</figcaption></figure>
+  </div>
+  <figure class="shot" style="max-width:620px">{img(*sec_cf_list, alt="Cloudflare: the Account API tokens list, Create Account API token marked 1")}<figcaption>Cloudflare, step 1. The list already shows the robotparts token, issued Nov 4.</figcaption></figure>
+</section>
+
+<section id="ev-landing">
+  <h2>The landing page is live</h2>
+  <p class="lead"><a href="{esc(SHOTS['landing']['url'])}">zacharyyamaoka.github.io/folder-sync</a> answered {SHOTS['landing'].get('status')} at {shot_at}: the download buttons, “{esc(SHOTS['landing'].get('gatesLine') or '? of 12 gates pass')}” and the journey video{' (<code>media/desktop-journey.mp4</code>)' if SHOTS['landing'].get('journeyVideo') else ''}.{cite(S['landing'])}</p>
+  <ul>
+    <li><b>Download buttons:</b> {', '.join(esc(d['text']) for d in downloads)}, each to the <code>desktop-v0.2.0</code> release.</li>
+    <li><b>No sideways scroll at 390 px:</b> {'measured, light and dark: the page is ' + str(phone_w.get('scrollWidth')) + ' px wide in a ' + str(phone_w.get('clientWidth')) + ' px window, and no element reaches past the edge outside its own scrolling box.' if no_sideways else 'FAILED: ' + esc(json.dumps(phone_w))}</li>
+  </ul>
+  <div class="gallery">
+    <figure>{img(*land_top, alt="Landing page at 1280 px: Your folder, on every computer and online, Download the app")}<figcaption>Desktop width (1280 px), the top.</figcaption></figure>
+    <figure>{img(*land_dl, alt="Landing page at 1280 px: the Desktop app section with the download buttons and the journey video")}<figcaption>Its desktop-app section: downloads and the journey video.</figcaption></figure>
+  </div>
+  <div class="phones">
+    <figure>{img(*land_phone_top, alt="Landing page at 390 px, dark: the top")}<figcaption>Phone width (390 px), dark.</figcaption></figure>
+    <figure>{img(*land_phone_dl, alt="Landing page at 390 px: the download buttons and the journey video")}<figcaption>Phone width, the downloads.</figcaption></figure>
+  </div>
+  <p class="small muted">Shot headless at {shot_at} by <code>docs/report/shoot_evening.mjs</code>, the video paused at 6 s. One small thing seen: the desktop-app heading sits right on its paragraph, with no gap.</p>
+</section>
+
+<section id="ev-decided">
+  <h2>Decided for you this evening</h2>
+  <p class="lead">Each was reversible, so it was done rather than asked. Each has its undo; run any of them yourself.</p>
+  <ol class="decisions">
+    <li><h3>Landed v0 on <code>main</code></h3>
+      <p><code>main</code> on GitHub is now <code>claude/folder-sync-v0</code> @ <code>{tip}</code>. Before today it was <code>{refs['archive/origin-main-pre-v0-land'] or '?'}</code> (Oct 28), tagged <code>archive/origin-main-pre-v0-land</code>.{cite(S['git'])}</p>
+      <p class="undo">Undo: <code>git push --force-with-lease origin archive/origin-main-pre-v0-land:main</code>, or revert single merges.</p></li>
+    <li><h3>Published the desktop pre-release <code>desktop-v0.2.0</code></h3>
+      <p>Public, marked pre-release, unsigned. Pushing the tag started the release workflow.{cite(S['release'])}</p>
+      <p class="undo">Undo: <code>gh release delete desktop-v0.2.0 -R {GH_REPO}</code>, then delete the tag (<code>git push origin :refs/tags/desktop-v0.2.0</code>). What was public stays seen.</p></li>
+    <li><h3>Pushed <code>gh-pages</code>: the new landing page</h3>
+      <p>Now <code>{remote['refs/heads/gh-pages'] or refs['origin/gh-pages'] or '?'}</code>; the earlier tip is tagged <code>archive/origin-gh-pages-pre-wave3</code> (<code>{refs['archive/origin-gh-pages-pre-wave3'] or '?'}</code>).{cite(S['git'])}</p>
+      <p class="undo">Undo: <code>git push --force-with-lease origin archive/origin-gh-pages-pre-wave3:gh-pages</code></p></li>
+    <li><h3>Replaced the command line: <code>~/.local/bin/folder-sync</code> is now <code>{esc(inst['cli_version'].replace('folder-sync ', '')) or '?'}</code></h3>
+      <p>The previous one (<code>v0-29b6e83</code>) is kept beside it{'' if inst['cli_backup'] else ' (NOT FOUND at build time)'}.{cite(S['installed'])}</p>
+      <p class="undo">Undo: <code>mv ~/.local/bin/folder-sync.v0-29b6e83-backup ~/.local/bin/folder-sync</code></p></li>
+    <li><h3>Quota back to 10 GiB</h3>
+      <p><code>bb4282e</code> reverts the temporary 12 GiB (<code>2118ca0</code>). It first went out as Worker <code>{BY_HAND['worker_revert_first']}</code> at 15:17; the live version is <code>{BY_HAND['worker_live']}</code> (15:32), also 10 GiB. Read by hand.{cite(S['wrangler'])}</p>
+      <p class="undo">Undo: <code>git revert bb4282e</code>, then deploy. A bare <code>wrangler rollback</code> is not enough: it goes to <code>{BY_HAND['worker_revert_first']}</code>, which is 10 GiB too. <code>npx wrangler rollback {BY_HAND['worker_12gib']}</code> gives 12 GiB back but also drops the Worker changes since 14:00.</p></li>
+    <li><h3>Enabled the stall timer</h3>
+      <p><code>folder-sync-stall.timer</code>, every 5 minutes, since {jt(first_stall[0]) if first_stall else '?'}.{cite(S['stall'])}</p>
+      <p class="undo">Undo: <code>systemctl --user disable --now folder-sync-stall.timer</code></p></li>
+    <li><h3>Applied the robotparts D1 migrations</h3>
+      <p>They only add; nothing was dropped or rewritten. The database was exported first.{cite(S['wrangler'])}</p>
+      <p class="undo">Backup: <code>~/.local/share/folder-sync-backups/d1-folder-sync-accounts-robotparts-2026-11-04-pre-0011.sql</code></p></li>
+  </ol>
+</section>
+
+<section id="ev-left">
+  <h2>Left, and what needs you</h2>
+  <ol>
+    <li><b>O1 in production:</b> {ms(o1p['value'])} at p50 ({hhmm(o1p['t'])}) and {ms(o1p95['value'])} at p95, against 1 s and 3 s. Test is {ms(o1t['value'])}. Where the production seconds go is still not broken down.{cite(S['status'])}</li>
+    <li><b>O3 on R2:</b> ${o3p['value']:.2f} a person-month in production ({hhmm(o3p['t'])}), mostly request charges, against $0.50.{cite(S['status'])}</li>
+    <li><b>Payments and bring-your-own-bucket are off</b> and need Stripe test keys. <span class="tag need">needs you</span> only if you want them on; the default is off.</li>
+    <li><b>The installers are unsigned.</b> Signing means an Apple Developer account and a Windows code-signing certificate, both paid. <span class="tag need">needs you</span> Recommendation: stay unsigned while you are the only user.</li>
+    <li><b>The dirty-connection retry is still missing:</b> 4 in about 166k reads in the G1 probe broke on a dirty connection, and those are not read again yet.{cite(S['g1'])}</li>
+    <li><b>The burst-watcher flake is still there:</b> <code>TestWatcherSignalsOnceAfterABurst</code>, red once in CI, {BY_HAND['flake_local']} here.{cite(S['flake'])}</li>
+    <li><b>A second flake, new tonight:</b> <code>ui/test/files.spec.mjs:210</code> (“on a machine the tab says to browse online … and is not in the menu”) failed on <code>main</code> @ <code>{tip}</code> (run 41952714897) and {BY_HAND['ui_flake_local']} times here: the “Files” item is sometimes still in the menu after the reload. That run reads G4 red until it is rerun or the test is fixed.{cite(S['ci'], S['flake'])}</li>
+    <li><b>Open the desktop app once</b> (menu: “folder-sync”). It is your first real run, on your own account. <span class="tag need">needs you</span></li>
+    <li><b>Carried over from the afternoon:</b> vibetracks.dev still sends its sign-in mail as “Robot Parts” (<code>accounts/wrangler.toml</code> line 90).</li>
+  </ol>
+  <h3>Deliberately not done for this page</h3>
+  <ul class="small">
+    <li>No commit, push or deploy. The builder change (<code>docs/report/build_nov4.py</code>, <code>shoot_evening.mjs</code>) is uncommitted on <code>claude/folder-sync-v0</code>.</li>
+    <li>The afternoon's text is not edited: it is history, true at 15:12. What changed since is listed under its heading.</li>
+    <li>The fixture history screenshots are used once, for what red looks like; the charts shown are a fresh render from your real series.</li>
+    <li>No GIF fallback for the video: the original MP4 rides beside the VP9 instead. No audit was run.</li>
+  </ul>
+</section>
+"""
+    evening = label_cells(evening)
+
+    # ---- the afternoon, from the 15:30 page
+    earlier = open(A.earlier, encoding="utf-8").read()
+    start, sources_at = earlier.index('<section id="verdict">'), earlier.index('<section id="sources" class="sources">')
+    afternoon = earlier[start:sources_at]
+    sources_end = earlier.index("</section>", sources_at)
+    afternoon_ol = re.search(r"<ol>.*</ol>", earlier[sources_at:sources_end], flags=re.S).group(0)
+    earlier_name = os.path.basename(A.earlier)
+
+    since = f"""
+<div class="part" id="afternoon">
+  <p class="eyebrow">The 15:30 page, unchanged</p>
+  <h2 class="part-title">Afternoon, Nov 4: Waves 1–3, as of 15:12</h2>
+  <p>Below is the earlier page's body as it was, numbers and all. Since then:</p>
+  <ul class="since">
+    <li>Wave 3 landed on <code>claude/folder-sync-v0</code> at 15:13, and v0 is now <code>main</code> on GitHub.</li>
+    <li>G4 and G11 pass: {summary_now} of 12 gates. Its “not built” and “waits for a green macOS and Windows run” are history.</li>
+    <li>The README's O3 row names the provider that holds your folders (<code>4fe6938</code>), so its warning below is resolved.</li>
+    <li>The landing page it calls “still the old one” is live with the new content.</li>
+    <li>The quota is back to 10 GiB, robotparts.dev has its secrets and your sign-in, and the command line is <code>{esc(inst['cli_version'].replace('folder-sync ', '')) or '?'}</code>.</li>
+  </ul>
+</div>
+"""
+
+    ev_sources = [
+        ("git", f"<code>git -C /home/bam/folder-sync</code> at build time: <code>ls-remote origin</code> (main {remote['refs/heads/main']}, claude/folder-sync-v0 {remote['refs/heads/claude/folder-sync-v0']}, gh-pages {remote['refs/heads/gh-pages']}), <code>rev-parse</code> of <code>main</code> ({refs['main']}), <code>desktop-v0.2.0</code>, <code>archive/origin-main-pre-v0-land</code> ({refs['archive/origin-main-pre-v0-land']}), <code>archive/origin-gh-pages-pre-wave3</code> ({refs['archive/origin-gh-pages-pre-wave3']}); <code>git log</code> for <code>bb4282e</code>, <code>4fe6938</code>, <code>2ea3f2a</code>."),
+        ("ci", f"<code>gh run view</code> for runs {', '.join(str(r) for r in RUN_NOTES)} and <code>gh run list --commit {tip}</code>, at build time; run 41949468638 attempt 1's job logs (read by hand 19:03): <code>push_test.go:52: a burst of writes signalled twice</code>, then G4 “CI job core-alone, this run: needs.core-alone.result = failure”, “11 pass, 1 fail”; the macOS journey job's log at build time."),
+        ("gates", f"<code>reports/status/gates.json</code> (run {esc(gates_now['run_at'])} on <code>{gates_now['code_sha'][:7]}</code>, {summary_now} pass) and <code>reports/status/gates-history.jsonl</code> ({len(history)} runs); run 41949468638 attempt 2's <code>gates (linux)</code> log: “12 pass”."),
+        ("g1", "Commit <code>419c2ff</code> (<code>lane/g1-soak</code>, merged as <code>0c9c02b</code>): the two failure shapes (seeds 4 and 81), the probe counts (681 / 283 / 622 / 4 per ~166k reads), 17,766 empty-lock sightings before the fix, 85 seeds 0 failures after, the <code>keepLocalEdit</code> mutation."),
+        ("release", f"<code>gh release view desktop-v0.2.0</code> at build time: pre-release {(release or {}).get('isPrerelease')}, published {(release or {}).get('publishedAt')}, target <code>{((release or {}).get('targetCommitish') or '')[:7]}</code>, {len(assets)} assets; <code>.github/workflows/desktop-release.yml</code> (tag-triggered, always <code>--prerelease</code> while unsigned)."),
+        ("desktop", "<code>reports/media/desktop-2026-11-04-*.png</code>, <code>desktop-journey-2026-11-04.mp4</code> and <code>desktop-real-window-2026-11-04.json</code> (written by <code>app/scripts/real_window.mjs</code>: the Tauri binary on Xvfb, a local stack, the test person desktop-real@example.com); <code>app/test/journey.mjs</code> header and lines 256–263 (edits both ways); <code>.github/workflows/test.yml</code> job <code>desktop-journey</code>. Each image was looked at before use."),
+        ("installed", f"At build time: <code>{esc(inst['appimage'])}</code> sha256 {(inst['appimage_sha'] or '?')[:16]}… ({'equal to' if same_bytes else 'NOT equal to'} <code>reports/media/folder-sync_0.2.0_amd64.AppImage</code>); <code>~/.local/share/applications/folder-sync.desktop</code> Exec {esc(inst['menu_exec'] or 'missing')}; <code>~/.local/bin/folder-sync version</code> → {esc(inst['cli_version'])}; the <code>.v0-29b6e83-backup</code> beside it."),
+        ("stall", f"<code>bench/kpi/stall.mjs</code> header; <code>systemctl --user is-enabled / is-active folder-sync-stall.timer</code> and <code>journalctl --user -u folder-sync-stall.service</code> at build time ({stall['count']} runs logged); commit <code>2ea3f2a</code> (O1's headline leaves out real-use samples)."),
+        ("cost", f"<code>bench/cost/competitors.json</code> (as of {esc(as_of)}, every row's source URL and access date); the README's generated “By size” table; vault note <code>{esc(vault_note)}</code>."),
+        ("status", f"<code>scripts/status --out</code> on the real series at {hhmm(EV['generated_at'])}: O1 production p50 {ms(o1p['value'])} at {hhmm(o1p['t'])}, p95 {ms(o1p95['value'])}; O3 R2 production ${o3p['value']:.2f}, test ${o3t['value']:.2f} a person-month."),
+        ("wrangler", f"Read by hand 19:05–19:12: <code>npx wrangler deployments list</code> in <code>accounts/</code> (… 939afe92 22:17:55Z, bed0a34c 22:32:40Z) and with <code>--env robotparts</code> (e16f68d0 23:03:43Z); <code>wrangler versions view</code>: QUOTA_BY_OWNER 10 GiB on 939afe92 and bed0a34c, 12 GiB on 0a0f5357; <code>accounts/wrangler.toml</code> <code>[env.robotparts]</code>; <code>~/.local/share/folder-sync-backups/</code>."),
+        ("robotparts", "Read by hand 19:11: <code>wrangler d1 execute folder-sync-accounts-robotparts --env robotparts --remote</code>, one read-only <code>SELECT COUNT(*)</code> over user, account (provider google) and session."),
+        ("secrets", "<code>accounts/scripts/set-secrets/google-create-client.png</code>, <code>cloudflare-token-form.png</code>, <code>cloudflare-token-list.png</code>; commit <code>29dac21</code>. Looked at before use; no secret value is visible in them."),
+        ("landing", f"<code>docs/report/shoot_evening.mjs</code> at {shot_at}: headless Chromium on {esc(SHOTS['landing']['url'])} at 1280 px light and 390 px light and dark; <code>scrollWidth</code> against <code>clientWidth</code> and every element's right edge; the download links and the gates line read from the page; <code>origin/gh-pages</code> commit <code>234ed8c</code>."),
+        ("devview", "The dev view rendered for this page by <code>scripts/status --out</code> on the real series and shot by <code>shoot_evening.mjs</code>; the seeded-fixture views in <code>reports/media/history-2026-11-04-*.png</code> (their prices read “Fixture Drive A” and the like); <code>scripts/dev-view-vendor/README.md</code> (Chart.js 4.4.7, inlined)."),
+        ("flake", "Read by hand 19:20: <code>go test -run 'TestWatcherSignalsOnceAfterABurst$' -count=30 ./internal/push</code> → <code>ok folder-sync/internal/push 12.150s</code>. 19:29: <code>npx playwright test test/files.spec.mjs -g \"on a machine the tab says\" --repeat-each 30 --workers 4</code> in <code>ui/</code> → 29 passed, 1 failed, on the same assertion as run 41952714897's (<code>files.spec.mjs:217</code>, “Files” menuitem: expected 0, received 1)."),
+        ("brief", "The dispatcher's evening brief (19:00): that you have not run the desktop app yet, and the list of reversible steps it took. Each step's state was checked against git, GitHub, wrangler or the file system as cited beside it."),
+    ]
+    ev_ol = "".join(f'<li id="s{S[key]}">{text}</li>' for key, text in ev_sources)
+
+    sources = f"""
+<section id="sources" class="sources">
+  <h2>Source index</h2>
+  <h3>Afternoon, 1–21 (unchanged)</h3>
+  {afternoon_ol}
+  <h3>Evening, {EV_FIRST_SOURCE}–{EV_FIRST_SOURCE + len(ev_sources) - 1}</h3>
+  <ol start="{EV_FIRST_SOURCE}">{ev_ol}</ol>
+</section>
+
+<section id="earlier-versions" class="earlier">
+  <h2>Earlier versions of this page</h2>
+  <ul>
+    <li><a href="{esc(earlier_name)}">{esc(earlier_name)}</a>: the 15:30 version (built 15:12), before the evening section. The afternoon part above is its body, unchanged.</li>
+    <li><a href="folder-sync-2026-11-04-1029.html">folder-sync-2026-11-04-1029.html</a>: the 10:29 version, the morning's.</li>
+  </ul>
+</section>
+"""
+
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Folder Sync Nov 4</title>
+<meta name="description" content="folder-sync, Nov 4 2026: the evening (v0 on main, 12 of 12 gates, desktop app 0.2.0, the passive stall check, cost by size) over the afternoon's Waves 1-3 review.">
+<style>{CSS}{EV_CSS}</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <p class="eyebrow">folder-sync · review packet · 2026-11-04 · evening, over Waves 1–3</p>
+  <h1>folder-sync v0 is on main with {summary_now} of 12 gates, and the desktop app is out as a pre-release; two timing flakes are left</h1>
+  <p class="meta">The evening section is new; the afternoon below it is the 15:30 page, unchanged (linked at the bottom). Built {CHECKED_AT}. Times are this machine's clock (UTC−7).</p>
+</header>
+{evening}
+{since}
+{afternoon}
+{sources}
+<footer>Built {datetime.now(LOCAL).strftime('%Y-%m-%d %H:%M')} by <code>docs/report/build_nov4.py --earlier {esc(earlier_name)}</code>. Self-contained: no network, no server.</footer>
+</div>
+</body>
+</html>
+"""
+    with open(A.out, "w", encoding="utf-8") as handle:
+        handle.write(page)
+    print(A.out, os.path.getsize(A.out))
+
+
 if __name__ == "__main__":
-    build()
+    build_evening() if A.earlier else build()
