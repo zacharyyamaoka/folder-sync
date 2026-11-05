@@ -25,8 +25,13 @@ SHA-256 of every file is below and in `SHA256SUMS`.
 ## First run
 
 1. Click **Sign in**. Your browser opens the approval page; sign in there and click **Approve**.
-2. Click **Create folder** (`~/robotparts`; on Windows `Documents\robotparts`).
-3. Drop a file in. It shows up on your other computers and online.
+2. Choose your folder, the way Obsidian chooses a vault:
+   - **Create new folder**: give it a name and a place (the default is `~/folder-sync/<name>`; on Windows `Documents\folder-sync\<name>`).
+   - **Open existing folder**: pick a folder you already have. Everything in it uploads.
+   - **Your folders online**: on a second computer, pick the folder you made on the first and **Download** it. This is how your Mac joins.
+3. Drop a file in. It shows up on your other computers and on the **Files** page (**Open online** in the window or the tray menu).
+
+**Change folder…** in the tray menu opens the same choice again. The server is vibetracks.dev; another one goes under **Advanced**.
 
 Each download is checked against its SHA-256: `shasum -a 256 <file>` (Mac), `Get-FileHash <file>` (Windows
 PowerShell), `sha256sum <file>` (Linux).

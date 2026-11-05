@@ -43,21 +43,73 @@
     </div>
   </section>
 
-  <section id="step-folder" class="step" hidden>
-    <p>Where should your folder live? The app makes it for you.</p>
-    <button class="primary" data-action="create_folder" data-testid="create-folder">Create <span id="default-folder"></span></button>
-    <button data-action="choose_folder" data-testid="choose-folder">Choose a folder…</button>
+  <details id="advanced" class="advanced" hidden>
+    <summary data-testid="advanced">Advanced</summary>
+    <label class="field">
+      <span class="muted">Server</span>
+      <input id="server-input" data-testid="server-input" type="url" spellcheck="false" autocomplete="off" placeholder="https://vibetracks.dev">
+    </label>
+    <p id="server-note" class="muted" hidden></p>
+    <div class="row">
+      <button id="server-save" data-testid="server-save">Use this server</button>
+    </div>
+    <p id="server-error" class="error" data-testid="server-error" hidden></p>
+  </details>
+
+  <section id="step-folder" class="step picker" hidden>
+    <div class="block">
+      <h2>Create new folder</h2>
+      <label class="field">
+        <span class="muted">Name</span>
+        <input id="new-name" data-testid="new-name" type="text" value="My folder" spellcheck="false" autocomplete="off">
+      </label>
+      <div class="where">
+        <span class="muted">In</span>
+        <code id="new-parent" data-testid="new-location"></code>
+        <button class="quiet" id="new-choose" data-testid="new-choose">Choose…</button>
+      </div>
+      <button class="primary" id="create-folder" data-testid="create-folder">Create folder</button>
+    </div>
+
+    <div class="block">
+      <h2>Open existing folder</h2>
+      <p class="muted">Pick a folder on this computer. Everything in it uploads.</p>
+      <button id="open-existing" data-testid="open-existing">Open existing folder…</button>
+    </div>
+
+    <div class="block">
+      <h2>Your folders online</h2>
+      <p id="online-note" class="muted" data-testid="online-note"></p>
+      <ul id="online-list" class="online" data-testid="online-list"></ul>
+      <div id="join-form" class="join" data-testid="join-form" hidden>
+        <p>Download <b id="join-name"></b> into</p>
+        <div class="where">
+          <code id="join-path" data-testid="join-location"></code>
+          <button class="quiet" id="join-choose" data-testid="join-choose">Choose…</button>
+        </div>
+        <div class="row">
+          <button class="primary" id="join-go" data-testid="join-folder">Download</button>
+          <button class="quiet" id="join-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <p id="picker-error" class="error" data-testid="picker-error" hidden></p>
+    <div class="row">
+      <button class="quiet" id="picker-cancel" data-action="cancel_picker" data-testid="picker-cancel" hidden>Cancel</button>
+      <button class="quiet" data-action="open_online" data-testid="open-online-picker">Open online</button>
+    </div>
   </section>
 
   <section id="step-running" class="step" hidden>
     <p class="folder"><span class="muted">Folder</span> <code id="folder" data-testid="folder"></code></p>
     <div class="row">
       <button class="primary" data-action="open_folder" data-testid="open-folder">Open folder</button>
-      <button data-action="open_site">Open robotparts.dev</button>
+      <button data-action="open_online" data-testid="open-online">Open online</button>
     </div>
     <div class="row">
       <button id="pause" data-action="pause" data-testid="pause">Pause sync</button>
-      <button class="quiet" data-action="choose_folder">Change folder…</button>
+      <button class="quiet" data-action="choose_folder" data-testid="change-folder">Change folder…</button>
     </div>
   </section>
 

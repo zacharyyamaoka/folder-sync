@@ -54,15 +54,16 @@ fn menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
             items.push(Box::new(action("reopen_link", "Open the approval page again")?));
             items.push(Box::new(action("cancel_sign_in", "Cancel sign-in")?));
         }
-        Status::NeedsFolder => {
-            items.push(Box::new(action("create_folder", &format!("Create folder {}", snap.default_folder))?));
-            items.push(Box::new(action("choose_folder", "Choose folder…")?));
-        }
+        Status::NeedsFolder => items.push(Box::new(action("choose_folder", "Choose folder…")?)),
         _ => {}
     }
-    if snap.folder.is_some() && snap.email.is_some() {
-        items.push(Box::new(action("open_folder", "Open folder")?));
-        items.push(Box::new(action("open_site", "Open robotparts.dev")?));
+    if snap.signed_in {
+        if snap.folder.is_some() {
+            items.push(Box::new(action("open_folder", "Open folder")?));
+        }
+        items.push(Box::new(action("open_online", "Open online")?));
+    }
+    if snap.folder.is_some() && snap.signed_in {
         if snap.paused {
             items.push(Box::new(action("resume", "Resume sync")?));
         } else {
@@ -73,7 +74,7 @@ fn menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
     items.push(Box::new(PredefinedMenuItem::separator(app)?));
     items.push(Box::new(action("show", "Show window")?));
     items.push(Box::new(CheckMenuItem::with_id(app, "autostart", "Start at login", true, snap.autostart, None::<&str>)?));
-    if snap.email.is_some() {
+    if snap.signed_in {
         items.push(Box::new(action("sign_out", "Sign out")?));
     }
     items.push(Box::new(action("quit", "Quit folder-sync")?));

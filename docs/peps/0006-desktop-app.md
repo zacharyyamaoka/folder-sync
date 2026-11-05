@@ -116,3 +116,35 @@ same pieces.
   the deep link, and `folder-sync serve` for offline reads. The rclone the engine needs is downloaded and sha256-checked
   on first `init` (`~/.folder-sync/bin`), as for the CLI; bundling it as a second sidecar (85 MB) is the alternative.
 
+## 9. As built, Nov 4 (lane/desktop-journey, Zach's criterion)
+
+Zach's test (2026-11-04): "sign into the desktop app, put some files in there, and then just log in online and see it there. AND on my
+mac, then logging there and then sync. I think it can be like Obsidian where you select a new folder or existing vault." This
+replaces §7's "per-app folder" default and §3's "Create ~/robotparts".
+
+- **The folder is chosen, not fixed.** After sign-in the window offers *Create new folder* (name and place, default
+  `~/folder-sync/<name>`), *Open existing folder…* (the stock `tauri-plugin-dialog`; its files upload) and *Your folders online*
+  (`folder-sync projects --json`; *Download…* puts one in an empty place of the person's choice). *Change folder…* in the tray and
+  the window reopens it. There is no fixed project: it is the folder's name, read back from `.folder-sync.toml` after `init`.
+- **Every folder is a shared tree (PEP 0010).** `use_folder` runs `init`, then `share`, then the engine, so the Mac gets the same
+  files, not a read-only copy per machine under `hosts/`. `share` is idempotent, so *Download…* runs it too. Nothing about the running
+  folder changes until `init` and `share` have succeeded, so a refusal (an online folder of that name, a non-empty place, no network)
+  is text under the button and the old folder keeps syncing.
+- **Server.** The default is `https://vibetracks.dev`, where Zach's own account and `/fs/files` live. `FOLDER_SYNC_SERVER` still wins
+  (dev, tests; the field is then read-only). The first-run window has the *Server* field under *Advanced*, only while signed out
+  (a session belongs to one server). A 0.1 `settings.json` that pinned robotparts.dev is dropped back to the default.
+- **Open online** (tray and window) is `<server>/fs/files?project=<folder>`.
+- **Found by running it.** (1) `folder-sync projects --json` was an AccessDenied for an account with no folders yet, which is the
+  first screen of every new account: rclone checks the root's parent, which a prefix-scoped key may not list. The engine now falls back
+  to the S3 client's own delimited LIST (`cmd/folder-sync/main.go`; `e2e` "projects of an account with no folders yet" fails without
+  it). (2) The keychain can hold a sign-in while `settings.json` has no email; the window keyed its picker on the email, so a second
+  computer showed no picker. It keys on `signed_in` now. (3) The engine counts the shared tree among a folder's peers, so a lone
+  computer read "1 other machine"; the app subtracts the tree.
+- **Proof.** `app/test/journey.mjs` runs the whole story on two computers (§ PLATFORMS "G5"), in CI on Linux and a real Mac
+  (`desktop journey`). `app/scripts/real_window.mjs` drives the real binary on a virtual display: typing in the real window, three
+  files on the Files page 0.9 s after the drop, the second computer's download, light and dark.
+- **Releases.** `desktop-release.yml` builds macOS (universal `.dmg`, which contains arm64), Windows (`-setup.exe` and `.msi`) and Linux
+  (`.deb` and `.AppImage`) from a `desktop-v*` tag and publishes every one as a GitHub pre-release (unsigned). Version 0.2.0.
+- **Not done.** Signing and notarization, the updater, a tray host on every Linux desktop, a Windows engine stop with CTRL_BREAK (still
+  `TODO(windows)`), and the real Tauri window on macOS in CI (no driver exists for WKWebView; the journey runs the page and engine
+  there, and `cargo test` plus the installer smoke build and unpack the real app).

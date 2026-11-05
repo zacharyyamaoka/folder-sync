@@ -11,7 +11,8 @@ mod settings;
 mod tray;
 mod vault;
 
-use crate::core::{Shared, Snapshot, Status};
+use crate::core::{Online, Shared, Snapshot, Status};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
@@ -32,44 +33,25 @@ fn open_folder(app: &AppHandle) {
     }
 }
 
-fn open_site(app: &AppHandle) {
+fn open_online(app: &AppHandle) {
     let site = core::site_of(&app.state::<Shared>().lock().settings);
     core::open_url(app, &site);
 }
 
-fn choose_folder(app: &AppHandle) {
-    let start = {
-        let inner = app.state::<Shared>();
-        let inner = inner.lock();
-        inner.settings.folder.clone().unwrap_or_else(|| core::default_folder(app, &inner.settings.project))
-    };
-    let handle = app.clone();
-    let mut dialog = app.dialog().file().set_title("Choose the folder to sync");
-    if let Some(parent) = start.parent() {
-        dialog = dialog.set_directory(parent);
-    }
-    dialog.pick_folder(move |picked| {
-        if let Some(path) = picked.and_then(|p| p.into_path().ok()) {
-            run_folder_change(&handle, path);
-        }
-    });
-}
-
-fn run_folder_change(app: &AppHandle, folder: std::path::PathBuf) {
+/// The native folder dialog (the stock tauri-plugin-dialog), off the main thread: it blocks until the person answers.
+async fn pick_folder(app: &AppHandle, title: &str, start: Option<PathBuf>) -> Option<PathBuf> {
     let app = app.clone();
-    std::thread::spawn(move || {
-        core::stop_engine(&app);
-        let _ = core::use_folder(&app, folder);
-    });
-}
-
-fn create_folder(app: &AppHandle) {
-    let folder = {
-        let inner = app.state::<Shared>();
-        let inner = inner.lock();
-        core::default_folder(app, &inner.settings.project)
-    };
-    run_folder_change(app, folder);
+    let title = title.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = app.dialog().file().set_title(title);
+        if let Some(start) = start.filter(|p| p.is_dir()) {
+            dialog = dialog.set_directory(start);
+        }
+        dialog.blocking_pick_folder().and_then(|p| p.into_path().ok())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 fn set_autostart(app: &AppHandle, on: bool) {
@@ -105,10 +87,10 @@ pub fn on_menu(app: &AppHandle, id: &str) {
             }
         }
         "cancel_sign_in" => core::cancel_sign_in(&app),
-        "create_folder" => create_folder(&app),
-        "choose_folder" => choose_folder(&app),
+        "choose_folder" => core::open_picker(&app),
+        "cancel_picker" => core::close_picker(&app),
         "open_folder" => open_folder(&app),
-        "open_site" => open_site(&app),
+        "open_online" => open_online(&app),
         "pause" => {
             std::thread::spawn(move || core::set_paused(&app, true));
         }
@@ -138,6 +120,45 @@ fn snapshot(app: AppHandle) -> Snapshot {
     core::snapshot(&app)
 }
 
+/// The picker's commands. A failure comes back as the text the window shows under the button.
+async fn background<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn create_folder(app: AppHandle, name: String, parent: String) -> Result<(), String> {
+    background(move || core::create_folder(&app, &name, PathBuf::from(parent))).await
+}
+
+#[tauri::command]
+async fn join_folder(app: AppHandle, project: String, parent: String) -> Result<(), String> {
+    background(move || core::join_folder(&app, &project, PathBuf::from(parent))).await
+}
+
+/// "Open existing folder": the native dialog, then the folder is synced. Ok(false) when the person closed the dialog.
+#[tauri::command]
+async fn open_existing(app: AppHandle) -> Result<bool, String> {
+    let start = Some(core::default_parent(&app).parent().map(PathBuf::from).unwrap_or_default());
+    let Some(folder) = pick_folder(&app, "Open an existing folder", start).await else { return Ok(false) };
+    background(move || core::open_existing_folder(&app, folder).map(|()| true)).await
+}
+
+/// A location for a new or downloaded folder: the native dialog, starting at `start`. None when it was closed.
+#[tauri::command]
+async fn pick_location(app: AppHandle, start: Option<String>) -> Option<String> {
+    pick_folder(&app, "Choose where the folder goes", start.map(PathBuf::from)).await.map(|p| p.display().to_string())
+}
+
+#[tauri::command]
+fn set_server(app: AppHandle, server: String) -> Result<(), String> {
+    core::set_server(&app, &server)
+}
+
+#[tauri::command]
+fn refresh_online(app: AppHandle) {
+    core::refresh_online(&app);
+}
+
 #[tauri::command]
 fn action(app: AppHandle, id: String, on: Option<bool>) {
     if id == "autostart" {
@@ -159,7 +180,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--hidden"])))
-        .invoke_handler(tauri::generate_handler![snapshot, action])
+        .invoke_handler(tauri::generate_handler![snapshot, action, create_folder, join_folder, open_existing, pick_location, set_server, refresh_online])
         .setup(move |app| {
             let config_dir = app.path().app_config_dir()?;
             let data_dir = app.path().app_data_dir()?;
@@ -176,6 +197,8 @@ fn main() {
                 generation: 0,
                 login: None,
                 quitting: false,
+                online: Online::Idle,
+                picking: false,
             }))));
             let handle = app.handle().clone();
             tray::create(&handle)?;

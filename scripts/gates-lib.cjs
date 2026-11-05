@@ -85,7 +85,7 @@ function definitions(ctx) {
       proofs: [
         { kind: 'go', pkg: './e2e', tests: ['TestTwoMachines'] },
         { kind: 'cmd', name: 'web: the Files page against the real accounts Worker (ui/scripts/files-real.mjs)', argv: ['node', 'ui/scripts/files-real.mjs'], needs: 'web' },
-        { kind: 'cmd', name: 'desktop: open the folder, see its files, edit one, see it synced (app/test/journey.mjs: the shell\'s page in Chromium over the real engine)', argv: ['node', 'app/test/journey.mjs'], needs: 'web' },
+        { kind: 'cmd', name: 'desktop: sign in, create a folder, 3 files on the web Files page in 10 s, a second computer downloads it and edits reach the first, open an existing folder (app/test/journey.mjs: the shell\'s page in Chromium over the real engine; also CI desktop journey, linux and macos)', argv: ['node', 'app/test/journey.mjs'], needs: 'web' },
       ],
     },
     {

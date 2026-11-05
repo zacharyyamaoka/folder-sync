@@ -7,4 +7,4 @@ Icon={{icon}}
 Name={{name}}
 Terminal=false
 Type=Application
-Keywords=sync;folder;robotparts;
+Keywords=sync;folder;files;backup;

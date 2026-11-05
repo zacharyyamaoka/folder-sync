@@ -197,6 +197,12 @@ By default each machine publishes its own files and receives the others' read-on
 
 Run the Worker locally (rclone serve s3, the R2 stand-in, `wrangler dev` with a local D1 and generated test keys): `npm install --prefix accounts`, then `node accounts/scripts/dev.mjs up` (`down` stops exactly what it started). Its tests: `node --test accounts/test/worker.test.ts` and the end-to-end proof `node accounts/test/proof.mjs` (ports 4930-4932).
 
+### Desktop app
+
+The same engine in a tray app ([`app/`](app/README.md), [PEP 0006](docs/peps/0006-desktop-app.md)): sign in, choose a folder, and it stays in sync. Installers for macOS (`.dmg`), Windows (`.exe`, `.msi`) and Linux (`.deb`, `.AppImage`) are built by the `desktop-release` workflow from a `desktop-v*` tag and published as a pre-release on the [Releases page](https://github.com/zacharyyamaoka/folder-sync/releases); they are not signed yet, so the first open needs the steps in [`app/release/NOTES.md`](app/release/NOTES.md).
+
+Choosing a folder works like Obsidian's vault picker: **Create new folder** (a name and a place, `~/folder-sync/<name>` by default), **Open existing folder** (its files upload) or **Your folders online** (on a second computer, download one a first computer set up). Every folder the app makes is a shared tree, so the same files are on each computer and on the Files page (**Open online**). The server is `https://vibetracks.dev`; another one goes under *Advanced* in the first-run window. `app/test/journey.mjs` runs that whole story on two computers (Linux and a real Mac in CI); `app/scripts/real_window.mjs` drives the real binary on a virtual display.
+
 ### Try it with no cloud account
 
 These assume the checkout is at `~/folder-sync`; Go is on your `PATH`, or at `~/.local/go/bin`.
