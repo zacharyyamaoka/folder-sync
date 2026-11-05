@@ -54,9 +54,15 @@ const LEGACY = {
 };
 const LEGACY_ENV = { local: "test", prod: "prod" };
 const KNOWN_KPIS = new Set(OBJECTIVES.flatMap((o) => o.metrics.map((m) => m.kpi)));
+// Health check (docs/KPI.md "Is it syncing?"): not an objective, so it has no card and no target; it gets the live bar.
+export const HEALTH_KPIS = ["sync_stalled_folders"];
+// WHY 90 minutes: a quiet check writes one heartbeat point an hour (bench/kpi/health.mjs), so nothing for 90 minutes means it is not running
+export const HEALTH_STALE_MS = 90 * 60_000;
+export const HISTORY_RUNS = 40;
+const HISTORY_POINTS = 600;
 const ENVS = ["test", "prod"];
 
-export function loadSources({ kpi, gates }) {
+export function loadSources({ kpi, gates, history, competitors }) {
 	const read = (path) => {
 		if (!path || !existsSync(path)) return { path, found: false, text: null };
 		try {
@@ -65,7 +71,7 @@ export function loadSources({ kpi, gates }) {
 			return { path, found: false, text: null, error: String(err.message ?? err) };
 		}
 	};
-	return { kpi: read(kpi), gates: read(gates) };
+	return { kpi: read(kpi), gates: read(gates), history: read(history), competitors: read(competitors) };
 }
 
 // WHY 2x: "within double the target" is a near miss (amber), anything worse is red; the page never colours a value that meets its target.
@@ -110,7 +116,7 @@ function parsePoints(source, warnings) {
 			kpi = legacy.kpi;
 			for (const k of Object.keys(slice)) delete slice[k];
 			Object.assign(slice, { env, direction: legacy.direction, op: "legacy" });
-		} else if (!KNOWN_KPIS.has(kpi)) {
+		} else if (!KNOWN_KPIS.has(kpi) && !HEALTH_KPIS.includes(kpi)) {
 			skipped.unknownKpi++;
 			continue;
 		}
@@ -141,7 +147,7 @@ function parsePoints(source, warnings) {
 			continue;
 		}
 		seen.add(key);
-		points.push({ kpi, env: slice.env, slice, t, v: p.status === "measured" ? p.value : null, failed: p.status === "failed", n: p.n, labels: p.labels && typeof p.labels === "object" ? p.labels : {} });
+		points.push({ kpi, env: slice.env, slice, t, v: p.status === "measured" ? p.value : null, failed: p.status === "failed", n: p.n, labels: p.labels && typeof p.labels === "object" ? p.labels : {}, sha: typeof p.source?.code_sha === "string" ? p.source.code_sha : null });
 	}
 	const say = (n, text) => n && warnings.push(`${n} ${text}`);
 	say(skipped.badJson, "KPI lines skipped: not valid JSON or not vt-kpi-point/1");
@@ -203,7 +209,9 @@ function buildSeries(points, metric, now) {
 			status: lastMeasured ? classify(metric, lastMeasured.v) : "none",
 			lastRunFailed: failed.length > 0 && (!lastMeasured || failed.at(-1).t > lastMeasured.t),
 			pointsAll: measured.length,
-			points: inWindow.map((p) => ({ t: iso(p.t), v: p.v })),
+			points: inWindow.map((p) => ({ t: iso(p.t), v: p.v, sha: p.sha })),
+			// every measured point, newest HISTORY_POINTS of them, for the history chart (time or commits on the x axis)
+			history: measured.slice(-HISTORY_POINTS).map((p) => ({ t: iso(p.t), v: p.v, sha: p.sha })),
 			min: values.length ? Math.min(...values) : null,
 			max: values.length ? Math.max(...values) : null,
 		});
@@ -299,6 +307,91 @@ function buildGates(source, warnings) {
 	return { gates, gateSummary, run: doc ? { run_at: doc.run_at ?? null, code_sha: doc.code_sha ?? null, branch: doc.branch ?? null } : null };
 }
 
+// "Is it syncing?": the passive stall check's health KPI (bench/kpi/stall.mjs). The verdict is the newest production point: any stalled
+// folder is red; nothing recent is "not being checked" (the timer is off), not "fine"; offline is never red.
+function buildHealth(points, nowMs) {
+	const mine = points.filter((p) => HEALTH_KPIS.includes(p.kpi) && p.env === "prod").sort((a, b) => a.t - b.t);
+	const result = (p) => (typeof p.labels.result === "string" ? p.labels.result : p.failed ? "stalled" : "ok");
+	const latest = mine.at(-1);
+	const folders = latest ? {
+		t: iso(latest.t), value: latest.v, result: result(latest), sha: latest.sha, checked: Number(latest.labels.checked ?? 0), pending: Number(latest.labels.pending ?? 0),
+		stalled: (Array.isArray(latest.labels.stalled) ? latest.labels.stalled : []).map((f) => ({ project: String(f?.project ?? ""), cause: String(f?.cause ?? ""), detail: String(f?.detail ?? ""), age_min: Number.isFinite(f?.age_min) ? f.age_min : null })),
+	} : null;
+	let status = "none";
+	if (latest) status = folders.result === "stalled" ? "red" : nowMs - latest.t > HEALTH_STALE_MS ? "stale" : folders.result === "offline" ? "offline" : "ok";
+	const lines = (folders?.stalled ?? []).map((f) => `${f.project}: ${f.detail}`);
+	// the strip: the last 48 points, oldest to newest (a point is written when the result changes and once an hour while it does not)
+	const strip = mine.slice(-48).map((p) => ({ t: iso(p.t), result: result(p), value: p.v }));
+	return { status, folders, lines, strip, newest: latest ? iso(latest.t) : null, stale: status === "stale", points: mine.length, stalledChecks: mine.filter((p) => result(p) === "stalled").length };
+}
+
+// The gates' history (scripts/gates-history): one column per run, newest HISTORY_RUNS of them, oldest to newest.
+function buildGatesHistory(source, warnings) {
+	const empty = { found: source.found, path: source.path ?? null, runs: [] };
+	if (!source.found) return empty;
+	const runs = [];
+	let bad = 0;
+	for (const raw of (source.text ?? "").split("\n")) {
+		if (!raw.trim()) continue;
+		let e;
+		try { e = JSON.parse(raw); } catch { bad++; continue; }
+		if (!e || e.schema !== "folder-sync-gates-history/1" || typeof e.id !== "string") { bad++; continue; }
+		const gates = {};
+		for (const id of Object.keys(GATE_NAMES)) {
+			const g = e.gates?.[id];
+			gates[id] = g && GATE_STATUSES.includes(g.status) ? { status: g.status, failing: (Array.isArray(g.failing) ? g.failing : []).map(String), failing_total: Number(g.failing_total ?? 0), summary: String(g.summary ?? "") } : { status: e.gates ? "unknown" : "none", failing: [], failing_total: 0, summary: "" };
+		}
+		runs.push({ id: e.id, source: e.source === "local" ? "local" : "ci", branch: e.branch ?? null, sha: typeof e.sha === "string" ? e.sha : null, t: e.t ?? null, url: typeof e.url === "string" && /^https:\/\//.test(e.url) ? e.url : null, conclusion: e.conclusion ?? null, note: String(e.note ?? ""), hasResult: Boolean(e.gates), gates });
+	}
+	if (bad) warnings.push(`${bad} lines of the gates history skipped: not folder-sync-gates-history/1`);
+	runs.sort((a, b) => (Date.parse(a.t) || 0) - (Date.parse(b.t) || 0));
+	return { ...empty, total: runs.length, runs: runs.slice(-HISTORY_RUNS) };
+}
+
+// "vs Dropbox Plus $11.99, Google One $2.99, Obsidian Sync $4 per person-month": the three Zach named (Dropbox, Google Drive, Obsidian
+// Sync), each by its cheapest listed plan at 10 GB; the cheapest other vendors stand in when one of them is not listed.
+const NAMED_COMPETITORS = [/dropbox/i, /google/i, /obsidian/i];
+export function competitorLine(byVendor) {
+	const usd = (v) => `$${v.toFixed(2)}`;
+	const named = NAMED_COMPETITORS.map((re) => byVendor.find((v) => re.test(v.vendor) || re.test(v.name))).filter(Boolean);
+	const shown = named.length ? named : byVendor.slice(0, 3);
+	return shown.length ? `vs ${shown.map((v) => `${v.name} ${usd(v.per_person_month_10gb_usd)}`).join(", ")} per person-month at 10 GB` : null;
+}
+
+// What the competitors cost (bench/cost/competitors.json, folder-sync-competitor-prices/1, written by the cost lane), beside
+// folder-sync's own number in the same row style. Absent or broken: null, and the page says nothing about it.
+function buildCompetitors(source, objectives, warnings) {
+	if (!source.found) return null;
+	let doc;
+	try {
+		doc = JSON.parse(source.text);
+		if (!doc || doc.schema !== "folder-sync-competitor-prices/1" || !Array.isArray(doc.items)) throw new Error("not folder-sync-competitor-prices/1");
+	} catch (err) {
+		warnings.push(`competitor prices ignored: ${err.message}`);
+		return null;
+	}
+	const num = (x) => (typeof x === "number" && Number.isFinite(x) ? x : null);
+	const items = doc.items.filter((i) => i && typeof i.name === "string").map((i) => ({
+		name: i.name, vendor: String(i.vendor ?? i.name), plan: String(i.plan ?? ""), price_usd_month: num(i.price_usd_month), billing: String(i.billing ?? ""), storage_gb: num(i.storage_gb),
+		per_gb_month_usd: num(i.per_gb_month_usd), per_person_month_10gb_usd: num(i.per_person_month_10gb_usd), notes: String(i.notes ?? ""),
+		source_url: typeof i.source_url === "string" && /^https:\/\//.test(i.source_url) ? i.source_url : null, accessed: String(i.accessed ?? ""),
+		// the optional per-tier shape: [{storage_gb, price_usd_month, per_gb_month_usd}], smallest first; an item without it stays valid
+		tiers: (Array.isArray(i.tiers) ? i.tiers : []).filter((x) => x && num(x.storage_gb) !== null).map((x) => ({ storage_gb: x.storage_gb, price_usd_month: num(x.price_usd_month), per_gb_month_usd: num(x.per_gb_month_usd) })).sort((a, b) => a.storage_gb - b.storage_gb),
+	}));
+	items.sort((a, b) => (a.per_person_month_10gb_usd ?? Infinity) - (b.per_person_month_10gb_usd ?? Infinity));
+	const cheapestByVendor = new Map();
+	for (const i of items) if (i.per_person_month_10gb_usd !== null && !cheapestByVendor.has(i.vendor)) cheapestByVendor.set(i.vendor, i);
+	const o3 = objectives.find((o) => o.id === "O3");
+	const cell = (kpi, env) => o3?.metrics.find((m) => m.kpi === kpi)?.env[env];
+	const pickEnv = ["prod", "test"].find((e) => cell("cost_per_person_month_usd", e)?.value !== null && cell("cost_per_person_month_usd", e)?.value !== undefined) ?? null;
+	const own = pickEnv ? {
+		name: "folder-sync", vendor: "folder-sync", plan: `on ${cell("cost_per_person_month_usd", pickEnv).provider ?? "the cheapest provider"} (${pickEnv})`, per_gb_month_usd: cell("cost_per_gb_month_usd", pickEnv)?.value ?? null,
+		per_person_month_10gb_usd: cell("cost_per_person_month_usd", pickEnv).value, env: pickEnv,
+	} : null;
+	const byVendor = [...cheapestByVendor.values()].map((i) => ({ vendor: i.vendor, name: i.name, per_person_month_10gb_usd: i.per_person_month_10gb_usd }));
+	return { as_of: String(doc.as_of ?? ""), items, own, byVendor, line: competitorLine(byVendor) };
+}
+
 export function buildModel(sources, { now = Date.now() } = {}) {
 	const nowMs = typeof now === "number" ? now : Date.parse(now);
 	const warnings = [];
@@ -316,6 +409,9 @@ export function buildModel(sources, { now = Date.now() } = {}) {
 		return { id: o.id, name: o.name, blurb: o.blurb, status: worstStatus(statuses), metrics };
 	});
 	const g = buildGates(sources.gates, warnings);
+	const health = buildHealth(parsed.points, nowMs);
+	const gatesHistory = buildGatesHistory(sources.history ?? { found: false }, warnings);
+	const competitors = buildCompetitors(sources.competitors ?? { found: false }, objectives, warnings);
 	return {
 		schema: "folder-sync-dev-status/1",
 		generated_at: new Date().toISOString(),
@@ -324,8 +420,13 @@ export function buildModel(sources, { now = Date.now() } = {}) {
 		inputs: {
 			kpi: { path: sources.kpi.path ?? null, found: sources.kpi.found, lines: parsed.lines, points: parsed.points.length },
 			gates: { path: sources.gates.path ?? null, found: sources.gates.found, ...(g.run ?? {}) },
+			history: { path: sources.history?.path ?? null, found: Boolean(sources.history?.found), runs: gatesHistory.runs.length },
+			competitors: { path: sources.competitors?.path ?? null, found: Boolean(sources.competitors?.found) },
 		},
 		objectives,
+		health,
+		gatesHistory,
+		competitors,
 		gates: g.gates,
 		gateSummary: g.gateSummary,
 		warnings,

@@ -218,3 +218,88 @@ test("the page names the provider under the cost and the cheapest one beside it"
 	assert.match(text, /on AWS S3 Standard/);
 	assert.match(text, /cheapest provider: Backblaze B2/);
 });
+
+// ---- history, the live stall check and competitor prices -----------------------------------------------------------------------
+
+const { healthLines } = await import("./health-lines.mjs");
+const { competitorLine } = await import("../../scripts/status-model.mjs");
+const FIXTURES = join(root, "tests/fixtures/dev-view");
+const withText = (text) => {
+	const dir = mkdtempSync(join(tmpdir(), "devview-model-"));
+	const file = join(dir, "series.jsonl");
+	writeFileSync(file, text);
+	return file;
+};
+const withHealth = (mode) => withText(readFileSync(KPI, "utf8") + healthLines(mode));
+const healthOf = (mode) => buildModel(loadSources({ kpi: mode ? withHealth(mode) : KPI, gates: GATES }), { now: NOW }).health;
+
+test("the KPI series points carry their commit and the whole measured history, for the history chart", () => {
+	const series = metric(model(), "O1", "propagation_p50_ms").series.find((s) => s.env === "test" && s.label === "machine->machine · add");
+	assert.ok(series.history.length >= series.points.length);
+	assert.ok(series.history.every((p) => typeof p.t === "string" && typeof p.v === "number"));
+	assert.equal(series.history.at(-1).sha, "770a9a21e3fa");
+	assert.deepEqual(series.history.at(-1), { ...series.points.at(-1) });
+});
+
+test("health: a stalled folder is red and says why; healthy is ok; an offline gap is not red", () => {
+	const ok = healthOf("ok");
+	assert.equal(ok.status, "ok");
+	assert.equal(ok.folders.result, "ok");
+	assert.equal(ok.folders.checked, 3);
+	assert.equal(ok.strip.length, 30);
+	assert.deepEqual(ok.strip.filter((c) => c.result !== "ok").map((c) => c.result), ["offline"]);
+	assert.equal(ok.stalledChecks, 0);
+	assert.deepEqual(ok.lines, []);
+	const red = healthOf("stalled");
+	assert.equal(red.status, "red");
+	assert.equal(red.folders.stalled[0].project, "zach");
+	assert.equal(red.folders.stalled[0].cause, "lock");
+	assert.equal(red.stalledChecks, 1);
+	assert.match(red.lines[0], /^zach: 1 changed file not pushed for 14 min; a lock held by pid 4242/);
+});
+
+test("health: nothing for 90 minutes is 'not being checked', not fine; no points is 'none'", () => {
+	assert.equal(healthOf("stale").status, "stale");
+	assert.equal(healthOf(null).status, "none");
+	assert.equal(healthOf(null).folders, null);
+});
+
+test("health points are not objectives: they add no card and no 'unknown KPI' note", () => {
+	const m = buildModel(loadSources({ kpi: withHealth("ok"), gates: GATES }), { now: NOW });
+	assert.equal(m.objectives.length, 3);
+	assert.equal(m.warnings.filter((w) => /unknown KPI/.test(w)).length, 1); // the fixture's own unknown KPI, not the health ones
+});
+
+test("gate history: a column per run, oldest first, with the failing tests; a run with no result is its own state", () => {
+	const m = buildModel(loadSources({ kpi: KPI, gates: GATES, history: join(FIXTURES, "gates-history.jsonl") }), { now: NOW });
+	const h = m.gatesHistory;
+	assert.equal(h.runs.length, 8);
+	assert.deepEqual(h.runs.map((r) => r.source), ["local", "ci", "ci", "ci", "ci", "local", "ci", "ci"]);
+	assert.equal(h.runs[1].gates.G1.status, "fail");
+	assert.deepEqual(h.runs[1].gates.G1.failing, ["go ./e2e TestSharedTree"]);
+	assert.equal(h.runs[2].hasResult, false);
+	assert.equal(h.runs[2].gates.G3.status, "none");
+	assert.equal(h.runs.at(-2).gates.G1.status, "pass");
+	assert.match(h.runs[1].url, /^https:\/\//);
+	const missing = buildModel(loadSources({ kpi: KPI, gates: GATES, history: "/nonexistent/h.jsonl" }), { now: NOW });
+	assert.deepEqual([missing.gatesHistory.found, missing.gatesHistory.runs], [false, []]);
+	const torn = buildModel(loadSources({ kpi: KPI, gates: GATES, history: withText("{torn\n{\"schema\":\"other\"}\n") }), { now: NOW });
+	assert.equal(torn.gatesHistory.runs.length, 0);
+	assert.ok(torn.warnings.some((w) => /2 lines of the gates history skipped/.test(w)));
+});
+
+test("competitor prices: rows by per-person price, folder-sync's own number beside them, one line for the three Zach named", () => {
+	const m = buildModel(loadSources({ kpi: KPI, gates: GATES, competitors: join(FIXTURES, "competitors.json") }), { now: NOW });
+	assert.deepEqual(m.competitors.items.map((i) => i.name), ["Fixture Drive A", "Fixture Box Plus", "Fixture Vault Sync"]);
+	assert.deepEqual(m.competitors.items[0].tiers.map((t) => [t.storage_gb, t.price_usd_month, t.per_gb_month_usd]), [[100, 2, 0.02], [200, 3, 0.015], [2000, 10, 0.005]]);
+	assert.deepEqual(m.competitors.items[1].tiers, [], "an item without tiers stays valid");
+	assert.equal(m.competitors.own.per_person_month_10gb_usd, 0.15);
+	assert.equal(m.competitors.own.env, "prod");
+	assert.equal(m.competitors.line, "vs Fixture Drive A $2.00, Fixture Box Plus $12.00, Fixture Vault Sync $40.00 per person-month at 10 GB");
+	const named = [{ vendor: "Dropbox", name: "Dropbox Plus", per_person_month_10gb_usd: 11.99 }, { vendor: "Google", name: "Google One", per_person_month_10gb_usd: 1.99 }, { vendor: "Obsidian", name: "Obsidian Sync", per_person_month_10gb_usd: 4 }, { vendor: "Box", name: "Box", per_person_month_10gb_usd: 5 }];
+	assert.equal(competitorLine(named), "vs Dropbox Plus $11.99, Google One $1.99, Obsidian Sync $4.00 per person-month at 10 GB");
+	const bad = buildModel(loadSources({ kpi: KPI, gates: GATES, competitors: withText('{"schema":"nope"}') }), { now: NOW });
+	assert.equal(bad.competitors, null);
+	assert.ok(bad.warnings.some((w) => /competitor prices ignored/.test(w)));
+	assert.equal(model().competitors, null);
+});

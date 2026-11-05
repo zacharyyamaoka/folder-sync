@@ -1,0 +1,62 @@
+{
+ "schema": "folder-sync-competitor-prices/1",
+ "as_of": "2026-11-04",
+ "items": [
+  {
+   "name": "Fixture Drive A",
+   "vendor": "Fixture Drive",
+   "plan": "100 GB plan",
+   "price_usd_month": 2,
+   "billing": "monthly",
+   "storage_gb": 100,
+   "per_gb_month_usd": 0.02,
+   "per_person_month_10gb_usd": 2,
+   "notes": "FIXTURE, not a real price",
+   "source_url": "https://example.test/prices/fixture-drive",
+   "accessed": "2026-11-04",
+   "tiers": [
+    {
+     "storage_gb": 100,
+     "price_usd_month": 2,
+     "per_gb_month_usd": 0.02
+    },
+    {
+     "storage_gb": 200,
+     "price_usd_month": 3,
+     "per_gb_month_usd": 0.015
+    },
+    {
+     "storage_gb": 2000,
+     "price_usd_month": 10,
+     "per_gb_month_usd": 0.005
+    }
+   ]
+  },
+  {
+   "name": "Fixture Box Plus",
+   "vendor": "Fixture Box",
+   "plan": "Plus",
+   "price_usd_month": 12,
+   "billing": "monthly",
+   "storage_gb": 2000,
+   "per_gb_month_usd": 0.006,
+   "per_person_month_10gb_usd": 12,
+   "notes": "FIXTURE, not a real price",
+   "source_url": "https://example.test/prices/fixture-box",
+   "accessed": "2026-11-04"
+  },
+  {
+   "name": "Fixture Vault Sync",
+   "vendor": "Fixture Vault",
+   "plan": "Sync",
+   "price_usd_month": 4,
+   "billing": "monthly",
+   "storage_gb": 1,
+   "per_gb_month_usd": 4,
+   "per_person_month_10gb_usd": 40,
+   "notes": "FIXTURE, not a real price; sold by the vault",
+   "source_url": "https://example.test/prices/fixture-vault",
+   "accessed": "2026-11-04"
+  }
+ ]
+}

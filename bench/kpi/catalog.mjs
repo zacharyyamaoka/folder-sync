@@ -46,6 +46,18 @@ function objectives() {
 	];
 }
 
+// Health check (docs/KPI.md "Is it syncing?"): not an objective, no target; the passive stall check runs every 5 minutes, local-only.
+function health() {
+	const base = { level: 1, parent: null, direction: "lower", facets: ["env"], computed_from: "runs", scale: "linear", cadence_s: 3600, aggregate: null, lines_by: "env", line_values: ["test", "prod"] };
+	return [
+		{
+			id: "sync_stalled_folders", title: "Stalled folders", unit: "folders", ...base,
+			description: "Health check, not an objective. bench/kpi/stall.mjs watches this machine's synced folders passively (no file written, no request made): a folder is stalled when a change on disk has waited more than 10 minutes without being pushed while the machine is online. labels.stalled names each stalled folder with its cause (held lock and holder, quota, signed out, held deletes, failing rounds, no engine running). Written when the result changes, else at most once an hour; offline is a `failed` point reading \"offline, not measured\".",
+			formula: "count of folders with a change unpushed for more than max(10 minutes, 3 x the folder's interval) while online",
+		},
+	];
+}
+
 export function catalog(generatedAt) {
 	return {
 		schema: "vt-kpi-catalog/1",
@@ -54,6 +66,6 @@ export function catalog(generatedAt) {
 		title: "folder-sync: fast, storage efficient, cheap",
 		producer: { name: "folder-sync bench/kpi/run-all.mjs", bench_version: "folder-sync-kpi/1", repo: "/home/bam/folder-sync", doc: "docs/KPI.md" },
 		cadence_s: HOURLY,
-		kpis: [...legacy(), ...objectives()],
+		kpis: [...legacy(), ...objectives(), ...health()],
 	};
 }
