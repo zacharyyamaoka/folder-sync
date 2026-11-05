@@ -62,7 +62,7 @@ export const HISTORY_RUNS = 40;
 const HISTORY_POINTS = 600;
 const ENVS = ["test", "prod"];
 
-export function loadSources({ kpi, gates, history, competitors }) {
+export function loadSources({ kpi, gates, history, competitors, prices }) {
 	const read = (path) => {
 		if (!path || !existsSync(path)) return { path, found: false, text: null };
 		try {
@@ -71,7 +71,9 @@ export function loadSources({ kpi, gates, history, competitors }) {
 			return { path, found: false, text: null, error: String(err.message ?? err) };
 		}
 	};
-	return { kpi: read(kpi), gates: read(gates), history: read(history), competitors: read(competitors) };
+	// prices.json (provider storage prices) sits beside competitors.json; it prices folder-sync's own column of the size table
+	const pricesPath = prices ?? (competitors ? competitors.replace(/competitors\.json$/, "prices.json") : undefined);
+	return { kpi: read(kpi), gates: read(gates), history: read(history), competitors: read(competitors), prices: read(pricesPath) };
 }
 
 // WHY 2x: "within double the target" is a near miss (amber), anything worse is red; the page never colours a value that meets its target.
@@ -225,7 +227,9 @@ function buildSeries(points, metric, now) {
 function buildCell(metric, env, points, series, now) {
 	// WHY no `tool` slices: a competitor (or an old folder-sync variant) measured on the same rig is a comparison row of the series
 	// table, never the headline. Counting lsyncd's 15 s as folder-sync's "Fast" made the objective read 15 s when it is 0.3 s.
-	const mine = series.filter((s) => s.env === env && s.slice.tool === undefined);
+	// WHY no `op: "real"` slices either: a real-use sample (bench/kpi/stall.mjs) is save→pushed, one hop, not O1's save→other disk
+	// and online; it stays its own row of the series table.
+	const mine = series.filter((s) => s.env === env && s.slice.tool === undefined && s.slice.op !== "real");
 	let chosen = mine;
 	if (metric.prefer) {
 		const preferred = mine.filter((s) => metric.prefer.re.test(String(s.slice[metric.prefer.key] ?? "")));
@@ -360,7 +364,33 @@ export function competitorLine(byVendor) {
 
 // What the competitors cost (bench/cost/competitors.json, folder-sync-competitor-prices/1, written by the cost lane), beside
 // folder-sync's own number in the same row style. Absent or broken: null, and the page says nothing about it.
-function buildCompetitors(source, objectives, warnings) {
+// WHY a size table (Zach, 2026-11-04: "also compare at 100gb, 1tb, 2 tb"): per size, the cheapest plan of each service that
+// holds it (a person pays the whole plan, never pro-rated), beside what that much storage costs folder-sync to keep on R2 or B2.
+// Monthly billing where offered, so every cell is the same cadence. folder-sync's cells are storage only, no requests.
+export const COMPARE_SIZES_GB = [10, 100, 1000, 2000];
+function buildBySize(items, pricesSource) {
+	const vendors = [...new Set(items.map((i) => i.vendor))];
+	const rows = COMPARE_SIZES_GB.map((size) => {
+		const cells = vendors.map((vendor) => {
+			const fits = items.filter((i) => i.vendor === vendor && i.storage_gb !== null && i.storage_gb >= size && i.price_usd_month !== null);
+			const monthly = fits.filter((i) => i.billing === "monthly");
+			const pool = monthly.length ? monthly : fits;
+			const best = pool.reduce((a, b) => (a === null || b.price_usd_month < a.price_usd_month ? b : a), null);
+			return best ? { vendor, price_usd_month: best.price_usd_month, plan: best.plan, billing: best.billing } : { vendor, price_usd_month: null, plan: "no plan this size" };
+		});
+		return { size_gb: size, cells };
+	});
+	let own = [];
+	try {
+		const providers = pricesSource?.found ? JSON.parse(pricesSource.text).providers ?? {} : {};
+		own = ["r2", "b2"].filter((k) => typeof providers[k]?.storage_per_gb_month === "number")
+			.map((k) => ({ provider: k, name: providers[k].name, per_gb_month_usd: providers[k].storage_per_gb_month }));
+	} catch { own = []; }
+	for (const row of rows) row.own = own.map((o) => ({ provider: o.provider, name: o.name, price_usd_month: Math.round(o.per_gb_month_usd * row.size_gb * 100) / 100 }));
+	return { sizes: COMPARE_SIZES_GB, vendors, rows };
+}
+
+function buildCompetitors(source, objectives, warnings, pricesSource) {
 	if (!source.found) return null;
 	let doc;
 	try {
@@ -389,7 +419,7 @@ function buildCompetitors(source, objectives, warnings) {
 		per_person_month_10gb_usd: cell("cost_per_person_month_usd", pickEnv).value, env: pickEnv,
 	} : null;
 	const byVendor = [...cheapestByVendor.values()].map((i) => ({ vendor: i.vendor, name: i.name, per_person_month_10gb_usd: i.per_person_month_10gb_usd }));
-	return { as_of: String(doc.as_of ?? ""), items, own, byVendor, line: competitorLine(byVendor) };
+	return { as_of: String(doc.as_of ?? ""), items, own, byVendor, line: competitorLine(byVendor), bySize: buildBySize(items, pricesSource) };
 }
 
 export function buildModel(sources, { now = Date.now() } = {}) {
@@ -411,7 +441,7 @@ export function buildModel(sources, { now = Date.now() } = {}) {
 	const g = buildGates(sources.gates, warnings);
 	const health = buildHealth(parsed.points, nowMs);
 	const gatesHistory = buildGatesHistory(sources.history ?? { found: false }, warnings);
-	const competitors = buildCompetitors(sources.competitors ?? { found: false }, objectives, warnings);
+	const competitors = buildCompetitors(sources.competitors ?? { found: false }, objectives, warnings, sources.prices);
 	return {
 		schema: "folder-sync-dev-status/1",
 		generated_at: new Date().toISOString(),

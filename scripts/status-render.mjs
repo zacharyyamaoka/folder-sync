@@ -185,8 +185,12 @@ function competitorsTable(c) {
 	const tiered = c.items.filter((i) => i.tiers.length);
 	const tierRows = tiered.flatMap((i) => i.tiers.map((t) => `<tr><td data-label="Service">${esc(i.name)}${i.plan ? ` <small>${esc(i.plan)}</small>` : ""}</td><td data-label="Storage"><b>${esc(String(t.storage_gb))} GB</b></td><td data-label="Per month">${esc(usd(t.price_usd_month))}</td><td data-label="Per GB-month">${esc(usd(t.per_gb_month_usd))}</td></tr>`)).join("");
 	const tierTable = tierRows ? `<h3>By plan size</h3><table data-tiers><thead><tr><th>Service</th><th>Storage</th><th>Per month</th><th>Per GB-month</th></tr></thead><tbody>${tierRows}</tbody></table>` : "";
+	const sizeLabel = (gb) => (gb >= 1000 ? `${gb / 1000} TB` : `${gb} GB`);
+	const bs = c.bySize;
+	const sizeTable = bs ? `<h3>By size</h3><p class="sub">Per size, the cheapest monthly plan of each service that holds it (a person pays the whole plan). folder-sync's columns are what that much storage costs it to keep, storage only.</p>
+		<table data-by-size><thead><tr><th>Size</th>${bs.vendors.map((v) => `<th>${esc(v)}</th>`).join("")}${(bs.rows[0]?.own ?? []).map((o) => `<th>folder-sync on ${esc(o.provider.toUpperCase())}</th>`).join("")}</tr></thead><tbody>${bs.rows.map((r) => `<tr><th scope="row">${esc(sizeLabel(r.size_gb))}</th>${r.cells.map((x) => `<td data-label="${esc(x.vendor)}">${x.price_usd_month === null ? "<small>no plan this size</small>" : `${esc(usd(x.price_usd_month))} <small>${esc(x.plan)}</small>`}</td>`).join("")}${r.own.map((o) => `<td data-label="folder-sync on ${esc(o.provider.toUpperCase())}"><b>${esc(usd(o.price_usd_month))}</b></td>`).join("")}</tr>`).join("")}</tbody></table>` : "";
 	return `<section class="metric" id="m-competitors"><h3>What the others cost</h3><p class="sub">List prices as of ${esc(c.as_of || "an unknown date")}; folder-sync's row is its own current number on the provider each folder is on.</p>
-		<table><thead><tr><th>Service</th><th>Per month</th><th>Storage</th><th>Per GB-month</th><th>Per person-month, 10 GB</th><th>Source</th></tr></thead><tbody>${rows}</tbody></table>${tierTable}</section>`;
+		<table><thead><tr><th>Service</th><th>Per month</th><th>Storage</th><th>Per GB-month</th><th>Per person-month, 10 GB</th><th>Source</th></tr></thead><tbody>${rows}</tbody></table>${sizeTable}${tierTable}</section>`;
 }
 
 function evidenceItem(e) {

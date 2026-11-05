@@ -143,7 +143,7 @@ test("competitor prices: one line under O3 and a table with folder-sync's own ro
 	await page.goto(page_url);
 	await expect(page.locator("#card-o3 [data-competitors]")).toContainText("per person-month at 10 GB");
 	await page.locator("#card-o3").click();
-	const table = page.locator("#m-competitors table:not([data-tiers])");
+	const table = page.locator("#m-competitors table:not([data-tiers]):not([data-by-size])");
 	await expect(table.locator("tr.own")).toContainText("folder-sync");
 	await expect(table.locator("tbody tr")).toHaveCount(4);
 	await expect(table).toContainText("FIXTURE");
@@ -152,6 +152,10 @@ test("competitor prices: one line under O3 and a table with folder-sync's own ro
 	await expect(tiers.locator("tbody tr")).toHaveCount(3);
 	await expect(tiers.locator("tr", { hasText: "200 GB" })).toContainText("$3.00");
 	await expect(tiers).not.toContainText("Fixture Box Plus");
+	// by size (10 GB, 100 GB, 1 TB, 2 TB): one row per size, a vendor without a plan that big reads "no plan this size"
+	const bySize = page.locator("#m-competitors table[data-by-size]");
+	await expect(bySize.locator("tbody tr")).toHaveCount(4);
+	await expect(bySize.locator("tbody tr").last()).toContainText("2 TB");
 });
 
 test("drill into a gate: its tests with status, duration, detail, evidence", async ({ page }) => {

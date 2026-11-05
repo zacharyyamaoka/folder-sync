@@ -303,3 +303,17 @@ test("competitor prices: rows by per-person price, folder-sync's own number besi
 	assert.ok(bad.warnings.some((w) => /competitor prices ignored/.test(w)));
 	assert.equal(model().competitors, null);
 });
+
+test("by size: the cheapest monthly plan per vendor that holds each size, and folder-sync's storage cost on R2 and B2", async () => {
+	const { loadSources, buildModel, COMPARE_SIZES_GB } = await import("../../scripts/status-model.mjs");
+	const root = new URL("../../", import.meta.url).pathname;
+	const model = buildModel(loadSources({ competitors: `${root}bench/cost/competitors.json` }));
+	const bs = model.competitors.bySize;
+	assert.deepEqual(bs.rows.map((r) => r.size_gb), COMPARE_SIZES_GB);
+	const at = (gb, vendor) => bs.rows.find((r) => r.size_gb === gb).cells.find((c) => c.vendor === vendor);
+	assert.equal(at(2000, "Google").price_usd_month, 9.99, "Google 2 TB, monthly billing");
+	assert.equal(at(1000, "Obsidian").price_usd_month, null, "Obsidian has no 1 TB plan");
+	assert.equal(at(10, "Obsidian").billing, "monthly", "monthly where offered");
+	const r2 = bs.rows.find((r) => r.size_gb === 2000).own.find((o) => o.provider === "r2");
+	assert.equal(r2.price_usd_month, 30, "2000 GB x $0.015");
+});

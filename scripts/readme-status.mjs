@@ -36,6 +36,9 @@ const METRIC_TEXT = {
 	idle_ops_per_hour: { what: "Storage requests an hour when idle", target: "none (idle cost should be about $0)" },
 };
 
+const sizeLabel = (gb) => (gb >= 1000 ? `${gb / 1000} TB` : `${gb} GB`);
+const usd2 = (v) => `$${v.toFixed(2)}`;
+
 // Each gate in one plain line; the exact tests are in docs/GATES.md.
 const GATE_WHAT = {
 	G1: "Random edits, deletes, renames and crashes end with every file and every kept version intact.",
@@ -180,7 +183,7 @@ export function statusView(model) {
 	const run = model.inputs.gates.found ? { at: model.inputs.gates.run_at ?? null, sha: (model.inputs.gates.code_sha ?? "").slice(0, 7), branch: model.inputs.gates.branch ?? null } : null;
 	return {
 		objectives, gates, gateCounts: model.gateSummary,
-		sparks, history, competitors: model.competitors ? { line: model.competitors.line, as_of: model.competitors.as_of } : null,
+		sparks, history, competitors: model.competitors ? { line: model.competitors.line, as_of: model.competitors.as_of, bySize: model.competitors.bySize } : null,
 		measured: { test: newest("test"), prod: newest("prod") }, gateRun: run,
 		gatesFound: model.inputs.gates.found,
 	};
@@ -228,6 +231,15 @@ export function renderMarkdown(v, { assetBase = "docs/status/" } = {}) {
 	if (v.competitors?.line) {
 		out.push("");
 		out.push(`Cost, compared: folder-sync ${v.competitors.line.replace(/^vs /, "against ")} (list prices as of ${v.competitors.as_of || "an unknown date"}).`);
+		const bs = v.competitors.bySize;
+		if (bs) {
+			out.push("");
+			out.push("By size: the cheapest monthly plan of each service that holds it, beside what that much storage costs folder-sync to keep (storage only, no requests).");
+			out.push("");
+			out.push(`| Size | ${bs.vendors.join(" | ")} | ${bs.rows[0].own.map((o) => `folder-sync on ${o.provider.toUpperCase()}`).join(" | ")} |`);
+			out.push(`|---|${bs.vendors.map(() => "---").join("|")}|${bs.rows[0].own.map(() => "---").join("|")}|`);
+			for (const r of bs.rows) out.push(`| ${sizeLabel(r.size_gb)} | ${r.cells.map((x) => (x.price_usd_month === null ? "–" : usd2(x.price_usd_month))).join(" | ")} | ${r.own.map((o) => `**${usd2(o.price_usd_month)}**`).join(" | ")} |`);
+		}
 	}
 	out.push("");
 	out.push(`**Gates**: pass or fail, checked on every change. ${gateHeadline(v)}.`);
@@ -275,6 +287,8 @@ export function renderHtml(v, { linkBase = REPO_URL } = {}) {
 		const sp = v.sparks.find((x) => x.id === o.id);
 		if (sp) out.push(`<p class="spark-line"><span>Last ${sp.days} days: ${esc(sp.title)}</span> ${sparkSvg(sp, { inline: true })} <span class="ends">test ${esc(sp.ends.test)}, production ${esc(sp.ends.prod)}</span></p>`);
 		if (o.id === "O3" && v.competitors?.line) out.push(`<p class="vs">${esc(v.competitors.line)} <span class="asof">(list prices, ${esc(v.competitors.as_of || "date unknown")})</span></p>`);
+		const bs = o.id === "O3" ? v.competitors?.bySize : null;
+		if (bs) out.push(`<table class="by-size"><caption>By size: the cheapest monthly plan that holds it, and folder-sync's storage cost</caption><thead><tr><th>Size</th>${bs.vendors.map((x) => `<th>${esc(x)}</th>`).join("")}${bs.rows[0].own.map((x) => `<th>folder-sync on ${esc(x.provider.toUpperCase())}</th>`).join("")}</tr></thead><tbody>${bs.rows.map((r) => `<tr><th scope="row">${esc(sizeLabel(r.size_gb))}</th>${r.cells.map((x) => `<td>${x.price_usd_month === null ? "–" : esc(usd2(x.price_usd_month))}</td>`).join("")}${r.own.map((x) => `<td><b>${esc(usd2(x.price_usd_month))}</b></td>`).join("")}</tr>`).join("")}</tbody></table>`);
 		out.push("</article>");
 	}
 	out.push("</div>");
