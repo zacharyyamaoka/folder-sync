@@ -1,7 +1,7 @@
 // scripts/readme-status: the "Objectives & Gates" block of README.md (and of the GitHub Pages landing page), generated from the
 // same two sources as the dev view (the KPI series and gates.json, through status-model.mjs), never typed. The block sits between
 // two marker comments; everything outside them is left alone.
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,9 +11,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const BEGIN = "<!-- status:begin -->";
 export const END = "<!-- status:end -->";
 const REPO_URL = "https://github.com/zacharyyamaoka/folder-sync/blob/main/";
-const USAGE = `usage: scripts/readme-status [--kpi <kpi_series.jsonl>] [--gates <gates.json>] [--readme <README.md>] [--landing <index.html>] [--check] [--now <ISO time>]
+const USAGE = `usage: scripts/readme-status [--kpi <kpi_series.jsonl>] [--gates <gates.json>] [--history <gates-history.jsonl>] [--competitors <competitors.json>] [--assets <dir>] [--readme <README.md>] [--landing <index.html>] [--check] [--now <ISO time>]
   --kpi      default ~/vt/zach/producers/folder-sync/kpi_series.jsonl
   --gates    default reports/status/gates.json in the main checkout (the gate runner's --publish target)
+  --history  the gate history (scripts/gates-history); default next to --gates
+  --competitors  bench/cost/competitors.json (the cost lane's prices); the line under O3 is left out when it is absent
+  --assets   where the README's sparkline and gate-history SVGs are written (default docs/status in this checkout; GitHub cannot run JS)
   --readme   the file whose ${BEGIN} ... ${END} block is rewritten (default: README.md in this checkout; the word none skips it)
   --landing  also rewrite the same block, as HTML, in this file (the gh-pages index.html)
   --check    write nothing; exit 1 if a file's block is out of date
@@ -23,12 +26,12 @@ Exit 0 ok, 1 stale (--check), 2 bad arguments or a file without exactly one mark
 // WHY plain words per row: the README and the landing page are read by a stranger; the dev view's titles are for Zach.
 // Each metric: what the number is, and the target as a sentence (the numbers are Zach's, PROJECT - Folder Sync, Nov 4 2026).
 const METRIC_TEXT = {
-	propagation_p50_ms: { what: "Save to the bytes on the other disk and online, median (p50)", target: "≤ 1 s" },
+	propagation_p50_ms: { what: "Save to the bytes on the other disk and online, median (p50)", short: "Save to bytes elsewhere, p50", target: "≤ 1 s" },
 	propagation_p95_ms: { what: "The same, 95th percentile (p95)", target: "≤ 3 s" },
-	storage_efficiency_h_30d_max: { what: "History bytes ÷ live bytes (H), worst of the last 30 days", target: "≤ 1.0 (stretch ≤ 0.25)" },
+	storage_efficiency_h_30d_max: { what: "History bytes ÷ live bytes (H), worst of the last 30 days", short: "History bytes ÷ live bytes (H), 30-day worst", target: "≤ 1.0 (stretch ≤ 0.25)" },
 	storage_efficiency_h: { what: "H, latest sample", target: "none (the 30-day worst is the target)" },
 	cost_per_gb_month_usd: { what: "Cost per GB-month on the provider that holds the folders", target: "no number set; lower is better" },
-	cost_per_person_month_usd: { what: "Cost per person-month at 10 GB, on the provider that holds the folders", target: "≤ $0.50" },
+	cost_per_person_month_usd: { what: "Cost per person-month at 10 GB, on the provider that holds the folders", short: "Cost per person-month at 10 GB", target: "≤ $0.50" },
 	idle_cpu_pct: { what: "CPU when idle", target: "< 0.1 %" },
 	idle_ops_per_hour: { what: "Storage requests an hour when idle", target: "none (idle cost should be about $0)" },
 };
@@ -71,6 +74,63 @@ export function formatValue(metric, value) {
 	}
 }
 
+// ---- history: sparklines and the gate strip, drawn at build time (a GitHub README cannot run JS) --------------------------------------
+// WHY one sparkline per objective, on its headline measure: the table has every row; the line answers "is it getting better".
+const HEADLINE = { O1: "propagation_p50_ms", O2: "storage_efficiency_h_30d_max", O3: "cost_per_person_month_usd" };
+export const STRIP_RUNS = 16;
+const COLORS = { test: "#2a78d6", prod: "#eb6834", target: "#898781", pass: "#0ca30c", fail: "#d03b3b", grey: "#c3c2b7", none: "#898781" };
+const num = (x) => Number(x.toFixed(1));
+
+export function sparkSvg(spark, { inline = false } = {}) {
+	const W = 180, H = 36, pad = 4;
+	const to = Date.parse(spark.now), from = to - spark.days * 864e5;
+	const lines = ["test", "prod"].map((env) => ({ env, pts: spark[env].map((p) => ({ x: Date.parse(p.t), v: p.v })) })).filter((l) => l.pts.length);
+	const values = lines.flatMap((l) => l.pts.map((p) => p.v));
+	if (spark.target !== null) values.push(spark.target);
+	const title = `${spark.title}, last ${spark.days} days: ${["test", "prod"].map((env) => `${env === "prod" ? "production" : "test"} ${spark.ends[env]}`).join(", ")}${spark.target !== null ? `; target ${spark.targetText}` : ""}`;
+	const open = inline ? `<svg class="spark" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(title)}">` : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(title)}">`;
+	if (!values.length) return `${open}<title>${esc(title)}</title></svg>`;
+	let lo = Math.min(...values), hi = Math.max(...values);
+	if (lo === hi) { lo -= Math.abs(lo) * 0.1 || 1; hi += Math.abs(hi) * 0.1 || 1; }
+	const gap = (hi - lo) * 0.1;
+	lo = lo >= 0 && lo - gap < 0 ? 0 : lo - gap; hi += gap; // a non-negative KPI never gets a negative axis
+	const sx = (x) => num(pad + ((x - from) / (to - from)) * (W - 2 * pad));
+	const sy = (v) => num(H - pad - ((v - lo) / (hi - lo)) * (H - 2 * pad));
+	let body = "";
+	if (spark.target !== null) body += `<line x1="${pad}" x2="${W - pad}" y1="${sy(spark.target)}" y2="${sy(spark.target)}" stroke="${COLORS.target}" stroke-width="1" stroke-dasharray="4 3"/>`;
+	for (const l of lines) {
+		const d = l.pts.map((p, i) => `${i ? "L" : "M"}${sx(p.x)} ${sy(p.v)}`).join("");
+		const last = l.pts.at(-1);
+		body += `<path d="${d}" fill="none" stroke="${COLORS[l.env]}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="${sx(last.x)}" cy="${sy(last.v)}" r="2.5" fill="${COLORS[l.env]}"/>`;
+	}
+	return `${open}<title>${esc(title)}</title>${body}</svg>`;
+}
+
+export function historySvg(history, { inline = false } = {}) {
+	const cell = 7, gap = 1, runs = history.runs;
+	const W = runs.length * (cell + gap) - gap, H = 12 * (cell + gap) - gap;
+	const failedGates = history.failedGates.length ? `; failed in at least one run: ${history.failedGates.join(", ")}` : "";
+	const title = `Gate history, the last ${runs.length} runs, oldest on the left, G1 at the top to G12 at the bottom${failedGates}`;
+	const open = inline ? `<svg class="gate-strip" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(title)}">` : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(title)}">`;
+	let body = "";
+	runs.forEach((r, x) => {
+		Object.keys(r.gates).forEach((id, y) => {
+			const st = r.gates[id];
+			const at = `x="${x * (cell + gap)}" y="${y * (cell + gap)}" width="${cell}" height="${cell}" rx="1.5"`;
+			body += st === "pass" ? `<rect ${at} fill="${COLORS.pass}"/>` : st === "fail" ? `<rect ${at} fill="${COLORS.fail}"/>` : st === "none" ? `<rect ${at} fill="none" stroke="${COLORS.none}" stroke-width="1" stroke-dasharray="2 1"/>` : `<rect ${at} fill="${COLORS.grey}"/>`;
+		});
+	});
+	return `${open}<title>${esc(title)}</title>${body}</svg>`;
+}
+
+/** The SVG files the README links to, by file name. */
+export function assetFiles(v) {
+	const files = {};
+	for (const sp of v.sparks) files[`spark-${sp.id.toLowerCase()}.svg`] = `${sparkSvg(sp)}\n`;
+	if (v.history) files["gate-history.svg"] = `${historySvg(v.history)}\n`;
+	return files;
+}
+
 const utc = (iso) => (iso ? `${new Date(iso).toISOString().slice(0, 16).replace("T", " ")} UTC` : null);
 
 function cellView(metric, cell) {
@@ -103,9 +163,24 @@ export function statusView(model) {
 		id: g.id, name: g.name, status: g.status, word: WORDS[g.status] ?? g.status, what: GATE_WHAT[g.id] ?? "",
 		detail: gateDetail(g), missing: (g.summary.split(/Missing:/)[1] ?? "").trim(),
 	}));
+	const sparks = model.objectives.map((o) => {
+		const m = o.metrics.find((x) => x.kpi === HEADLINE[o.id]);
+		if (!m) return null;
+		const ends = Object.fromEntries(["test", "prod"].map((env) => [env, m.env[env].value === null ? "not measured" : formatValue(m, m.env[env].value)]));
+		return {
+			id: o.id, title: METRIC_TEXT[m.kpi]?.short ?? m.title, kpi: m.kpi, unit: m.unit, days: model.window_days, now: model.now,
+			target: m.target ?? null, targetText: METRIC_TEXT[m.kpi]?.target ?? "", ends, test: m.env.test.sparkline, prod: m.env.prod.sparkline,
+		};
+	}).filter((sp) => sp && (sp.test.length || sp.prod.length));
+	const runsWithResult = model.gatesHistory.runs.filter((r) => r.hasResult).slice(-STRIP_RUNS);
+	const history = runsWithResult.length ? {
+		runs: runsWithResult.map((r) => ({ id: r.id, sha: r.sha, t: r.t, source: r.source, gates: Object.fromEntries(Object.entries(r.gates).map(([id, g]) => [id, g.status])) })),
+		failedGates: Object.keys(GATE_WHAT).filter((id) => runsWithResult.some((r) => r.gates[id]?.status === "fail")),
+	} : null;
 	const run = model.inputs.gates.found ? { at: model.inputs.gates.run_at ?? null, sha: (model.inputs.gates.code_sha ?? "").slice(0, 7), branch: model.inputs.gates.branch ?? null } : null;
 	return {
 		objectives, gates, gateCounts: model.gateSummary,
+		sparks, history, competitors: model.competitors ? { line: model.competitors.line, as_of: model.competitors.as_of } : null,
 		measured: { test: newest("test"), prod: newest("prod") }, gateRun: run,
 		gatesFound: model.inputs.gates.found,
 	};
@@ -131,9 +206,11 @@ function sourceLine(v) {
 	return bits.join(" ");
 }
 
+const sparkAlt = (sp) => `${sp.title}, last ${sp.days} days: test ${sp.ends.test}, production ${sp.ends.prod}`;
+const historyAlt = (h) => `Gate history, the last ${h.runs.length} runs${h.failedGates.length ? `; ${h.failedGates.join(", ")} failed in at least one` : "; no gate failed in them"}`;
 const cellMd = (c) => (c.verdict === "" ? c.text : c.verdict === "failed" ? c.text : `${c.text}, ${c.verdict}${c.lastRunFailed ? "; the latest run failed" : ""}`);
 
-export function renderMarkdown(v) {
+export function renderMarkdown(v, { assetBase = "docs/status/" } = {}) {
 	const out = [];
 	out.push(`_Generated by \`scripts/readme-status\` from the hourly measurements and the last gate run; do not edit between the markers. ${sourceLine(v)}_`);
 	out.push("");
@@ -144,8 +221,20 @@ export function renderMarkdown(v) {
 	for (const o of v.objectives) {
 		o.rows.forEach((r, i) => out.push(`| ${i === 0 ? `**${o.id} ${o.name}**` : ""} | ${r.what} | ${r.target} | ${cellMd(r.test)} | ${cellMd(r.prod)} |`));
 	}
+	if (v.sparks.length) {
+		out.push("");
+		out.push(`**Last 30 days** (blue is test, orange is production, dashed is the target): ${v.sparks.map((sp) => `${sp.id} <img src="${assetBase}spark-${sp.id.toLowerCase()}.svg" alt="${esc(sparkAlt(sp))}" height="28" align="absmiddle">`).join(" &nbsp; ")}`);
+	}
+	if (v.competitors?.line) {
+		out.push("");
+		out.push(`Cost, compared: folder-sync ${v.competitors.line.replace(/^vs /, "against ")} (list prices as of ${v.competitors.as_of || "an unknown date"}).`);
+	}
 	out.push("");
 	out.push(`**Gates**: pass or fail, checked on every change. ${gateHeadline(v)}.`);
+	if (v.history) {
+		out.push("");
+		out.push(`**Gate history** (the last ${v.history.runs.length} CI and local runs, oldest on the left; rows are G1 to G12; green passed, red failed, grey not built or skipped): <img src="${assetBase}gate-history.svg" alt="${esc(historyAlt(v.history))}" height="48" align="absmiddle">`);
+	}
 	out.push("");
 	out.push("| Gate | What it checks | Status |");
 	out.push("|---|---|---|");
@@ -182,10 +271,15 @@ export function renderHtml(v, { linkBase = REPO_URL } = {}) {
 			};
 			out.push(`<tr><th scope="row">${esc(r.what)}</th><td class="target">${esc(r.target)}</td>${cell(r.test, "test")}${cell(r.prod, "prod")}</tr>`);
 		}
-		out.push("</tbody></table></article>");
+		out.push("</tbody></table>");
+		const sp = v.sparks.find((x) => x.id === o.id);
+		if (sp) out.push(`<p class="spark-line"><span>Last ${sp.days} days: ${esc(sp.title)}</span> ${sparkSvg(sp, { inline: true })} <span class="ends">test ${esc(sp.ends.test)}, production ${esc(sp.ends.prod)}</span></p>`);
+		if (o.id === "O3" && v.competitors?.line) out.push(`<p class="vs">${esc(v.competitors.line)} <span class="asof">(list prices, ${esc(v.competitors.as_of || "date unknown")})</span></p>`);
+		out.push("</article>");
 	}
 	out.push("</div>");
 	out.push(`<p class="gate-line">${esc(gateHeadline(v))}.</p>`);
+	if (v.history) out.push(`<p class="gate-history"><span>Gate history, the last ${v.history.runs.length} runs, oldest on the left</span> ${historySvg(v.history, { inline: true })}</p>`);
 	out.push('<ul class="gates">');
 	for (const g of v.gates) {
 		const tip = [g.name, g.what, g.detail || g.word].filter(Boolean).join(". ");
@@ -212,7 +306,8 @@ function parseArgs(argv) {
 	const opts = {
 		kpi: join(homedir(), "vt/zach/producers/folder-sync/kpi_series.jsonl"),
 		gates: join(mainCheckout(), "reports/status/gates.json"),
-		readme: resolve(here, "../README.md"),
+		readme: resolve(here, "../README.md"), history: undefined, competitors: resolve(here, "../bench/cost/competitors.json"),
+		assets: resolve(here, "../docs/status"),
 		landing: undefined, check: false, now: undefined,
 	};
 	for (let i = 0; i < argv.length; i++) {
@@ -251,10 +346,24 @@ export function main(argv) {
 		console.error(`--now is not a time: ${opts.now}\n${USAGE}`);
 		return 2;
 	}
-	const view = statusView(buildModel(loadSources({ kpi: resolve(opts.kpi), gates: resolve(opts.gates) }), { now }));
+	const history = opts.history ? resolve(opts.history) : join(dirname(resolve(opts.gates)), "gates-history.jsonl");
+	const view = statusView(buildModel(loadSources({ kpi: resolve(opts.kpi), gates: resolve(opts.gates), history, competitors: resolve(opts.competitors) }), { now }));
 	const targets = opts.readme === "none" ? [] : [[resolve(opts.readme), renderMarkdown(view)]];
 	if (opts.landing) targets.push([resolve(opts.landing), renderHtml(view)]);
 	let stale = false;
+	// the SVGs the README links to: written beside the docs, and checked like the block (a README whose images are stale is stale)
+	if (opts.readme !== "none") {
+		const dir = resolve(opts.assets);
+		for (const [name, svg] of Object.entries(assetFiles(view))) {
+			const file = join(dir, name);
+			const same = existsSync(file) && readFileSync(file, "utf8") === svg;
+			if (same) continue;
+			if (opts.check) { console.log(`${file}: out of date`); stale = true; continue; }
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(file, svg);
+			console.log(`${file}: rewritten`);
+		}
+	}
 	for (const [path, block] of targets) {
 		let before;
 		let after;
