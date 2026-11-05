@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -16,10 +17,20 @@ import { readSeries, REPO } from "./lib.mjs";
 const haveStack = existsSync(join(REPO, "accounts", "node_modules", ".bin", "cf-wrangler")) && existsSync(join(REPO, ".tools", "rclone"));
 const SHA = { sha: "e2e", dirty: false };
 
+// WHY free ports: the stack's defaults (4950-4953) are the hourly KPI run's and the Go e2e suite's; a check that fails because a peer holds a port says nothing
+async function freePorts(count) {
+	const servers = await Promise.all(Array.from({ length: count }, () => new Promise((resolve) => { const server = createServer(); server.listen(0, "127.0.0.1", () => resolve(server)); })));
+	const ports = servers.map((server) => String(server.address().port));
+	await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))));
+	return ports;
+}
+
 test("the stall check on the local stack: ok, stalled by a held lock (one alert), recovered, offline", { skip: !haveStack && "needs accounts/node_modules and .tools/rclone (npm --prefix accounts ci; scripts/dev-tools)", timeout: 300_000 }, async () => {
 	const scratch = mkdtempSync(join(tmpdir(), "canary-e2e-"));
 	const sent = join(scratch, "sent.txt");
 	process.env.FOLDER_SYNC_NOTIFY_CMD = JSON.stringify(["/bin/sh", "-c", `printf '%s@@' "$0 | $1" >> ${sent}`]);
+	const [standin, store, accounts, inspector] = await freePorts(4);
+	Object.assign(process.env, { FS_STANDIN_PORT: standin, FS_STORE_PORT: store, FS_ACCOUNTS_PORT: accounts, FS_INSPECTOR_PORT: inspector });
 	const stack = await localStack({ sha: "canary", machines: 1, project: CANARY_PROJECT, prefix: "folder-sync-canary-" });
 	const [machine] = stack.machines;
 	let sleeper = null;
@@ -99,5 +110,6 @@ test("the stall check on the local stack: ok, stalled by a held lock (one alert)
 		await machine.stop();
 		stack.teardown();
 		delete process.env.FOLDER_SYNC_NOTIFY_CMD;
+		for (const name of ["FS_STANDIN_PORT", "FS_STORE_PORT", "FS_ACCOUNTS_PORT", "FS_INSPECTOR_PORT"]) delete process.env[name];
 	}
 });
