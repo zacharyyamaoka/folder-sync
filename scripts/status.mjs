@@ -8,9 +8,11 @@ import { buildModel, loadSources } from "./status-model.mjs";
 import { renderPage } from "./status-render.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const USAGE = `usage: scripts/status [--kpi <kpi_series.jsonl>] [--gates <gates.json>] [--out <dir>] [--now <ISO time>]
+const USAGE = `usage: scripts/status [--kpi <kpi_series.jsonl>] [--gates <gates.json>] [--history <gates-history.jsonl>] [--competitors <competitors.json>] [--out <dir>] [--now <ISO time>]
   --kpi    default ~/vt/zach/producers/folder-sync/kpi_series.jsonl
   --gates  default reports/status/gates.json (in this checkout)
+  --history  default gates-history.jsonl next to --gates (scripts/gates-history writes it)
+  --competitors  default bench/cost/competitors.json (in this checkout; the cost lane writes it)
   --out    default site/dev (in this checkout)
   --now    the "present" for the 30-day window (default: the clock; tests pin it)
 A missing source is not an error: the page says "not measured yet".`;
@@ -19,6 +21,8 @@ export function parseArgs(argv) {
 	const opts = {
 		kpi: join(homedir(), "vt/zach/producers/folder-sync/kpi_series.jsonl"),
 		gates: resolve(here, "../reports/status/gates.json"),
+		history: undefined,
+		competitors: resolve(here, "../bench/cost/competitors.json"),
 		out: resolve(here, "../site/dev"),
 		now: undefined,
 	};
@@ -49,7 +53,8 @@ export function main(argv) {
 		console.error(`--now is not a time: ${opts.now}`);
 		return 2;
 	}
-	const model = buildModel(loadSources({ kpi: opts.kpi, gates: opts.gates }), { now });
+	const history = opts.history ?? join(dirname(resolve(opts.gates)), "gates-history.jsonl");
+	const model = buildModel(loadSources({ kpi: opts.kpi, gates: opts.gates, history, competitors: opts.competitors }), { now });
 	const out = resolve(opts.out);
 	mkdirSync(out, { recursive: true });
 	writeFileSync(join(out, "index.html"), renderPage(model));

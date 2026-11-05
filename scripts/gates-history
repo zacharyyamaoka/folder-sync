@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+// The gates' history (docs/DEV-VIEW.md "History"): downloads each CI run's gates-json artifact with gh, adds this checkout's local
+// gates.json, and writes reports/status/gates-history.jsonl for the dev view and the README. The code is in gates-history.mjs.
+import("./gates-history.mjs").then((m) => m.main(process.argv.slice(2))).then((code) => { process.exitCode = code; });
