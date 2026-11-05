@@ -281,6 +281,22 @@ func TestScopedCredentialsKeepPeopleApart(t *testing.T) {
 		}
 	})
 
+	// A person's first run: the app asks for "your folders online" before anything exists under their root. rclone's own
+	// answer is a 403 on the root's parent, which the key may not list; the engine lists the root itself instead.
+	t.Run("projects of an account with no folders yet is an empty list, not an AccessDenied", func(t *testing.T) {
+		fresh := mk("C1", "users/aaac/")
+		var doc struct {
+			Root     string   `json:"root"`
+			Projects []string `json:"projects"`
+		}
+		if err := json.Unmarshal([]byte(w.must(fresh, "projects", "--json")), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if doc.Root != "users/aaac/" || doc.Projects == nil || len(doc.Projects) != 0 {
+			t.Errorf("projects %+v, want an empty list under users/aaac/", doc)
+		}
+	})
+
 	t.Run("B never sees A, and A never sees B", func(t *testing.T) {
 		if entries, _ := os.ReadDir(filepath.Join(b1.folder, "hosts")); len(entries) != 0 {
 			t.Fatalf("B1 holds peer copies: %v", entries)

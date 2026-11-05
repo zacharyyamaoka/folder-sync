@@ -11,7 +11,8 @@
 #   server-cloudflare  `server-cloudflare` (the accounts Worker; its step "seam 2" is the identity adapter check)
 #   ui                 `ui` (the sync element, in Chromium)
 #   desktop            `desktop` (desktop-smoke.yml, called from here on every push: the installers built and installed on
-#                      Linux, macOS and Windows) and desktop-release.yml (the release)
+#                      Linux, macOS and Windows), `desktop journey (...)` (the app's whole first-run journey on Linux and a real
+#                      Mac) and desktop-release.yml (the release)
 #   gates              `gates (linux)`: scripts/gates runs the proof of each gate G1..G12 (docs/GATES.md) and uploads gates.json
 # The three OS legs (docs/PLATFORMS.md): each `test (...)` job ends by writing gates-leg-<os> (its own G4 verdict) and g11-timer-<os>
 # (scripts/first-sync-timer: a clean HOME, install, sign in, add a folder, first file synced, 120 s or fewer). `gates (linux)`
@@ -211,6 +212,72 @@ jobs:
   desktop:
     name: desktop
     uses: ./.github/workflows/desktop-smoke.yml
+
+  # Part desktop, the journey (app/test/journey.mjs, G5's desktop proof): Zach's own test of the app, on a real Linux runner and a real
+  # Mac. Sign in (the device grant), the first-run picker, Create new folder, three files dropped in it and on the web Files page within
+  # 10 s; then a SECOND computer (its own HOME and host id) signs in, picks the folder under "Your folders online", downloads it, and an
+  # edit there reaches the first; then "Open existing folder" uploads a folder that already holds files. It runs the window's page and
+  # the web Files page in Chromium over the real engine and the local accounts stack; the Rust shell is played by app/test/shell.mjs,
+  # whose drift from core.rs is checked by app/test/shell.test.mjs (run here too). The macOS leg is the Mac half of the criterion.
+  # Not in `gates`' needs: it is its own red/green line (the gates job runs the same journey on Linux with --with-web).
+  desktop-journey:
+    name: desktop journey (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-latest
+          - name: macos
+            # WHY macos-latest: Apple silicon, the Mac a person has now
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: The pinned rclone (scripts/dev-tools)
+        run: scripts/dev-tools
+
+      # the local accounts stack starts wrangler dev, so its install scripts run (workerd)
+      - name: npm ci (accounts, the local stack)
+        run: npm ci --no-audit --no-fund
+        working-directory: accounts
+
+      - name: npm ci (app, Playwright)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: app
+
+      # --with-deps installs the system libraries Chromium needs on Ubuntu; macOS has them
+      - name: Chromium (the version @playwright/test pins)
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then npx playwright install --with-deps chromium; else npx playwright install chromium; fi
+        working-directory: app
+
+      - name: The shell stand-in still says what core.rs says
+        run: node --test app/test/shell.test.mjs
+
+      - name: The journey, with its screenshots
+        run: node app/test/journey.mjs --shots "$RUNNER_TEMP/journey-shots"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: desktop-journey-${{ matrix.name }}
+          path: ${{ runner.temp }}/journey-shots
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Part core, seam 1 (PARTS.md): the core works with no server at all. scripts/check-core-alone copies the checkout WITHOUT
   # accounts/, demo/ and app/ and runs the core there: the e2e on bucket-key login against the local R2 stand-in, the Go

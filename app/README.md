@@ -5,34 +5,42 @@ No terminal, no code to type. Tauri 2.11.5 wraps the folder-sync Go binary, whic
 
 ## What the person sees
 
-1. **Open the app.** It shows one button, *Sign in*. The tray icon is a folder with a hollow badge.
-2. **Sign in.** The system browser opens the device-approval page (`<server>/fs/device?user_code=…`). The person
-   signs in to the site as usual and clicks *Approve*. The app never sees a password, and nothing is typed into it.
-3. **Create folder.** One click on *Create ~/robotparts* (or *Choose a folder…*). The app makes the folder, runs
-   `folder-sync init`, and starts syncing.
+1. **Open the app.** It shows one button, *Sign in*, and under *Advanced* the server (https://vibetracks.dev). The tray icon is a
+   folder with a hollow badge.
+2. **Sign in.** The system browser opens the device-approval page (`<server>/fs/device?user_code=…`). The person signs in to the
+   site as usual and clicks *Approve*. The app never sees a password, and nothing is typed into it.
+3. **Choose a folder, the way Obsidian chooses a vault.** The window offers three things:
+   - *Create new folder*: a name and a place (default `~/folder-sync/<name>`, `Documents\folder-sync\<name>` on Windows).
+   - *Open existing folder…*: the native folder dialog. Whatever is in the folder uploads.
+   - *Your folders online*: the person's folders on the server. On a second computer (the Mac), *Download…* one into an empty place.
+   The project is the folder's name (or the online folder picked). Every folder the app makes or joins is a shared tree (PEP 0010):
+   the same files on every machine and on the web Files page.
 4. **It runs in the tray.** The tray shows *Synced*, *Syncing…*, *Offline*, *Over quota* (with the server's reason),
-   *Paused*, *Sync error* or *Signed out*. Its menu has *Open folder*, *Open robotparts.dev*, *Pause sync* / *Resume
-   sync*, *Change folder…*, *Show window*, *Start at login*, *Sign out* and *Quit*. Closing the window keeps sync
-   running.
+   *Paused*, *Sync error* or *Signed out*. Its menu has *Open folder*, *Open online* (the Files page of this folder), *Pause sync* /
+   *Resume sync*, *Change folder…* (the picker again), *Show window*, *Start at login*, *Sign out* and *Quit*. Closing the window
+   keeps sync running.
 
 ## How it works
 
 | Piece | Where | What it does |
 |---|---|---|
 | Sign-in | `src-tauri/src/core.rs` `sign_in` | runs `folder-sync login --json --print-token`. Opens the `device` event's link in the system browser. Moves the `signed_in` event's session from the pipe straight into the keychain |
-| Session | `src-tauri/src/vault.rs` | the stock `keyring` crate: Secret Service on Linux, Keychain on macOS, Credential Manager on Windows. One entry per server (`dev.folder-sync.desktop` / `session@<server>`), so a local or staging sign-in is never used against robotparts.dev. **The token is never written to disk in plain text.** There is no `account.json` |
+| Session | `src-tauri/src/vault.rs` | the stock `keyring` crate: Secret Service on Linux, Keychain on macOS, Credential Manager on Windows. One entry per server (`dev.folder-sync.desktop` / `session@<server>`), so a local or staging sign-in is never used against production. **The token is never written to disk in plain text.** There is no `account.json` |
 | Engine ↔ session | `FOLDER_SYNC_ACCOUNT_PROCESS` | the engine runs `folder-sync-desktop --account-process` whenever it needs the sign-in (keys, hub, logout). That reads the keychain and prints it; exit 3 means signed out |
-| Folder | `core.rs` `use_folder` | `mkdir -p`, then `folder-sync init --project robotparts --dir <folder>` |
+| Folders online | `core.rs` `refresh_online` | `folder-sync projects --json`: one LIST of the person's folders, for *Your folders online* |
+| Folder | `core.rs` `use_folder` | `mkdir -p`, `folder-sync init [--project P] --dir <folder>`, then `folder-sync share --dir <folder>`, and only then the running folder changes |
 | Sync | `core.rs` `start_engine` | `folder-sync sync --watch --events --dir <folder>`, so push is on (PEP 0005). Each round is a `folder-sync-event/1` JSON line, and the tray state comes from those lines. The engine is restarted if it dies and stopped with SIGTERM so it finishes its round |
+| Folder dialog | `src-tauri/src/main.rs` | the stock `tauri-plugin-dialog` (`open_existing`, `pick_location`) |
 | Tray | `src-tauri/src/tray.rs` | an icon per state (`icons/tray/*.png`, drawn by `scripts/make_icons.py`) and a menu rebuilt on every change |
 | Login autostart | `tauri-plugin-autostart` | turned on at the first sign-in; *Start at login* toggles it. On Linux it writes `~/.config/autostart/folder-sync.desktop` with `--hidden` (tray only) |
-| Window | `ui/` | one plain HTML page. Every button is the same `action` as a menu item |
+| Window | `ui/` | one plain HTML page. Every button is an `action` or one of the picker's commands (`create_folder`, `join_folder`, `open_existing`, `pick_location`, `set_server`) |
 
-Settings (folder, server, paused, the email shown in the menu) are in `~/.config/dev.folder-sync.desktop/settings.json`.
+Settings (folder, project, server if changed, paused, the email shown in the window) are in `~/.config/dev.folder-sync.desktop/settings.json`.
 The engine's log is in `~/.local/share/dev.folder-sync.desktop/engine.log`.
 
-The server is `$FOLDER_SYNC_SERVER` when set, else `https://robotparts.dev`. A dev or test run sets
-`FOLDER_SYNC_SERVER=http://127.0.0.1:4973` and can never reach production.
+The server is `$FOLDER_SYNC_SERVER` when set (a dev or test run; the *Server* field is then read-only), else the one chosen under
+*Advanced* while signed out, else `https://vibetracks.dev`. A dev or test run sets `FOLDER_SYNC_SERVER=http://127.0.0.1:4983` and
+can never reach production.
 
 ## Build (Linux)
 
@@ -43,9 +51,9 @@ app/scripts/build.sh
 It builds the Go engine into `src-tauri/binaries/folder-sync-<target triple>` (Tauri's `externalBin`), installs the
 pinned Tauri CLI (2.11.5) into `app/node_modules` on first use, then builds:
 
-- `src-tauri/target/release/bundle/deb/folder-sync_0.1.0_amd64.deb`: `/usr/bin/folder-sync-desktop`, `/usr/bin/folder-sync`,
+- `src-tauri/target/release/bundle/deb/folder-sync_0.2.0_amd64.deb`: `/usr/bin/folder-sync-desktop`, `/usr/bin/folder-sync`,
   the hicolor icons and `/usr/share/applications/folder-sync.desktop`
-- `src-tauri/target/release/bundle/appimage/folder-sync_0.1.0_amd64.AppImage`: one file that runs on any glibc Linux
+- `src-tauri/target/release/bundle/appimage/folder-sync_0.2.0_amd64.AppImage`: one file that runs on any glibc Linux
 
 `--no-bundle` builds only the binary. The build needs Rust ≥ 1.88, `libwebkit2gtk-4.1-dev`,
 `libayatana-appindicator3-dev`, `librsvg2-dev` and Go. All of these are already on Zach's machine.
@@ -53,29 +61,36 @@ pinned Tauri CLI (2.11.5) into `app/node_modules` on first use, then builds:
 ## Try it (local stack, this desktop)
 
 ```bash
-/home/bam/folder-sync/.claude/worktrees/lane-desktop/app/scripts/try_local.sh
+/home/bam/folder-sync/app/scripts/try_local.sh
 ```
 
-This starts robotparts' local accounts stack (ports 4970–4979) and runs the AppImage with its own HOME under
-`~/.cache/folder-sync-desktop-try`, so your real `~/robotparts`, autostart folder and `~/.folder-sync` are untouched.
-To sign in, enter `maker@example.com` on the device page, then the code shown at
-`http://127.0.0.1:4973/fs/dev/mailbox?email=maker@example.com`. Quit from the tray and the stack stops.
+This starts the local accounts stack (`accounts/scripts/dev.mjs`, ports 4981–4984) and runs the AppImage with its own HOME under
+`~/.cache/folder-sync-desktop-try`, so your real folders, autostart entry and `~/.folder-sync` are untouched. To sign in, enter
+`maker@example.com` on the device page, then the code shown at `http://127.0.0.1:4983/fs/dev/mailbox?email=maker@example.com`. Quit
+from the tray and the stack stops.
 
 ## Proof
 
+Three levels, each says what it proves:
+
 ```bash
-/home/bam/psu-atlas/.venv/bin/python app/scripts/proof_linux.py --app <the AppImage> --out <scratch dir>
+cargo test --manifest-path app/src-tauri/Cargo.toml --locked
+node --test app/test/shell.test.mjs
+node app/test/journey.mjs --shots /tmp/shots
+node app/scripts/real_window.mjs --out /tmp/real
 ```
 
-Everything runs invisibly: an Xvfb display, a private D-Bus session, a throwaway gnome-keyring and a scratch HOME. It
-also needs a tray host (`STALONETRAY=<path>`, Ubuntu's `stalonetray` unpacked with `apt-get download`) and robotparts'
-local accounts stack (`tools/accounts_demo.py` on robotparts `lane/fast-sync`, base 4970).
-
-The proof signs in through the real device page and the dev mailbox, then creates the folder. It drops heart files
-and times each one until the signed-in `/saved/` page shows its row. It walks the tray through every state,
-including a real over-quota answer from a small `QUOTA_BYTES` and a real offline caused by stopping the storage
-stand-in. It checks that no file under HOME holds the token, signs out, and checks that the server refuses the old
-token. Then it stops everything it started.
+- `cargo test`: the Rust helpers (project names, the Files-page address, settings) and that the page carries the ids the journey drives.
+- `app/test/journey.mjs` (also CI, `desktop journey (linux, macos)`, and G5's desktop proof): the window's page and the web Files page
+  in Chromium over the real engine and the local stack, on two computers. The Rust shell is played in Node (`app/test/shell.mjs`);
+  `shell.test.mjs` fails if its headlines, command names or engine calls drift from `core.rs` and `main.rs`.
+- `app/scripts/real_window.mjs`: the real binary. An Xvfb screen, a private D-Bus session, a throwaway gnome-keyring, a scratch HOME,
+  the local stack and a headed Chrome on the Files page. It signs in through the device grant, creates a folder by typing in the real
+  window, drops three files in and watches the Files page show them, downloads the folder on a second HOME, and relaunches in light
+  and dark. It writes the screenshots, a video and `real-window.json`. By hand: it needs the display tools and a built binary
+  (`app/scripts/build.sh --no-bundle`).
+- `app/scripts/proof_linux.py` is the older robotparts-stack walk of the tray's states (over quota, offline, signed out, token not on
+  disk). Its first-run steps predate the picker (they click *Create ~/robotparts*), so only its later steps still apply.
 
 ## macOS and Windows: what they need (not built)
 
@@ -91,7 +106,7 @@ cross-compiles (`GOOS=darwin|windows`). What is missing is per-OS packaging, sig
 - The tray: `TrayIconBuilder::icon_as_template(true)` with a monochrome template icon, so the menu bar tints it.
   Add `LSUIElement = true` in `Info.plist` if it should have no Dock icon.
 - Login autostart: the plugin's `MacosLauncher::LaunchAgent` is already chosen.
-- The folder default stays `~/robotparts`. Keychain access prompts once per binary signature, so a stable signing
+- The folder default is `~/folder-sync/<name>`. Keychain access prompts once per binary signature, so a stable signing
   identity matters, or every update re-prompts.
 - The engine's own `--install-service` launchd plist is not used by the app.
 
@@ -101,7 +116,7 @@ cross-compiles (`GOOS=darwin|windows`). What is missing is per-OS packaging, sig
 - Signing: an OV/EV code-signing certificate or Azure Trusted Signing (`bundle.windows.signCommand`). Unsigned,
   SmartScreen warns.
 - WebView2 is on every current Windows. Set `webviewInstallMode` to `downloadBootstrapper` for older ones.
-- The default folder is `Documents\robotparts` (`core::default_folder` already does this).
+- The default place is `Documents\folder-sync` (`core::default_parent` already does this).
 - **Stopping the engine:** today `stop_engine` kills it on Windows. It must start the engine in its own process group
   (`CREATE_NEW_PROCESS_GROUP`) and send `CTRL_BREAK_EVENT` first, so `--watch` finishes its manifest publish (PEP
   0006 §4). This is marked `TODO(windows)` in `core.rs`.
@@ -109,5 +124,5 @@ cross-compiles (`GOOS=darwin|windows`). What is missing is per-OS packaging, sig
 - Login autostart: the plugin writes the `HKCU\…\Run` key.
 
 **All three:** auto-update through `tauri-plugin-updater` with a signed `latest.json` (minisign key pair; ClaudeParty's
-rule of upload the artifact first and the manifest last). A download page on robotparts.dev. Both wait on where
+rule of upload the artifact first and the manifest last). A download page on vibetracks.dev. Both wait on where
 builds are hosted.

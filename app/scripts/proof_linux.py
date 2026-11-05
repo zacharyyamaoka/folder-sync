@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """The desktop app's first-run proof on Linux, headless (docs/peps/0006 §6.3).
 
+NOTE (2026-11-04): superseded for the first run by app/scripts/real_window.mjs (the folder picker replaced "Create ~/robotparts").
+Steps 4 and on (the tray's states, over quota, offline, the token not on disk) still describe what this script proves; its step 3
+clicks the old button.
+
     /home/bam/psu-atlas/.venv/bin/python app/scripts/proof_linux.py --app <AppImage or binary> --out <dir>
 
 What it does, all of it invisible (an Xvfb display, a private D-Bus session, a throwaway keyring, a scratch HOME):

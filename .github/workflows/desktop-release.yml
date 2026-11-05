@@ -1,4 +1,5 @@
-# The desktop app's installers (PEP 0006), unsigned for now: push a tag desktop-v<semver> (e.g. desktop-v0.1.0-rc1).
+# The desktop app's installers (PEP 0006), unsigned for now: push a tag desktop-v<semver> (e.g. desktop-v0.2.0 or desktop-v0.2.0-rc1).
+# Every release is a GitHub pre-release until the builds are signed and notarized (Zach, 2026-11-04: pre-release first).
 #   macOS   .dmg (universal: Apple silicon + Intel)        Windows  -setup.exe (NSIS, per user) + .msi
 #   Linux   .AppImage + .deb
 # Each job cross-compiles the Go engine for its target as Tauri's sidecar (app/scripts/build_engine.sh), then builds
@@ -160,7 +161,9 @@ jobs:
       - name: GitHub Release
         run: |
           set -euo pipefail
-          pre=""; case "$TAG" in *-*) pre="--prerelease" ;; esac
+          # WHY always --prerelease, not only for a -rc tag: the builds are unsigned (macOS and Windows warn on first open), so no
+          # release of them is the "latest" one a visitor to the releases page is sent to
+          pre="--prerelease"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" out/folder-sync-* out/SHA256SUMS --clobber
             gh release edit "$TAG" --notes-file out/NOTES.md $pre

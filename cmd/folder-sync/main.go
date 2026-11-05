@@ -1015,8 +1015,23 @@ func cmdProjects(args []string, out, errOut io.Writer) error {
 	runner := rclone.Runner{Bin: bin, Layout: l, Creds: c}
 	listed, err := runner.Run(context.Background(), "lsjson", "--dirs-only", "--no-mimetype", "--no-modtime",
 		rclone.Path(b, strings.TrimSuffix(c.Prefix, "/")))
+	names := []string{}
 	if listed, err = rclone.Listing(listed, err); err != nil {
-		return err
+		// WHY a second try with the S3 client's own delimited LIST: for an account root that holds nothing yet (a person's
+		// first run, which is when the desktop app asks), rclone checks the root's PARENT to decide "directory not found",
+		// and a prefix-scoped key may not list the parent: the first screen of a new account was an AccessDenied
+		// (2026-11-04, docs/peps/0006 "As built, Nov 4"). The client lists exactly the root, which the key may.
+		client := &s3.Client{Endpoint: c.Endpoint, Region: c.Region, AccessKeyID: c.AccessKeyID, SecretAccessKey: c.SecretAccessKey, SessionToken: c.SessionToken}
+		found, listErr := client.List(b, c.Prefix, "/")
+		if listErr != nil {
+			return err
+		}
+		for _, prefix := range found.Prefixes {
+			if name := strings.TrimSuffix(strings.TrimPrefix(prefix, c.Prefix), "/"); !strings.HasPrefix(name, "_") && config.ValidateProject(name) == nil {
+				names = append(names, name)
+			}
+		}
+		listed = nil
 	}
 	var dirs []struct{ Path string }
 	if len(listed) > 0 {
@@ -1024,7 +1039,6 @@ func cmdProjects(args []string, out, errOut io.Writer) error {
 			return fmt.Errorf("rclone lsjson: %w", err)
 		}
 	}
-	names := []string{}
 	for _, dir := range dirs {
 		if !strings.HasPrefix(dir.Path, "_") && config.ValidateProject(dir.Path) == nil {
 			names = append(names, dir.Path)
