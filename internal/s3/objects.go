@@ -30,7 +30,8 @@ var ErrNotFound = errors.New("no such object (404)")
 // manifest GET: a history copy that fails holds its path's upload for a round, and stores answer a busy moment with a
 // 500 or 503 that the next try gets through (the stand-in does, now and then, under eight copies at once). The manifest
 // GET is read again by its caller instead (syncer's getManifest), and only when the store answered and the answer broke:
-// do() also sends again a call that never reached the store, which would hold an offline round for every peer.
+// a store that cannot be reached is offline, which a round must report at once; do() sends a call again after a transport
+// error only when the store took the connection and hung up on a read (hungUpOnARead).
 var retryWaits = []time.Duration{100 * time.Millisecond, 400 * time.Millisecond}
 
 // tryAgain is a status by which the store says "send it again": a 5xx other than 501 Not Implemented, or 429.
@@ -55,6 +56,26 @@ func (e *StatusError) Error() string {
 // document 500 InternalError and 503 SlowDown as transient. Any other status is the store's answer.
 func (e *StatusError) TryAgain() bool { return tryAgain(e.Code) }
 
+// hungUpOnARead is a GET or HEAD the store took the connection for and closed before any answer (io.EOF, not a refused dial, so
+// an offline store still fails at once). WHY (gate G1, CI run 45750830647): the stand-in does this now and then under a
+// concurrent round, and Go's transport replays such a call only on a reused connection. A PUT, POST or DELETE is never sent
+// again here: one that got no answer may have been applied.
+func hungUpOnARead(req *http.Request, err error) bool {
+	return (req.Method == http.MethodGet || req.Method == http.MethodHead) && errors.Is(err, io.EOF)
+}
+
+// sendRead sends a GET or HEAD that handles its own status (the manifest GET, HEADs, the streamed downloads) and sends it again
+// only when the store hung up before any answer (hungUpOnARead); every answer, 5xx included, is the caller's to read.
+func sendRead(client *http.Client, req *http.Request) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := client.Do(req.Clone(req.Context()))
+		if err == nil || attempt == len(retryWaits) || !hungUpOnARead(req, err) {
+			return resp, err
+		}
+		time.Sleep(retryWaits[attempt])
+	}
+}
+
 func (c *Client) do(req *http.Request, payloadHash string) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
 		try := req.Clone(req.Context())
@@ -67,7 +88,7 @@ func (c *Client) do(req *http.Request, payloadHash string) (*http.Response, erro
 		}
 		SignWithToken(try, c.AccessKeyID, c.SecretAccessKey, c.SessionToken, c.Region, c.now(), payloadHash)
 		resp, err := c.httpClient().Do(try)
-		if attempt == len(retryWaits) || (err == nil && !tryAgain(resp.StatusCode)) {
+		if attempt == len(retryWaits) || (err == nil && !tryAgain(resp.StatusCode)) || (err != nil && !hungUpOnARead(try, err)) {
 			return resp, err
 		}
 		if err == nil {
@@ -304,7 +325,7 @@ func (c *Client) GetToFile(bucket, key, path string) error {
 		client = &http.Client{}
 	}
 	SignWithToken(req, c.AccessKeyID, c.SecretAccessKey, c.SessionToken, c.Region, c.now(), EmptySHA256)
-	resp, err := client.Do(req)
+	resp, err := sendRead(client, req)
 	if err != nil {
 		return err
 	}
@@ -342,7 +363,7 @@ func (c *Client) GetRangeToFile(bucket, key, path string, from, to int64, ifMatc
 		client = &http.Client{}
 	}
 	SignWithToken(req, c.AccessKeyID, c.SecretAccessKey, c.SessionToken, c.Region, c.now(), EmptySHA256)
-	resp, err := client.Do(req)
+	resp, err := sendRead(client, req)
 	if err != nil {
 		return err
 	}

@@ -176,6 +176,48 @@ func TestBusyAnswersAreSentAgain(t *testing.T) {
 	}
 }
 
+// TestAHangUpBeforeAnyAnswerIsSentAgainOnlyForAReadOnlyCall: a store that took the connection and closed it before a status line
+// (the client reads io.EOF) is sent the call again when it is a GET or HEAD, never a PUT or DELETE. WHY (gate G1, CI run
+// 45750830647): the stand-in does this now and then under a concurrent round, and Go's transport replays only on a reused
+// connection; a write that got no answer may have been applied, so only a read is safe to send again. Keep-alives are off so
+// every call is a fresh connection, as the failing one was.
+func TestAHangUpBeforeAnyAnswerIsSentAgainOnlyForAReadOnlyCall(t *testing.T) {
+	var calls, hangups int
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if hangups > 0 {
+			hangups--
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				conn.Close()
+			}
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		io.WriteString(w, "body")
+	}))
+	server.Config.SetKeepAlivesEnabled(false)
+	server.Start()
+	defer server.Close()
+	client := &Client{Endpoint: server.URL, Region: "auto", AccessKeyID: "key", SecretAccessKey: "secret"}
+
+	calls, hangups = 0, 1
+	if got, err := client.GetIfNoneMatch("bkt", "k", ""); err != nil || string(got.Body) != "body" || calls != 2 {
+		t.Fatalf("a GET hung up on once is sent again: %d calls, %v", calls, err)
+	}
+	calls, hangups = 0, 1
+	if _, found, err := client.Head("bkt", "k"); err != nil || !found || calls != 2 {
+		t.Fatalf("a HEAD hung up on once is sent again: %d calls, found %v, %v", calls, found, err)
+	}
+	calls, hangups = 0, 1000
+	if _, err := client.GetIfNoneMatch("bkt", "k", ""); !errors.Is(err, io.EOF) || calls != len(retryWaits)+1 {
+		t.Fatalf("a store that always hangs up is an EOF after %d calls: %d calls, %v", len(retryWaits)+1, calls, err)
+	}
+	calls, hangups = 0, 1
+	if _, err := client.Put("bkt", "k", []byte("record"), "", "", ""); err == nil || calls != 1 {
+		t.Fatalf("a PUT hung up on is not sent again (it may have been applied): %d calls, %v", calls, err)
+	}
+}
+
 // TestAGetAnswersItsStatusTyped: a GET's unexpected status is a *StatusError with the same text as before, and TryAgain tells the
 // store's "send it again" (5xx but 501, 429: what do() sends again) from its answer. WHY: the manifest read (syncer's getManifest)
 // reads again on exactly those, never on a 403.

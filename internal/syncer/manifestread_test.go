@@ -278,3 +278,40 @@ func TestAManifestReadTheStoreRefusedOrNeverGotIsReadOnce(t *testing.T) {
 		t.Fatalf("an offline read was read again (%s): offline must fail at once", took)
 	}
 }
+
+// A store that took the connection and hung up before any answer is read again. WHY (gate G1, CI run 45750830647 at eea5aa5:
+// "pull: Get \".../hosts/<peer>/manifest.json\": EOF" in a concurrent round): the stand-in, rclone serve s3, closes a fresh
+// connection now and then under several machines at once. Go's transport replays a GET only on a reused connection, so on a
+// fresh one the round failed. The store was reached (the connection was accepted), so this is a broken answer, not offline.
+// Keep-alives are off so every read is a fresh connection, as the failing one was: a reused one would hide the bug.
+func TestAManifestReadTheStoreHungUpOnIsReadAgain(t *testing.T) {
+	noPause(t)
+	body := manifest.Marshal(manifest.Manifest{Schema: manifest.Schema, Project: worldProject, HostID: readPeer, HostName: "bam-Air",
+		Seq: 1, GeneratedAt: manifest.FormatTime(time.Date(2026, 11, 26, 3, 50, 0, 0, time.UTC)), Files: []manifest.Entry{}})
+	var hangups atomic.Int32
+	hangups.Store(1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hangups.Add(-1) >= 0 {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				conn.Close() // no status line, no headers: the client reads EOF
+			}
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		w.Write(body)
+	}))
+	server.Config.SetKeepAlivesEnabled(false)
+	server.Start()
+	t.Cleanup(server.Close)
+	client := &s3.Client{Endpoint: server.URL, Region: "auto", AccessKeyID: "key", SecretAccessKey: "secret"}
+	_, m, err := getManifest(client, "bkt", peerManifestKey(), "")
+	if err != nil || m.Seq != 1 {
+		t.Fatalf("one hang-up before the answer must not fail the read: seq %d, %v", m.Seq, err)
+	}
+
+	hangups.Store(1000)
+	if _, _, err := getManifest(client, "bkt", peerManifestKey(), ""); err == nil || !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("a store that always hangs up is an error that says so, got %v", err)
+	}
+}

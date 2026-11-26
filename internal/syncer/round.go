@@ -119,14 +119,16 @@ func readManifest(objects store.Objects, bucket, key, etag string) (s3.GetResult
 
 // brokenRead reports a manifest read that reached the store and came back broken, which a later read gets through: a body that
 // ended before its Content-Length (the connection dropped part way: io.ErrUnexpectedEOF), a body that is not a whole manifest (a
-// JSON syntax error: 200 with part of the object), or the store's own "send it again" (s3.StatusError.TryAgain: 5xx but 501, 429).
+// JSON syntax error: 200 with part of the object), the store's own "send it again" (s3.StatusError.TryAgain: 5xx but 501, 429),
+// or a store that accepted the connection and hung up before any answer (io.EOF; Go's transport replays that only on a reused
+// connection, so on a fresh one it failed gate G1: CI run 45750830647, the stand-in under a concurrent round).
 // WHY nothing else: an answer the store meant (403, a manifest of the wrong schema or host) is not transient, and a store that
 // cannot be reached is offline, which a round must report at once (`sync --watch` shows it in seconds: rclone.FailFast), not
 // after a pause for every peer.
 func brokenRead(err error) bool {
 	var syntax *json.SyntaxError
 	var status *s3.StatusError
-	return errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &syntax) || (errors.As(err, &status) && status.TryAgain())
+	return errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) || errors.As(err, &syntax) || (errors.As(err, &status) && status.TryAgain())
 }
 
 // Filters writes the rclone filter file for this project's push and returns its path.

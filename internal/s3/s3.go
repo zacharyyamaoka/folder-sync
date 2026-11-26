@@ -178,7 +178,7 @@ func (c *Client) HeadBucket(bucket string) error {
 		return err
 	}
 	c.sign(req)
-	resp, err := c.httpClient().Do(req)
+	resp, err := sendRead(c.httpClient(), req)
 	if err != nil {
 		return err
 	}
@@ -209,7 +209,7 @@ func (c *Client) ListOne(bucket, prefix string) error {
 	query.Set("max-keys", "1")
 	req.URL.RawQuery = query.Encode()
 	c.sign(req)
-	resp, err := c.httpClient().Do(req)
+	resp, err := sendRead(c.httpClient(), req)
 	if err != nil {
 		return err
 	}
@@ -233,7 +233,7 @@ func (c *Client) Head(bucket, key string) (etag string, found bool, err error) {
 		return "", false, err
 	}
 	c.sign(req)
-	resp, err := c.httpClient().Do(req)
+	resp, err := sendRead(c.httpClient(), req)
 	if err != nil {
 		return "", false, err
 	}
@@ -266,7 +266,7 @@ func (c *Client) GetIfNoneMatch(bucket, key, etag string) (GetResult, error) {
 		req.Header.Set("If-None-Match", etag)
 	}
 	c.sign(req)
-	resp, err := c.httpClient().Do(req)
+	resp, err := sendRead(c.httpClient(), req)
 	if err != nil {
 		return GetResult{}, err
 	}
