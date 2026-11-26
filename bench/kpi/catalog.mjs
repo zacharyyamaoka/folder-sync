@@ -5,6 +5,12 @@
 const HOURLY = 3600;
 const BASE = { computed_from: "runs", scale: "linear", cadence_s: HOURLY, aggregate: null };
 const ENV = { lines_by: "env", line_values: ["test", "prod"] };
+// WHY per-KPI cadences (Vibe Tracks issue stale-producers-folder-sync, 2026-11-26): the idle KPIs are written by
+// run-all.mjs's slow stages on purpose (Zach, 2026-11-04: the 10-minute idle window runs twice a day), so declaring them
+// hourly made Vibe Tracks file a stale producer every cycle. Each must match its fastest writer in run-all.mjs's stages();
+// bench/kpi/cadence.test.mjs holds the two together.
+const IDLE_PROD = 6 * HOURLY; // idle_cpu_pct: idle-prod every 6 h (ops writes the test slice every 12 h)
+const OPS = 12 * HOURLY; // idle_ops_per_hour: ops only, every 12 h
 
 function legacy() {
 	const common = { unit: "ms", direction: "lower", facets: ["stack", "code_sha"], aggregate: null, computed_from: "runs", scale: "linear", cadence_s: 3600, lines_by: "stack", line_values: ["local", "prod"] };
@@ -41,8 +47,8 @@ function objectives() {
 			description: "O3. The provider bill above plus the Workers / Durable Object request overage, per person, for the profiles `reference` and `average` (from Zach's real account). Excludes the $5 Workers Paid fee, which is one deployment's, not a person's (labels.platform_base_usd). Target <= $0.50 at 10 GB.",
 			formula: "provider bill + Worker and Durable Object requests at list overage",
 		},
-		{ id: "idle_cpu_pct", title: "Idle CPU", level: 1, parent: null, unit: "% of one core", direction: "lower", facets: ["env"], ...BASE, ...ENV, description: "O3 idle. `sync --watch` on a synced, untouched folder for 10 minutes (env=test, the local stack), or the real daemons observed for 60 s (env=prod). Target < 0.1 %.", formula: "(utime + stime of the watcher and every child it reaped) / wall time" },
-		{ id: "idle_ops_per_hour", title: "Idle requests per hour", level: 1, parent: null, unit: "requests/hour", direction: "lower", facets: ["env", "kind"], ...BASE, ...ENV, description: "O3 idle. Storage and Worker requests per hour one idle machine costs (class A, class B and Worker requests summed; the split is in labels). Measured on the local stack: its R2 stand-in's log and wrangler's request log.", formula: "(class A + class B + Worker requests during the idle window) / window hours" },
+		{ id: "idle_cpu_pct", title: "Idle CPU", level: 1, parent: null, unit: "% of one core", direction: "lower", facets: ["env"], ...BASE, cadence_s: IDLE_PROD, ...ENV, description: "O3 idle. `sync --watch` on a synced, untouched folder for 10 minutes (env=test, the local stack), or the real daemons observed for 60 s (env=prod). Target < 0.1 %.", formula: "(utime + stime of the watcher and every child it reaped) / wall time" },
+		{ id: "idle_ops_per_hour", title: "Idle requests per hour", level: 1, parent: null, unit: "requests/hour", direction: "lower", facets: ["env", "kind"], ...BASE, cadence_s: OPS, ...ENV, description: "O3 idle. Storage and Worker requests per hour one idle machine costs (class A, class B and Worker requests summed; the split is in labels). Measured on the local stack: its R2 stand-in's log and wrangler's request log.", formula: "(class A + class B + Worker requests during the idle window) / window hours" },
 	];
 }
 
